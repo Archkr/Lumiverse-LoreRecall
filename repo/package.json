@@ -1,0 +1,16 @@
+{
+  "name": "lumiverse-lore-recall",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:backend": "bun build src/backend.ts --outfile dist/backend.js --target bun",
+    "build:frontend": "bun build src/frontend.ts --outfile dist/frontend.js --target browser",
+    "build": "bun run build:backend && bun run build:frontend",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "lumiverse-spindle-types": "0.3.6",
+    "typescript": "^5.7.3"
+  }
+}
