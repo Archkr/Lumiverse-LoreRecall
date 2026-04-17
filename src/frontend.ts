@@ -1,7 +1,7 @@
 import type { SpindleFrontendContext } from "lumiverse-spindle-types";
 import {
-  normalizeCharacterConfig,
   joinCommaList,
+  normalizeCharacterConfig,
   splitCommaList,
 } from "./shared";
 import type {
@@ -21,6 +21,10 @@ type OrderedEntry = ManagedBookEntryView & {
   breadcrumb: string;
 };
 
+type DrawerPreviewTab = "injected" | "nodes" | "query";
+type PillTone = "neutral" | "accent" | "good" | "warn";
+type HealthTone = "neutral" | "good" | "warn";
+
 function readChatId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Record<string, unknown>;
@@ -38,6 +42,14 @@ function sendToBackend(ctx: SpindleFrontendContext, message: FrontendToBackend):
   ctx.sendToBackend(message);
 }
 
+function openSettingsWorkspace(): void {
+  window.dispatchEvent(
+    new CustomEvent("spindle:open-settings", {
+      detail: { view: "extensions" },
+    }),
+  );
+}
+
 function createElement<K extends keyof HTMLElementTagNameMap>(
   tagName: K,
   className?: string,
@@ -47,6 +59,12 @@ function createElement<K extends keyof HTMLElementTagNameMap>(
   if (className) element.className = className;
   if (typeof textContent === "string") element.textContent = textContent;
   return element;
+}
+
+function truncateMiddle(value: string | null | undefined, lead = 10, tail = 8): string {
+  if (!value) return "No active chat";
+  if (value.length <= lead + tail + 3) return value;
+  return `${value.slice(0, lead)}...${value.slice(-tail)}`;
 }
 
 function orderEntries(entries: ManagedBookEntryView[]): OrderedEntry[] {
@@ -106,492 +124,35 @@ function orderEntries(entries: ManagedBookEntryView[]): OrderedEntry[] {
   return ordered;
 }
 
-function buildStatusPill(enabled: boolean): HTMLElement {
-  const pill = createElement("div", "lore-recall-status");
+function buildStatusChip(enabled: boolean): HTMLElement {
+  const chip = createElement("div", "lore-recall-status-chip");
   const dot = createElement("span", "lore-recall-status-dot");
   if (enabled) dot.classList.add("active");
-  pill.append(dot, document.createTextNode(enabled ? "Retrieval enabled" : "Retrieval disabled"));
-  return pill;
+  chip.append(dot, document.createTextNode(enabled ? "Retrieval on" : "Retrieval off"));
+  return chip;
 }
 
-function renderSettingsSurface(root: HTMLElement, state: FrontendState | null, ctx: SpindleFrontendContext): void {
-  root.replaceChildren();
-  const card = createElement("section", "lore-recall-root lore-recall-card");
-  const header = createElement("header", "lore-recall-card-header");
-  const titleWrap = createElement("div");
-  titleWrap.append(
-    createElement("h3", "", "Lore Recall"),
-    createElement(
-      "div",
-      "lore-recall-subtle",
-      "Per-character retrieval settings for managed world books. Raw entry content still lives in Lumiverse's normal world book editor.",
-    ),
-  );
-  header.append(titleWrap, buildStatusPill(!!state?.config?.enabled));
-  card.appendChild(header);
-
-  const body = createElement("div", "lore-recall-card-body lore-recall-grid");
-  card.appendChild(body);
-
-  if (!state?.activeCharacterId || !state.config) {
-    body.appendChild(createElement("div", "lore-recall-empty", "Open a character chat to configure Lore Recall."));
-    root.appendChild(card);
-    return;
-  }
-
-  const config = normalizeCharacterConfig(state.config);
-  const characterSummary = createElement("div", "lore-recall-note");
-  characterSummary.innerHTML = `<strong>${state.activeCharacterName ?? "Unknown character"}</strong><br><span class="lore-recall-subtle">Active chat: ${state.activeChatId ?? "none"}</span>`;
-  body.appendChild(characterSummary);
-
-  if (state.attachedManagedBookIds.length) {
-    const warning = createElement("div", "lore-recall-warning");
-    warning.textContent =
-      "One or more managed books are also attached directly to this character. Detach them if you want Lore Recall to be the only retrieval path.";
-    body.appendChild(warning);
-  }
-
-  const configGrid = createElement("div", "lore-recall-config-grid");
-
-  const enabledField = createElement("label", "lore-recall-field");
-  enabledField.appendChild(createElement("span", "lore-recall-label", "Enable"));
-  const enabledRow = createElement("div", "lore-recall-checkbox-row");
-  const enabledInput = createElement("input") as HTMLInputElement;
-  enabledInput.type = "checkbox";
-  enabledInput.checked = config.enabled;
-  enabledRow.append(enabledInput, createElement("span", "", "Inject retrieved context during generation"));
-  enabledField.appendChild(enabledRow);
-  configGrid.appendChild(enabledField);
-
-  const modeField = createElement("label", "lore-recall-field");
-  modeField.appendChild(createElement("span", "lore-recall-label", "Default Mode"));
-  const modeSelect = createElement("select", "lore-recall-select") as HTMLSelectElement;
-  modeSelect.innerHTML = `<option value="collapsed">Collapsed</option><option value="traversal">Traversal</option>`;
-  modeSelect.value = config.defaultMode;
-  modeField.appendChild(modeSelect);
-  configGrid.appendChild(modeField);
-
-  const maxResultsField = createElement("label", "lore-recall-field");
-  maxResultsField.appendChild(createElement("span", "lore-recall-label", "Max Results"));
-  const maxResultsInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-  maxResultsInput.type = "number";
-  maxResultsInput.min = "1";
-  maxResultsInput.max = "12";
-  maxResultsInput.value = String(config.maxResults);
-  maxResultsField.appendChild(maxResultsInput);
-  configGrid.appendChild(maxResultsField);
-
-  const maxDepthField = createElement("label", "lore-recall-field");
-  maxDepthField.appendChild(createElement("span", "lore-recall-label", "Traversal Depth"));
-  const maxDepthInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-  maxDepthInput.type = "number";
-  maxDepthInput.min = "1";
-  maxDepthInput.max = "6";
-  maxDepthInput.value = String(config.maxTraversalDepth);
-  maxDepthField.appendChild(maxDepthInput);
-  configGrid.appendChild(maxDepthField);
-
-  const tokenBudgetField = createElement("label", "lore-recall-field");
-  tokenBudgetField.appendChild(createElement("span", "lore-recall-label", "Token Budget"));
-  const tokenBudgetInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-  tokenBudgetInput.type = "number";
-  tokenBudgetInput.min = "200";
-  tokenBudgetInput.max = "4000";
-  tokenBudgetInput.value = String(config.tokenBudget);
-  tokenBudgetField.appendChild(tokenBudgetInput);
-  configGrid.appendChild(tokenBudgetField);
-
-  const rerankField = createElement("label", "lore-recall-field");
-  rerankField.appendChild(createElement("span", "lore-recall-label", "Collapsed Rerank"));
-  const rerankRow = createElement("div", "lore-recall-checkbox-row");
-  const rerankInput = createElement("input") as HTMLInputElement;
-  rerankInput.type = "checkbox";
-  rerankInput.checked = config.rerankEnabled;
-  rerankRow.append(rerankInput, createElement("span", "", "Use one quiet LLM rerank call"));
-  rerankField.appendChild(rerankRow);
-  configGrid.appendChild(rerankField);
-  body.appendChild(configGrid);
-
-  const booksWrap = createElement("div", "lore-recall-grid");
-  booksWrap.appendChild(createElement("div", "lore-recall-label", "Managed World Books"));
-  const booksList = createElement("div", "lore-recall-books");
-  const selectedBookIds = new Set(config.managedBookIds);
-
-  for (const book of state.allWorldBooks) {
-    const row = createElement("div", "lore-recall-book-row");
-    const main = createElement("div", "lore-recall-book-main");
-    const label = createElement("label");
-    const checkbox = createElement("input") as HTMLInputElement;
-    checkbox.type = "checkbox";
-    checkbox.value = book.id;
-    checkbox.checked = selectedBookIds.has(book.id);
-
-    const copy = createElement("span", "lore-recall-book-copy");
-    copy.append(
-      createElement("strong", "", book.name),
-      createElement("span", "lore-recall-subtle", book.description || "No description"),
-    );
-
-    label.append(checkbox, copy);
-    main.appendChild(label);
-    row.appendChild(main);
-
-    const badges = createElement("div", "lore-recall-book-badges");
-    if (state.attachedManagedBookIds.includes(book.id)) {
-      badges.appendChild(createElement("span", "lore-recall-badge warn", "Attached to character"));
-    }
-    if (selectedBookIds.has(book.id)) {
-      badges.appendChild(createElement("span", "lore-recall-badge good", "Managed"));
-    }
-    row.appendChild(badges);
-    booksList.appendChild(row);
-  }
-
-  if (!state.allWorldBooks.length) {
-    booksList.appendChild(createElement("div", "lore-recall-empty", "No world books were found for this user."));
-  }
-
-  booksWrap.appendChild(booksList);
-  body.appendChild(booksWrap);
-
-  const actions = createElement("div", "lore-recall-actions");
-  const refreshButton = createElement("button", "lore-recall-btn ghost", "Refresh");
-  refreshButton.type = "button";
-  refreshButton.addEventListener("click", () => {
-    sendToBackend(ctx, { type: "refresh", chatId: state.activeChatId });
-  });
-
-  const saveButton = createElement("button", "lore-recall-btn primary", "Save Character Settings");
-  saveButton.type = "button";
-  saveButton.addEventListener("click", () => {
-    const managedBookIds = Array.from(booksList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => checkbox.value);
-
-    const patch: Partial<CharacterRetrievalConfig> = {
-      enabled: enabledInput.checked,
-      managedBookIds,
-      defaultMode: modeSelect.value === "traversal" ? "traversal" : "collapsed",
-      maxResults: Number.parseInt(maxResultsInput.value, 10),
-      maxTraversalDepth: Number.parseInt(maxDepthInput.value, 10),
-      tokenBudget: Number.parseInt(tokenBudgetInput.value, 10),
-      rerankEnabled: rerankInput.checked,
-    };
-
-    sendToBackend(ctx, {
-      type: "save_character_config",
-      characterId: state.activeCharacterId!,
-      chatId: state.activeChatId,
-      patch,
-    });
-  });
-
-  actions.append(refreshButton, saveButton);
-  body.appendChild(actions);
-  root.appendChild(card);
+function createPill(label: string, tone: PillTone = "neutral"): HTMLElement {
+  return createElement("span", `lore-recall-pill lore-recall-pill-${tone}`, label);
 }
 
-function renderPreviewSection(root: HTMLElement, state: FrontendState, ctx: SpindleFrontendContext): void {
-  const card = createElement("section", "lore-recall-card");
-  const header = createElement("header", "lore-recall-card-header");
-  const titleWrap = createElement("div");
-  titleWrap.append(
-    createElement("h2", "", "Preview"),
-    createElement("div", "lore-recall-subtle", "Shows what Lore Recall would inject for the active chat."),
+function createStructuredEmpty(eyebrow: string, title: string, description: string): HTMLElement {
+  const card = createElement("div", "lore-recall-empty-state");
+  card.append(
+    createElement("div", "lore-recall-eyebrow", eyebrow),
+    createElement("h4", "lore-recall-empty-title", title),
+    createElement("p", "lore-recall-empty-copy", description),
   );
-  const actions = createElement("div", "lore-recall-actions");
-  const refreshButton = createElement("button", "lore-recall-btn", "Refresh Preview");
-  refreshButton.type = "button";
-  refreshButton.addEventListener("click", () => {
-    sendToBackend(ctx, { type: "refresh", chatId: state.activeChatId });
-  });
-  actions.appendChild(refreshButton);
-  header.append(titleWrap, actions);
-  card.appendChild(header);
-
-  const body = createElement("div", "lore-recall-card-body lore-recall-grid");
-  card.appendChild(body);
-
-  if (!state.preview) {
-    body.appendChild(
-      createElement(
-        "div",
-        "lore-recall-empty",
-        state.config?.enabled
-          ? "No retrieval preview is available yet. Try chatting or expanding the current managed books."
-          : "Enable retrieval for this character to see the live preview.",
-      ),
-    );
-    root.appendChild(card);
-    return;
-  }
-
-  const metaGrid = createElement("div", "lore-recall-preview-meta");
-  const queryCard = createElement("div", "lore-recall-grid");
-  queryCard.append(
-    createElement("div", "lore-recall-label", "Query Text"),
-    (() => {
-      const block = createElement("pre", "lore-recall-pre");
-      block.textContent = state.preview!.queryText;
-      return block;
-    })(),
-  );
-  metaGrid.appendChild(queryCard);
-
-  const injectCard = createElement("div", "lore-recall-grid");
-  injectCard.append(
-    createElement(
-      "div",
-      "lore-recall-label",
-      `${state.preview.mode === "traversal" ? "Traversal" : "Collapsed"} mode • ~${state.preview.estimatedTokens} tokens`,
-    ),
-    (() => {
-      const block = createElement("pre", "lore-recall-pre");
-      block.textContent = state.preview!.injectedText;
-      return block;
-    })(),
-  );
-  metaGrid.appendChild(injectCard);
-  body.appendChild(metaGrid);
-
-  if (state.preview.fallbackReason) {
-    const warning = createElement("div", "lore-recall-warning");
-    warning.textContent = state.preview.fallbackReason;
-    body.appendChild(warning);
-  }
-
-  const selectedWrap = createElement("div", "lore-recall-grid");
-  selectedWrap.appendChild(createElement("div", "lore-recall-label", "Selected Nodes"));
-  for (const node of state.preview.selectedNodes) {
-    const nodeCard = createElement("div", "lore-recall-preview-node");
-    nodeCard.append(
-      createElement("h4", "", node.label),
-      createElement("div", "lore-recall-subtle", `${node.worldBookName} • ${node.breadcrumb} • score ${node.score}`),
-    );
-    const reasons = createElement("div", "lore-recall-inline-badges");
-    for (const reason of node.reasons) {
-      reasons.appendChild(createElement("span", "lore-recall-badge", reason));
-    }
-    const preview = createElement("pre", "lore-recall-pre");
-    preview.textContent = node.previewText;
-    nodeCard.append(reasons, preview);
-    selectedWrap.appendChild(nodeCard);
-  }
-  body.appendChild(selectedWrap);
-  root.appendChild(card);
+  return card;
 }
 
-function renderManagedBookEditor(managedBook: ManagedBookView, state: FrontendState, ctx: SpindleFrontendContext): HTMLElement {
-  const orderedEntries = orderEntries(managedBook.entries);
-  const bookDetails = createElement("details", "lore-recall-tree-book") as HTMLDetailsElement;
-  bookDetails.open = true;
-
-  const summary = createElement("summary");
-  const titleWrap = createElement("div", "lore-recall-grid");
-  titleWrap.style.gap = "4px";
-  titleWrap.append(
-    createElement("strong", "", managedBook.name),
-    createElement("span", "lore-recall-subtle", managedBook.description || `${managedBook.entries.length} tracked entries`),
+function createHealthItem(tone: HealthTone, title: string, description: string): HTMLElement {
+  const item = createElement("div", `lore-recall-health-item lore-recall-health-${tone}`);
+  item.append(
+    createElement("div", "lore-recall-health-title", title),
+    createElement("div", "lore-recall-health-copy", description),
   );
-
-  const badges = createElement("div", "lore-recall-book-badges");
-  badges.appendChild(createElement("span", "lore-recall-badge", `${managedBook.entries.length} entries`));
-  if (managedBook.attachedToCharacter) {
-    badges.appendChild(createElement("span", "lore-recall-badge warn", "Attached to character"));
-  }
-  summary.append(titleWrap, badges);
-  bookDetails.appendChild(summary);
-
-  const body = createElement("div", "lore-recall-tree-book-body");
-  if (!orderedEntries.length) {
-    body.appendChild(createElement("div", "lore-recall-empty", "This book has no entries yet."));
-    bookDetails.appendChild(body);
-    return bookDetails;
-  }
-
-  for (const entry of orderedEntries) {
-    const card = createElement("article", "lore-recall-entry-card");
-    card.style.marginLeft = `${Math.min(entry.treeDepth, 4) * 18}px`;
-
-    const head = createElement("div", "lore-recall-entry-head");
-    const title = createElement("div", "lore-recall-entry-title");
-    title.append(
-      createElement("strong", "", entry.label),
-      createElement("div", "lore-recall-subtle", `${entry.comment || "No comment"} • keys: ${entry.key.join(", ") || "none"}`),
-    );
-
-    const metaBadges = createElement("div", "lore-recall-inline-badges");
-    metaBadges.appendChild(createElement("span", "lore-recall-badge", entry.breadcrumb));
-    if (entry.disabled) {
-      metaBadges.appendChild(createElement("span", "lore-recall-badge warn", "Disabled"));
-    }
-    head.append(title, metaBadges);
-    card.appendChild(head);
-
-    const fields = createElement("div", "lore-recall-entry-fields");
-
-    const labelField = createElement("label", "lore-recall-field");
-    labelField.append(createElement("span", "lore-recall-label", "Label"));
-    const labelInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-    labelInput.value = entry.label;
-    labelField.appendChild(labelInput);
-    fields.appendChild(labelField);
-
-    const parentField = createElement("label", "lore-recall-field");
-    parentField.append(createElement("span", "lore-recall-label", "Parent Node"));
-    const parentSelect = createElement("select", "lore-recall-select") as HTMLSelectElement;
-    parentSelect.appendChild(new Option("Root", ""));
-    for (const optionEntry of orderedEntries) {
-      if (optionEntry.entryId === entry.entryId) continue;
-      const option = new Option(`${"— ".repeat(optionEntry.treeDepth)}${optionEntry.label}`, optionEntry.nodeId);
-      if (entry.parentNodeId === optionEntry.nodeId) {
-        option.selected = true;
-      }
-      parentSelect.appendChild(option);
-    }
-    parentField.appendChild(parentSelect);
-    fields.appendChild(parentField);
-
-    const aliasField = createElement("label", "lore-recall-field span-2");
-    aliasField.append(createElement("span", "lore-recall-label", "Aliases"));
-    const aliasInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-    aliasInput.value = joinCommaList(entry.aliases);
-    aliasField.appendChild(aliasInput);
-    fields.appendChild(aliasField);
-
-    const tagField = createElement("label", "lore-recall-field");
-    tagField.append(createElement("span", "lore-recall-label", "Tags"));
-    const tagInput = createElement("input", "lore-recall-input") as HTMLInputElement;
-    tagInput.value = joinCommaList(entry.tags);
-    tagField.appendChild(tagInput);
-    fields.appendChild(tagField);
-
-    const summaryField = createElement("label", "lore-recall-field span-2");
-    summaryField.append(createElement("span", "lore-recall-label", "Summary"));
-    const summaryInput = createElement("textarea", "lore-recall-textarea") as HTMLTextAreaElement;
-    summaryInput.value = entry.summary;
-    summaryField.appendChild(summaryInput);
-    fields.appendChild(summaryField);
-
-    const collapsedField = createElement("label", "lore-recall-field span-2");
-    collapsedField.append(createElement("span", "lore-recall-label", "Collapsed Text"));
-    const collapsedInput = createElement("textarea", "lore-recall-textarea") as HTMLTextAreaElement;
-    collapsedInput.value = entry.collapsedText;
-    collapsedField.appendChild(collapsedInput);
-    fields.appendChild(collapsedField);
-
-    card.appendChild(fields);
-
-    const actions = createElement("div", "lore-recall-entry-actions");
-    const saveButton = createElement("button", "lore-recall-btn primary", "Save Node");
-    saveButton.type = "button";
-    saveButton.addEventListener("click", () => {
-      sendToBackend(ctx, {
-        type: "save_entry_meta",
-        entryId: entry.entryId,
-        chatId: state.activeChatId,
-        meta: {
-          nodeId: entry.nodeId,
-          parentNodeId: parentSelect.value || null,
-          label: labelInput.value.trim(),
-          aliases: splitCommaList(aliasInput.value),
-          summary: summaryInput.value.trim(),
-          childrenOrder: entry.childrenOrder,
-          collapsedText: collapsedInput.value.trim(),
-          tags: splitCommaList(tagInput.value),
-        },
-      });
-    });
-    actions.appendChild(saveButton);
-    card.appendChild(actions);
-    body.appendChild(card);
-  }
-
-  bookDetails.appendChild(body);
-  return bookDetails;
-}
-
-function renderTreeSection(root: HTMLElement, state: FrontendState, ctx: SpindleFrontendContext): void {
-  const card = createElement("section", "lore-recall-card");
-  const header = createElement("header", "lore-recall-card-header");
-  const titleWrap = createElement("div");
-  titleWrap.append(
-    createElement("h2", "", "Tree Editor"),
-    createElement(
-      "div",
-      "lore-recall-subtle",
-      "Edit labels, parents, aliases, summaries, and collapsed text here. Keep raw entry content edits in Lumiverse's world book editor.",
-    ),
-  );
-  header.append(titleWrap);
-  card.appendChild(header);
-
-  const body = createElement("div", "lore-recall-card-body lore-recall-grid");
-  card.appendChild(body);
-
-  if (!state.managedBooks.length) {
-    body.appendChild(createElement("div", "lore-recall-empty", "Choose one or more managed books in settings to edit their retrieval tree."));
-    root.appendChild(card);
-    return;
-  }
-
-  for (const managedBook of state.managedBooks) {
-    body.appendChild(renderManagedBookEditor(managedBook, state, ctx));
-  }
-
-  root.appendChild(card);
-}
-
-function renderDrawerSurface(root: HTMLElement, state: FrontendState | null, ctx: SpindleFrontendContext): void {
-  root.replaceChildren();
-  const wrapper = createElement("div", "lore-recall-root lore-recall-drawer");
-
-  if (!state) {
-    wrapper.appendChild(createElement("div", "lore-recall-empty", "Loading Lore Recall…"));
-    root.appendChild(wrapper);
-    return;
-  }
-
-  const summaryCard = createElement("section", "lore-recall-card");
-  const summaryHeader = createElement("header", "lore-recall-card-header");
-  const left = createElement("div");
-  left.append(
-    createElement("h2", "", state.activeCharacterName || "No active character"),
-    createElement(
-      "div",
-      "lore-recall-subtle",
-      state.activeChatId
-        ? `Active chat: ${state.activeChatId}`
-        : "Open a chat to preview managed retrieval and edit tree metadata.",
-    ),
-  );
-  summaryHeader.append(left, buildStatusPill(!!state.config?.enabled));
-  summaryCard.appendChild(summaryHeader);
-
-  const summaryBody = createElement("div", "lore-recall-card-body lore-recall-grid");
-  summaryBody.appendChild(
-    createElement(
-      "div",
-      "lore-recall-note",
-      "Lore Recall treats selected world books as managed retrieval books. Keep them unattached from the character if you want to avoid duplicate native world info activation.",
-    ),
-  );
-
-  if (state.config) {
-    const badges = createElement("div", "lore-recall-inline-badges");
-    badges.appendChild(createElement("span", "lore-recall-badge", `${state.config.defaultMode} mode`));
-    badges.appendChild(createElement("span", "lore-recall-badge", `${state.config.managedBookIds.length} managed books`));
-    badges.appendChild(createElement("span", "lore-recall-badge", `${state.config.maxResults} max results`));
-    badges.appendChild(createElement("span", "lore-recall-badge", `${state.config.tokenBudget} token budget`));
-    summaryBody.appendChild(badges);
-  }
-
-  summaryCard.appendChild(summaryBody);
-  wrapper.appendChild(summaryCard);
-
-  renderPreviewSection(wrapper, state, ctx);
-  renderTreeSection(wrapper, state, ctx);
-  root.appendChild(wrapper);
+  return item;
 }
 
 export function setup(ctx: SpindleFrontendContext) {
@@ -617,10 +178,793 @@ export function setup(ctx: SpindleFrontendContext) {
   let currentState: FrontendState | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
+  let activeDrawerTab: DrawerPreviewTab = "injected";
+  let selectedBookId: string | null = null;
+  const selectedNodeIds = new Map<string, string>();
+  const openBookIds = new Set<string>();
+
+  function getManagedBook(bookId: string | null): ManagedBookView | null {
+    if (!currentState || !bookId) return null;
+    return currentState.managedBooks.find((book) => book.id === bookId) ?? null;
+  }
+
+  function getOrderedEntries(book: ManagedBookView | null): OrderedEntry[] {
+    return book ? orderEntries(book.entries) : [];
+  }
+
+  function ensureViewState(): void {
+    const books = currentState?.managedBooks ?? [];
+    const validBookIds = new Set(books.map((book) => book.id));
+
+    for (const bookId of Array.from(openBookIds)) {
+      if (!validBookIds.has(bookId)) openBookIds.delete(bookId);
+    }
+
+    for (const bookId of Array.from(selectedNodeIds.keys())) {
+      if (!validBookIds.has(bookId)) selectedNodeIds.delete(bookId);
+    }
+
+    if (!books.length) {
+      selectedBookId = null;
+      openBookIds.clear();
+      return;
+    }
+
+    if (!selectedBookId || !validBookIds.has(selectedBookId)) {
+      selectedBookId = books[0].id;
+    }
+
+    if (!openBookIds.size) {
+      openBookIds.add(selectedBookId);
+    }
+
+    for (const book of books) {
+      const ordered = getOrderedEntries(book);
+      if (!ordered.length) {
+        selectedNodeIds.delete(book.id);
+        continue;
+      }
+
+      const selectedNodeId = selectedNodeIds.get(book.id);
+      if (!selectedNodeId || !ordered.some((entry) => entry.nodeId === selectedNodeId)) {
+        selectedNodeIds.set(book.id, ordered[0].nodeId);
+      }
+    }
+  }
+
+  function getSelectedBook(): ManagedBookView | null {
+    return getManagedBook(selectedBookId);
+  }
+
+  function getSelectedNode(book: ManagedBookView | null): OrderedEntry | null {
+    if (!book) return null;
+    const ordered = getOrderedEntries(book);
+    const selectedNodeId = selectedNodeIds.get(book.id);
+    return ordered.find((entry) => entry.nodeId === selectedNodeId) ?? ordered[0] ?? null;
+  }
+
+  function setSelectedBook(bookId: string): void {
+    selectedBookId = bookId;
+    openBookIds.add(bookId);
+    const book = getManagedBook(bookId);
+    const ordered = getOrderedEntries(book);
+    if (ordered.length && !selectedNodeIds.has(bookId)) {
+      selectedNodeIds.set(bookId, ordered[0].nodeId);
+    }
+    render();
+  }
+
+  function setSelectedNode(bookId: string, nodeId: string): void {
+    selectedBookId = bookId;
+    selectedNodeIds.set(bookId, nodeId);
+    openBookIds.add(bookId);
+    render();
+  }
+
+  function toggleBookGroup(bookId: string): void {
+    if (openBookIds.has(bookId)) {
+      openBookIds.delete(bookId);
+    } else {
+      openBookIds.add(bookId);
+    }
+    render();
+  }
+
+  function renderDrawerSurface(): void {
+    drawerRoot.replaceChildren();
+    const wrapper = createElement("div", "lore-recall-root lore-recall-drawer");
+
+    const hero = createElement("section", "lore-recall-panel lore-recall-hero");
+    const heroHeader = createElement("div", "lore-recall-hero-header");
+    const heroLead = createElement("div", "lore-recall-panel-lead");
+    heroLead.appendChild(createElement("div", "lore-recall-eyebrow", "Live retrieval"));
+    heroLead.appendChild(
+      createElement(
+        "h2",
+        "lore-recall-hero-title",
+        currentState?.activeCharacterName || "Lore Recall",
+      ),
+    );
+    heroLead.appendChild(
+      createElement(
+        "p",
+        "lore-recall-panel-copy",
+        currentState?.activeChatId
+          ? `Active chat ${truncateMiddle(currentState.activeChatId)}`
+          : "Open a character chat to inspect what Lore Recall is preparing.",
+      ),
+    );
+
+    const heroActions = createElement("div", "lore-recall-hero-actions");
+    if (currentState?.config) {
+      heroActions.appendChild(buildStatusChip(!!currentState.config.enabled));
+    } else {
+      heroActions.appendChild(createPill("Awaiting chat"));
+    }
+    const refreshButton = createElement("button", "lore-recall-btn lore-recall-btn-quiet", "Refresh");
+    refreshButton.type = "button";
+    refreshButton.addEventListener("click", () => {
+      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null });
+    });
+    heroActions.appendChild(refreshButton);
+    heroHeader.append(heroLead, heroActions);
+    hero.appendChild(heroHeader);
+
+    const metaRow = createElement("div", "lore-recall-meta-row");
+    if (currentState?.config) {
+      metaRow.append(
+        createPill(`${currentState.config.defaultMode} mode`, "accent"),
+        createPill(`${currentState.config.tokenBudget} token budget`),
+        createPill(`${currentState.config.managedBookIds.length} managed books`),
+        createPill(`${currentState.config.maxResults} max results`),
+      );
+    } else {
+      metaRow.append(
+        createPill("Preview first"),
+        createPill("Tree editing in workspace"),
+      );
+    }
+    hero.appendChild(metaRow);
+
+    const segmented = createElement("div", "lore-recall-segmented");
+    const tabs: Array<{ id: DrawerPreviewTab; label: string }> = [
+      { id: "injected", label: "Injected" },
+      { id: "nodes", label: "Nodes" },
+      { id: "query", label: "Query" },
+    ];
+    for (const tab of tabs) {
+      const tabButton = createElement("button", "lore-recall-segment");
+      tabButton.type = "button";
+      tabButton.textContent = tab.label;
+      if (tab.id === activeDrawerTab) tabButton.classList.add("active");
+      tabButton.addEventListener("click", () => {
+        activeDrawerTab = tab.id;
+        render();
+      });
+      segmented.appendChild(tabButton);
+    }
+    hero.appendChild(segmented);
+
+    const heroBody = createElement("div", "lore-recall-hero-body");
+    if (!currentState) {
+      heroBody.appendChild(
+        createStructuredEmpty("Loading", "Building the workspace", "Lore Recall is loading its current character and retrieval state."),
+      );
+    } else if (!currentState.activeCharacterId) {
+      heroBody.appendChild(
+        createStructuredEmpty("No active chat", "Preview will appear here", "Open a character chat to see injected context, candidate nodes, and the live query snapshot."),
+      );
+    } else if (!currentState.config?.enabled) {
+      heroBody.appendChild(
+        createStructuredEmpty("Retrieval is off", "Enable Lore Recall for this character", "Turn retrieval on in the workspace to start generating live preview content."),
+      );
+    } else if (!currentState.managedBooks.length) {
+      heroBody.appendChild(
+        createStructuredEmpty("No managed books", "Choose at least one retrieval source", "Add world books in the workspace before Lore Recall can build preview context."),
+      );
+    } else if (!currentState.preview) {
+      heroBody.appendChild(
+        createStructuredEmpty("Waiting for preview", "No retrieved context yet", "Send or edit messages in the current chat to refresh the retrieval preview."),
+      );
+    } else if (activeDrawerTab === "injected") {
+      const block = createElement("pre", "lore-recall-pre lore-recall-pre-injected");
+      block.textContent = currentState.preview.injectedText;
+      heroBody.appendChild(block);
+    } else if (activeDrawerTab === "nodes") {
+      const nodeGrid = createElement("div", "lore-recall-preview-grid");
+      for (const node of currentState.preview.selectedNodes) {
+        const card = createElement("article", "lore-recall-preview-node");
+        const heading = createElement("div", "lore-recall-preview-node-head");
+        const headingCopy = createElement("div", "lore-recall-preview-node-copy");
+        headingCopy.append(
+          createElement("h4", "lore-recall-preview-node-title", node.label),
+          createElement("div", "lore-recall-preview-node-meta", `${node.worldBookName} | ${node.breadcrumb}`),
+        );
+        const score = createPill(`Score ${node.score}`, "accent");
+        heading.append(headingCopy, score);
+        card.appendChild(heading);
+        const reasons = createElement("div", "lore-recall-inline-pills");
+        for (const reason of node.reasons) {
+          reasons.appendChild(createPill(reason));
+        }
+        const preview = createElement("pre", "lore-recall-pre lore-recall-pre-node");
+        preview.textContent = node.previewText;
+        card.append(reasons, preview);
+        nodeGrid.appendChild(card);
+      }
+      heroBody.appendChild(nodeGrid);
+    } else {
+      const queryPanel = createElement("div", "lore-recall-query-view");
+      queryPanel.appendChild(createPill(`${currentState.preview.estimatedTokens} estimated tokens`, "accent"));
+      const queryBlock = createElement("pre", "lore-recall-pre lore-recall-pre-query");
+      queryBlock.textContent = currentState.preview.queryText;
+      queryPanel.appendChild(queryBlock);
+      if (currentState.preview.fallbackReason) {
+        const fallback = createElement("div", "lore-recall-callout lore-recall-callout-warn");
+        fallback.append(
+          createElement("div", "lore-recall-callout-title", "Fallback used"),
+          createElement("div", "lore-recall-callout-copy", currentState.preview.fallbackReason),
+        );
+        queryPanel.appendChild(fallback);
+      }
+      heroBody.appendChild(queryPanel);
+    }
+    hero.appendChild(heroBody);
+    wrapper.appendChild(hero);
+
+    const band = createElement("section", "lore-recall-drawer-band");
+
+    const healthPanel = createElement("div", "lore-recall-panel lore-recall-band-panel");
+    const healthLead = createElement("div", "lore-recall-panel-lead");
+    healthLead.append(
+      createElement("div", "lore-recall-eyebrow", "Retrieval health"),
+      createElement("h3", "lore-recall-panel-title", "Current state"),
+      createElement("p", "lore-recall-panel-copy", "A quick read on whether the retrieval pipeline is ready, degraded, or waiting on setup."),
+    );
+    healthPanel.appendChild(healthLead);
+    const healthList = createElement("div", "lore-recall-health-list");
+    if (!currentState) {
+      healthList.appendChild(createHealthItem("neutral", "Loading", "Lore Recall is still loading state from the backend."));
+    } else if (!currentState.activeChatId) {
+      healthList.appendChild(createHealthItem("neutral", "No active chat", "Open a chat to activate live preview and retrieval monitoring."));
+    } else if (!currentState.config?.enabled) {
+      healthList.appendChild(createHealthItem("neutral", "Retrieval disabled", "Lore Recall is installed, but this character is not currently using retrieval."));
+    } else if (!currentState.config.managedBookIds.length) {
+      healthList.appendChild(createHealthItem("neutral", "No sources selected", "Choose one or more managed world books in the workspace."));
+    } else {
+      if (currentState.attachedManagedBookIds.length) {
+        healthList.appendChild(
+          createHealthItem(
+            "warn",
+            "Attached books detected",
+            "One or more managed books are still attached natively. That can duplicate world info activation.",
+          ),
+        );
+      }
+      if (currentState.preview?.fallbackReason) {
+        healthList.appendChild(createHealthItem("warn", "Preview fell back", currentState.preview.fallbackReason));
+      }
+      if (currentState.preview && !currentState.preview.fallbackReason) {
+        healthList.appendChild(
+          createHealthItem(
+            "good",
+            "Preview ready",
+            `${currentState.preview.selectedNodes.length} node(s) are ready for injection in the active chat.`,
+          ),
+        );
+      } else if (!currentState.preview) {
+        healthList.appendChild(
+          createHealthItem("neutral", "Waiting for retrieval", "Lore Recall is configured, but no preview payload is available yet."),
+        );
+      }
+    }
+    healthPanel.appendChild(healthList);
+    band.appendChild(healthPanel);
+
+    const booksPanel = createElement("div", "lore-recall-panel lore-recall-band-panel");
+    const booksLead = createElement("div", "lore-recall-panel-lead");
+    booksLead.append(
+      createElement("div", "lore-recall-eyebrow", "Managed books"),
+      createElement("h3", "lore-recall-panel-title", "Selected retrieval sources"),
+      createElement("p", "lore-recall-panel-copy", "A compact view of the books Lore Recall is currently using for this character."),
+    );
+    booksPanel.appendChild(booksLead);
+    const managedList = createElement("div", "lore-recall-managed-list");
+    if (!currentState?.managedBooks.length) {
+      managedList.appendChild(createStructuredEmpty("No books", "Nothing selected yet", "Choose managed books in the workspace to populate this overview."));
+    } else {
+      for (const book of currentState.managedBooks) {
+        const row = createElement("div", "lore-recall-managed-item");
+        const copy = createElement("div", "lore-recall-managed-copy");
+        copy.append(
+          createElement("div", "lore-recall-managed-title", book.name),
+          createElement("div", "lore-recall-managed-meta", book.description || `${book.entries.length} tracked entries`),
+        );
+        const pills = createElement("div", "lore-recall-inline-pills");
+        pills.appendChild(createPill(`${book.entries.length} entries`));
+        if (book.attachedToCharacter) {
+          pills.appendChild(createPill("Attached", "warn"));
+        }
+        row.append(copy, pills);
+        managedList.appendChild(row);
+      }
+    }
+    booksPanel.appendChild(managedList);
+    band.appendChild(booksPanel);
+
+    wrapper.appendChild(band);
+
+    const cta = createElement("section", "lore-recall-panel lore-recall-cta");
+    const ctaCopy = createElement("div", "lore-recall-panel-lead");
+    ctaCopy.append(
+      createElement("div", "lore-recall-eyebrow", "Workspace"),
+      createElement("h3", "lore-recall-panel-title", "Tune setup and edit the tree"),
+      createElement("p", "lore-recall-panel-copy", "Use the full workspace to manage retrieval settings, pick books, and edit node metadata without crowding the live drawer."),
+    );
+    const ctaButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Open workspace");
+    ctaButton.type = "button";
+    ctaButton.addEventListener("click", () => {
+      openSettingsWorkspace();
+    });
+    cta.append(ctaCopy, ctaButton);
+    wrapper.appendChild(cta);
+
+    drawerRoot.appendChild(wrapper);
+  }
+
+  function renderSettingsSurface(): void {
+    settingsRoot.replaceChildren();
+    const workspace = createElement("div", "lore-recall-root lore-recall-workspace");
+
+    const headerPanel = createElement("section", "lore-recall-panel lore-recall-workspace-header");
+    const headerTop = createElement("div", "lore-recall-workspace-top");
+    const lead = createElement("div", "lore-recall-panel-lead");
+    lead.append(
+      createElement("div", "lore-recall-eyebrow", "Lore Recall workspace"),
+      createElement(
+        "h2",
+        "lore-recall-workspace-title",
+        currentState?.activeCharacterName || "Prepare a character chat",
+      ),
+      createElement(
+        "p",
+        "lore-recall-panel-copy",
+        currentState?.activeChatId
+          ? `Active chat ${truncateMiddle(currentState.activeChatId)}`
+          : "Open a character chat, then come back here to configure retrieval and edit node metadata.",
+      ),
+    );
+    const headerActions = createElement("div", "lore-recall-workspace-actions");
+    if (currentState?.config) {
+      headerActions.appendChild(buildStatusChip(!!currentState.config.enabled));
+      headerActions.appendChild(createPill(`${currentState.config.managedBookIds.length} selected books`));
+    } else {
+      headerActions.appendChild(createPill("Awaiting chat"));
+    }
+    headerTop.append(lead, headerActions);
+    headerPanel.appendChild(headerTop);
+
+    const summaryRow = createElement("div", "lore-recall-meta-row");
+    if (currentState?.config) {
+      summaryRow.append(
+        createPill(`${currentState.config.defaultMode} mode`, "accent"),
+        createPill(`${currentState.config.maxResults} max results`),
+        createPill(`${currentState.config.maxTraversalDepth} traversal depth`),
+        createPill(`${currentState.config.tokenBudget} token budget`),
+      );
+    } else {
+      summaryRow.append(createPill("Retrieval workspace"), createPill("Tree editor"));
+    }
+    headerPanel.appendChild(summaryRow);
+
+    if (currentState?.attachedManagedBookIds.length) {
+      const warning = createElement("div", "lore-recall-callout lore-recall-callout-warn");
+      warning.append(
+        createElement("div", "lore-recall-callout-title", "Attached managed books"),
+        createElement(
+          "div",
+          "lore-recall-callout-copy",
+          "Detach managed books from the character if you want Lore Recall to be the only retrieval path.",
+        ),
+      );
+      headerPanel.appendChild(warning);
+    }
+    workspace.appendChild(headerPanel);
+
+    const setupPanel = createElement("section", "lore-recall-panel lore-recall-setup-panel");
+    const setupLead = createElement("div", "lore-recall-panel-lead");
+    setupLead.append(
+      createElement("div", "lore-recall-eyebrow", "Retrieval setup"),
+      createElement("h3", "lore-recall-panel-title", "Configure how retrieval behaves"),
+      createElement("p", "lore-recall-panel-copy", "Adjust the active character's retrieval mode, limits, and managed book selection."),
+    );
+    setupPanel.appendChild(setupLead);
+
+    if (!currentState?.activeCharacterId || !currentState.config) {
+      setupPanel.appendChild(
+        createStructuredEmpty("No active character", "Setup appears once a chat is active", "Lore Recall keeps settings per character, so the workspace needs an active character chat before it can save configuration."),
+      );
+      workspace.appendChild(setupPanel);
+      settingsRoot.appendChild(workspace);
+      return;
+    }
+
+    const config = normalizeCharacterConfig(currentState.config);
+    const setupGrid = createElement("div", "lore-recall-setup-grid");
+
+    const formCard = createElement("div", "lore-recall-form-card");
+    const formGrid = createElement("div", "lore-recall-form-grid");
+
+    const enabledField = createElement("label", "lore-recall-field lore-recall-field-span");
+    enabledField.appendChild(createElement("span", "lore-recall-label", "Enable retrieval"));
+    const enabledToggle = createElement("div", "lore-recall-toggle-row");
+    const enabledInput = createElement("input") as HTMLInputElement;
+    enabledInput.type = "checkbox";
+    enabledInput.checked = config.enabled;
+    enabledToggle.append(
+      enabledInput,
+      createElement("div", "lore-recall-toggle-copy", "Inject retrieved context during generation for this character."),
+    );
+    enabledField.appendChild(enabledToggle);
+    formGrid.appendChild(enabledField);
+
+    const modeField = createElement("label", "lore-recall-field");
+    modeField.appendChild(createElement("span", "lore-recall-label", "Default mode"));
+    const modeSelect = createElement("select", "lore-recall-select") as HTMLSelectElement;
+    modeSelect.innerHTML = `<option value="collapsed">Collapsed</option><option value="traversal">Traversal</option>`;
+    modeSelect.value = config.defaultMode;
+    modeField.appendChild(modeSelect);
+    formGrid.appendChild(modeField);
+
+    const resultField = createElement("label", "lore-recall-field");
+    resultField.appendChild(createElement("span", "lore-recall-label", "Max results"));
+    const resultInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+    resultInput.type = "number";
+    resultInput.min = "1";
+    resultInput.max = "12";
+    resultInput.value = String(config.maxResults);
+    resultField.appendChild(resultInput);
+    formGrid.appendChild(resultField);
+
+    const depthField = createElement("label", "lore-recall-field");
+    depthField.appendChild(createElement("span", "lore-recall-label", "Traversal depth"));
+    const depthInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+    depthInput.type = "number";
+    depthInput.min = "1";
+    depthInput.max = "6";
+    depthInput.value = String(config.maxTraversalDepth);
+    depthField.appendChild(depthInput);
+    formGrid.appendChild(depthField);
+
+    const budgetField = createElement("label", "lore-recall-field");
+    budgetField.appendChild(createElement("span", "lore-recall-label", "Token budget"));
+    const budgetInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+    budgetInput.type = "number";
+    budgetInput.min = "200";
+    budgetInput.max = "4000";
+    budgetInput.value = String(config.tokenBudget);
+    budgetField.appendChild(budgetInput);
+    formGrid.appendChild(budgetField);
+
+    const rerankField = createElement("label", "lore-recall-field lore-recall-field-span");
+    rerankField.appendChild(createElement("span", "lore-recall-label", "Collapsed rerank"));
+    const rerankToggle = createElement("div", "lore-recall-toggle-row");
+    const rerankInput = createElement("input") as HTMLInputElement;
+    rerankInput.type = "checkbox";
+    rerankInput.checked = config.rerankEnabled;
+    rerankToggle.append(
+      rerankInput,
+      createElement("div", "lore-recall-toggle-copy", "Use one quiet LLM rerank pass after deterministic matching."),
+    );
+    rerankField.appendChild(rerankToggle);
+    formGrid.appendChild(rerankField);
+
+    formCard.appendChild(formGrid);
+    setupGrid.appendChild(formCard);
+
+    const booksCard = createElement("div", "lore-recall-form-card");
+    booksCard.append(
+      createElement("div", "lore-recall-label", "Managed world books"),
+      createElement(
+        "p",
+        "lore-recall-panel-copy",
+        "Choose the world books Lore Recall should treat as dedicated retrieval sources for this character.",
+      ),
+    );
+    const booksList = createElement("div", "lore-recall-books-list");
+    const selectedBookIds = new Set(config.managedBookIds);
+
+    for (const book of currentState.allWorldBooks) {
+      const row = createElement("label", "lore-recall-selectable-book");
+      const checkbox = createElement("input") as HTMLInputElement;
+      checkbox.type = "checkbox";
+      checkbox.value = book.id;
+      checkbox.checked = selectedBookIds.has(book.id);
+
+      const copy = createElement("div", "lore-recall-selectable-copy");
+      copy.append(
+        createElement("div", "lore-recall-selectable-title", book.name),
+        createElement("div", "lore-recall-selectable-meta", book.description || "No description"),
+      );
+
+      const bookPills = createElement("div", "lore-recall-inline-pills");
+      if (currentState.attachedManagedBookIds.includes(book.id)) {
+        bookPills.appendChild(createPill("Attached", "warn"));
+      }
+      if (selectedBookIds.has(book.id)) {
+        bookPills.appendChild(createPill("Selected", "good"));
+      }
+
+      row.append(checkbox, copy, bookPills);
+      booksList.appendChild(row);
+    }
+
+    if (!currentState.allWorldBooks.length) {
+      booksList.appendChild(
+        createStructuredEmpty("No world books", "Nothing to select", "Create or import world books first, then return here to manage retrieval sources."),
+      );
+    }
+
+    booksCard.appendChild(booksList);
+    setupGrid.appendChild(booksCard);
+    setupPanel.appendChild(setupGrid);
+
+    const setupActions = createElement("div", "lore-recall-actions");
+    const refreshButton = createElement("button", "lore-recall-btn lore-recall-btn-quiet", "Refresh state");
+    refreshButton.type = "button";
+    refreshButton.addEventListener("click", () => {
+      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null });
+    });
+
+    const saveConfigButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Save character settings");
+    saveConfigButton.type = "button";
+    saveConfigButton.addEventListener("click", () => {
+      const state = currentState;
+      if (!state?.activeCharacterId) return;
+
+      const managedBookIds = Array.from(booksList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.value);
+
+      const patch: Partial<CharacterRetrievalConfig> = {
+        enabled: enabledInput.checked,
+        managedBookIds,
+        defaultMode: modeSelect.value === "traversal" ? "traversal" : "collapsed",
+        maxResults: Number.parseInt(resultInput.value, 10),
+        maxTraversalDepth: Number.parseInt(depthInput.value, 10),
+        tokenBudget: Number.parseInt(budgetInput.value, 10),
+        rerankEnabled: rerankInput.checked,
+      };
+
+      sendToBackend(ctx, {
+        type: "save_character_config",
+        characterId: state.activeCharacterId,
+        chatId: state.activeChatId,
+        patch,
+      });
+    });
+
+    setupActions.append(refreshButton, saveConfigButton);
+    setupPanel.appendChild(setupActions);
+    workspace.appendChild(setupPanel);
+
+    const treePanel = createElement("section", "lore-recall-panel lore-recall-tree-panel");
+    const treeLead = createElement("div", "lore-recall-panel-lead");
+    treeLead.append(
+      createElement("div", "lore-recall-eyebrow", "Tree workspace"),
+      createElement("h3", "lore-recall-panel-title", "Edit retrieval nodes one at a time"),
+      createElement("p", "lore-recall-panel-copy", "Select a managed book, then choose a node to update labels, aliases, hierarchy, and collapsed text."),
+    );
+    treePanel.appendChild(treeLead);
+
+    if (!currentState.managedBooks.length) {
+      treePanel.appendChild(
+        createStructuredEmpty("No managed books", "The editor opens once sources are selected", "Choose one or more managed books above, save the character settings, and the tree workspace will populate here."),
+      );
+      workspace.appendChild(treePanel);
+      settingsRoot.appendChild(workspace);
+      return;
+    }
+
+    const selectedBook = getSelectedBook();
+    const selectedNode = getSelectedNode(selectedBook);
+    const treeShell = createElement("div", "lore-recall-tree-shell");
+    const treeRail = createElement("div", "lore-recall-tree-rail");
+
+    for (const book of currentState.managedBooks) {
+      const orderedEntries = getOrderedEntries(book);
+      const group = createElement("section", "lore-recall-book-group");
+      const header = createElement("div", "lore-recall-book-group-header");
+      const selectButton = createElement("button", "lore-recall-book-select");
+      selectButton.type = "button";
+      if (selectedBookId === book.id) selectButton.classList.add("active");
+      selectButton.addEventListener("click", () => {
+        setSelectedBook(book.id);
+      });
+
+      const selectCopy = createElement("div", "lore-recall-book-select-copy");
+      selectCopy.append(
+        createElement("div", "lore-recall-book-select-title", book.name),
+        createElement("div", "lore-recall-book-select-meta", `${orderedEntries.length} node(s)`),
+      );
+      const selectPills = createElement("div", "lore-recall-inline-pills");
+      if (book.attachedToCharacter) {
+        selectPills.appendChild(createPill("Attached", "warn"));
+      }
+      selectButton.append(selectCopy, selectPills);
+
+      const toggleButton = createElement("button", "lore-recall-book-toggle", openBookIds.has(book.id) ? "Hide" : "Show");
+      toggleButton.type = "button";
+      toggleButton.addEventListener("click", () => {
+        toggleBookGroup(book.id);
+      });
+      header.append(selectButton, toggleButton);
+      group.appendChild(header);
+
+      if (openBookIds.has(book.id)) {
+        const nodeList = createElement("div", "lore-recall-node-list");
+        if (!orderedEntries.length) {
+          nodeList.appendChild(
+            createStructuredEmpty("No nodes", "This book is empty", "Add entries in the Lumiverse world book editor, then refresh the workspace."),
+          );
+        } else {
+          for (const entry of orderedEntries) {
+            const nodeButton = createElement("button", "lore-recall-node-button");
+            nodeButton.type = "button";
+            if (selectedNodeIds.get(book.id) === entry.nodeId) nodeButton.classList.add("active");
+            nodeButton.addEventListener("click", () => {
+              setSelectedNode(book.id, entry.nodeId);
+            });
+
+            const nodeCopy = createElement("div", "lore-recall-node-copy");
+            nodeCopy.style.setProperty("--lore-recall-node-depth", String(Math.min(entry.treeDepth, 4)));
+            nodeCopy.append(
+              createElement("div", "lore-recall-node-label", entry.label),
+              createElement("div", "lore-recall-node-breadcrumb", entry.breadcrumb),
+            );
+
+            const nodeMarkers = createElement("div", "lore-recall-inline-pills");
+            if (entry.disabled) {
+              nodeMarkers.appendChild(createPill("Disabled", "warn"));
+            }
+            if (!entry.parentNodeId) {
+              nodeMarkers.appendChild(createPill("Root"));
+            }
+
+            nodeButton.append(nodeCopy, nodeMarkers);
+            nodeList.appendChild(nodeButton);
+          }
+        }
+        group.appendChild(nodeList);
+      }
+
+      treeRail.appendChild(group);
+    }
+
+    const detailPanel = createElement("div", "lore-recall-editor-panel");
+    if (!selectedBook || !selectedNode) {
+      detailPanel.appendChild(
+        createStructuredEmpty("Select a node", "Choose something from the left rail", "Lore Recall edits one node at a time so the workspace stays readable."),
+      );
+    } else {
+      const editorHeader = createElement("div", "lore-recall-editor-header");
+      const editorLead = createElement("div", "lore-recall-panel-lead");
+      editorLead.append(
+        createElement("div", "lore-recall-eyebrow", selectedBook.name),
+        createElement("h3", "lore-recall-panel-title", selectedNode.label),
+        createElement("p", "lore-recall-panel-copy", selectedNode.breadcrumb),
+      );
+      const editorPills = createElement("div", "lore-recall-inline-pills");
+      editorPills.append(createPill(`Entry ${selectedNode.entryId}`));
+      if (selectedNode.disabled) {
+        editorPills.append(createPill("Disabled", "warn"));
+      }
+      editorHeader.append(editorLead, editorPills);
+      detailPanel.appendChild(editorHeader);
+
+      const sourceMeta = createElement("div", "lore-recall-source-meta");
+      const commentBlock = createElement("div", "lore-recall-source-block");
+      commentBlock.append(
+        createElement("div", "lore-recall-label", "Comment"),
+        createElement("div", "lore-recall-source-copy", selectedNode.comment || "No comment"),
+      );
+      const keyBlock = createElement("div", "lore-recall-source-block");
+      keyBlock.append(
+        createElement("div", "lore-recall-label", "Keys"),
+        createElement("div", "lore-recall-source-copy", selectedNode.key.join(", ") || "No keys"),
+      );
+      sourceMeta.append(commentBlock, keyBlock);
+      detailPanel.appendChild(sourceMeta);
+
+      const form = createElement("div", "lore-recall-editor-grid");
+
+      const labelField = createElement("label", "lore-recall-field");
+      labelField.appendChild(createElement("span", "lore-recall-label", "Label"));
+      const labelInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+      labelInput.value = selectedNode.label;
+      labelField.appendChild(labelInput);
+      form.appendChild(labelField);
+
+      const parentField = createElement("label", "lore-recall-field");
+      parentField.appendChild(createElement("span", "lore-recall-label", "Parent node"));
+      const parentSelect = createElement("select", "lore-recall-select") as HTMLSelectElement;
+      parentSelect.appendChild(new Option("Root", ""));
+      for (const optionEntry of getOrderedEntries(selectedBook)) {
+        if (optionEntry.entryId === selectedNode.entryId) continue;
+        const optionLabel = `${"> ".repeat(optionEntry.treeDepth)}${optionEntry.label}`;
+        const option = new Option(optionLabel, optionEntry.nodeId);
+        if (selectedNode.parentNodeId === optionEntry.nodeId) {
+          option.selected = true;
+        }
+        parentSelect.appendChild(option);
+      }
+      parentField.appendChild(parentSelect);
+      form.appendChild(parentField);
+
+      const aliasField = createElement("label", "lore-recall-field lore-recall-field-span");
+      aliasField.appendChild(createElement("span", "lore-recall-label", "Aliases"));
+      const aliasInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+      aliasInput.value = joinCommaList(selectedNode.aliases);
+      aliasField.appendChild(aliasInput);
+      form.appendChild(aliasField);
+
+      const tagField = createElement("label", "lore-recall-field lore-recall-field-span");
+      tagField.appendChild(createElement("span", "lore-recall-label", "Tags"));
+      const tagInput = createElement("input", "lore-recall-input") as HTMLInputElement;
+      tagInput.value = joinCommaList(selectedNode.tags);
+      tagField.appendChild(tagInput);
+      form.appendChild(tagField);
+
+      const summaryField = createElement("label", "lore-recall-field lore-recall-field-span");
+      summaryField.appendChild(createElement("span", "lore-recall-label", "Summary"));
+      const summaryInput = createElement("textarea", "lore-recall-textarea") as HTMLTextAreaElement;
+      summaryInput.value = selectedNode.summary;
+      summaryField.appendChild(summaryInput);
+      form.appendChild(summaryField);
+
+      const collapsedField = createElement("label", "lore-recall-field lore-recall-field-span");
+      collapsedField.appendChild(createElement("span", "lore-recall-label", "Collapsed text"));
+      const collapsedInput = createElement("textarea", "lore-recall-textarea lore-recall-textarea-tall") as HTMLTextAreaElement;
+      collapsedInput.value = selectedNode.collapsedText;
+      collapsedField.appendChild(collapsedInput);
+      form.appendChild(collapsedField);
+
+      detailPanel.appendChild(form);
+
+      const stickyActions = createElement("div", "lore-recall-editor-actions");
+      const saveNodeButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Save node");
+      saveNodeButton.type = "button";
+      saveNodeButton.addEventListener("click", () => {
+        sendToBackend(ctx, {
+          type: "save_entry_meta",
+          entryId: selectedNode.entryId,
+          chatId: currentState?.activeChatId ?? null,
+          meta: {
+            nodeId: selectedNode.nodeId,
+            parentNodeId: parentSelect.value || null,
+            label: labelInput.value.trim(),
+            aliases: splitCommaList(aliasInput.value),
+            summary: summaryInput.value.trim(),
+            childrenOrder: selectedNode.childrenOrder,
+            collapsedText: collapsedInput.value.trim(),
+            tags: splitCommaList(tagInput.value),
+          },
+        });
+      });
+      stickyActions.appendChild(saveNodeButton);
+      detailPanel.appendChild(stickyActions);
+    }
+
+    treeShell.append(treeRail, detailPanel);
+    treePanel.appendChild(treeShell);
+    workspace.appendChild(treePanel);
+    settingsRoot.appendChild(workspace);
+  }
 
   function render(): void {
-    renderSettingsSurface(settingsRoot, currentState, ctx);
-    renderDrawerSurface(drawerRoot, currentState, ctx);
+    ensureViewState();
+    renderSettingsSurface();
+    renderDrawerSurface();
   }
 
   function scheduleRefresh(chatId?: string | null): void {
