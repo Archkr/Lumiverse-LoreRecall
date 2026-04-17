@@ -1,20 +1,38 @@
 // src/shared.ts
-var DEFAULT_MAX_RESULTS = 6;
-var DEFAULT_MAX_TRAVERSAL_DEPTH = 3;
-var DEFAULT_TOKEN_BUDGET = 900;
+var DEFAULT_GLOBAL_SETTINGS = {
+  enabled: true,
+  autoDetectPattern: "*recall*",
+  controllerConnectionId: null,
+  controllerTemperature: 0.2,
+  controllerMaxTokens: 8192,
+  buildDetail: "lite",
+  treeGranularity: 0,
+  chunkTokens: 30000,
+  dedupMode: "none"
+};
 var DEFAULT_CHARACTER_CONFIG = {
   enabled: false,
   managedBookIds: [],
-  defaultMode: "collapsed",
-  maxResults: DEFAULT_MAX_RESULTS,
-  maxTraversalDepth: DEFAULT_MAX_TRAVERSAL_DEPTH,
-  tokenBudget: DEFAULT_TOKEN_BUDGET,
-  rerankEnabled: false
+  searchMode: "collapsed",
+  collapsedDepth: 2,
+  maxResults: 6,
+  maxTraversalDepth: 3,
+  traversalStepLimit: 5,
+  tokenBudget: 900,
+  rerankEnabled: false,
+  selectiveRetrieval: true,
+  multiBookMode: "unified",
+  contextMessages: 10
 };
 function clampInt(value, min, max) {
   if (!Number.isFinite(value))
     return min;
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+function clampFloat(value, min, max) {
+  if (!Number.isFinite(value))
+    return min;
+  return Math.min(max, Math.max(min, value));
 }
 function uniqueStrings(values) {
   const seen = new Set;
@@ -37,674 +55,48 @@ function splitCommaList(value) {
 function joinCommaList(values) {
   return values.join(", ");
 }
+function normalizeGlobalSettings(value) {
+  const next = value ?? {};
+  return {
+    enabled: next.enabled !== false,
+    autoDetectPattern: typeof next.autoDetectPattern === "string" && next.autoDetectPattern.trim() ? next.autoDetectPattern.trim() : DEFAULT_GLOBAL_SETTINGS.autoDetectPattern,
+    controllerConnectionId: typeof next.controllerConnectionId === "string" && next.controllerConnectionId.trim() ? next.controllerConnectionId.trim() : null,
+    controllerTemperature: clampFloat(typeof next.controllerTemperature === "number" ? next.controllerTemperature : DEFAULT_GLOBAL_SETTINGS.controllerTemperature, 0, 2),
+    controllerMaxTokens: clampInt(typeof next.controllerMaxTokens === "number" ? next.controllerMaxTokens : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens, 256, 32768),
+    buildDetail: next.buildDetail === "full" ? "full" : "lite",
+    treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
+    chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
+    dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none"
+  };
+}
 function normalizeCharacterConfig(value) {
   const next = value ?? {};
+  const searchMode = next.searchMode === "traversal" || next.defaultMode === "traversal" ? "traversal" : "collapsed";
   return {
     enabled: !!next.enabled,
     managedBookIds: uniqueStrings(Array.isArray(next.managedBookIds) ? next.managedBookIds : []),
-    defaultMode: next.defaultMode === "traversal" ? "traversal" : "collapsed",
-    maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 12),
-    maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 6),
-    tokenBudget: clampInt(typeof next.tokenBudget === "number" ? next.tokenBudget : DEFAULT_CHARACTER_CONFIG.tokenBudget, 200, 4000),
-    rerankEnabled: !!next.rerankEnabled
+    searchMode,
+    collapsedDepth: clampInt(typeof next.collapsedDepth === "number" ? next.collapsedDepth : DEFAULT_CHARACTER_CONFIG.collapsedDepth, 1, 6),
+    maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 16),
+    maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 8),
+    traversalStepLimit: clampInt(typeof next.traversalStepLimit === "number" ? next.traversalStepLimit : DEFAULT_CHARACTER_CONFIG.traversalStepLimit, 1, 12),
+    tokenBudget: clampInt(typeof next.tokenBudget === "number" ? next.tokenBudget : DEFAULT_CHARACTER_CONFIG.tokenBudget, 200, 8000),
+    rerankEnabled: !!next.rerankEnabled,
+    selectiveRetrieval: next.selectiveRetrieval !== false,
+    multiBookMode: next.multiBookMode === "per_book" ? "per_book" : "unified",
+    contextMessages: clampInt(typeof next.contextMessages === "number" ? next.contextMessages : DEFAULT_CHARACTER_CONFIG.contextMessages, 2, 60)
+  };
+}
+function normalizeBookConfig(value) {
+  const next = value ?? {};
+  return {
+    enabled: next.enabled !== false,
+    description: typeof next.description === "string" ? next.description.trim() : "",
+    permission: next.permission === "read_only" || next.permission === "write_only" ? next.permission : "read_write"
   };
 }
 
-// src/ui/styles.ts
-var LORE_RECALL_CSS = `
-.lore-recall-root {
-  --lore-shell: color-mix(in srgb, var(--lumiverse-bg-elevated) 86%, #0f0a08 14%);
-  --lore-shell-strong: color-mix(in srgb, var(--lumiverse-bg-elevated) 70%, #1a0f0a 30%);
-  --lore-panel: color-mix(in srgb, var(--lumiverse-bg-elevated) 78%, #140d09 22%);
-  --lore-panel-soft: color-mix(in srgb, var(--lumiverse-bg-elevated) 88%, #22120d 12%);
-  --lore-ink: color-mix(in srgb, var(--lumiverse-text) 92%, #fff1df 8%);
-  --lore-muted: color-mix(in srgb, var(--lumiverse-text-dim) 86%, #f0c39a 14%);
-  --lore-border: color-mix(in srgb, var(--lumiverse-border) 62%, #73432d 38%);
-  --lore-border-strong: color-mix(in srgb, var(--lumiverse-border) 35%, #9f5f35 65%);
-  --lore-amber: #d58b43;
-  --lore-amber-soft: color-mix(in srgb, #d58b43 18%, transparent);
-  --lore-crimson: #ad4b42;
-  --lore-crimson-soft: color-mix(in srgb, #ad4b42 18%, transparent);
-  --lore-success: color-mix(in srgb, var(--lumiverse-success) 78%, #7fc990 22%);
-  --lore-warning: color-mix(in srgb, var(--lumiverse-warning) 86%, #d79651 14%);
-  --lore-shadow: 0 18px 42px color-mix(in srgb, black 24%, transparent);
-  color: var(--lore-ink);
-  font: 14px/1.52 "IBM Plex Sans", "Aptos", "Segoe UI", sans-serif;
-}
-
-.lore-recall-drawer,
-.lore-recall-settings,
-.lore-recall-modal,
-.lore-recall-settings-grid,
-.lore-recall-retrieval-body,
-.lore-recall-source-list,
-.lore-recall-snapshot-grid,
-.lore-recall-node-preview-list,
-.lore-recall-picker-list,
-.lore-recall-book-groups,
-.lore-recall-book-tree,
-.lore-recall-editor-form,
-.lore-recall-editor-meta {
-  display: grid;
-  gap: 14px;
-}
-
-.lore-recall-drawer {
-  padding: 14px 14px 24px;
-}
-
-.lore-recall-settings {
-  padding: 8px 0 28px;
-}
-
-.lore-recall-modal {
-  min-height: 560px;
-}
-
-.lore-recall-shell {
-  position: relative;
-  padding: 16px;
-  border: 1px solid var(--lore-border);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 72px),
-    linear-gradient(135deg, color-mix(in srgb, var(--lore-amber-soft) 6%, transparent), transparent 58%),
-    var(--lore-panel);
-  box-shadow: var(--lore-shadow);
-  overflow: hidden;
-}
-
-.lore-recall-summary {
-  background:
-    radial-gradient(circle at top right, color-mix(in srgb, var(--lore-crimson-soft) 32%, transparent), transparent 42%),
-    linear-gradient(135deg, color-mix(in srgb, var(--lore-amber-soft) 22%, transparent), transparent 52%),
-    linear-gradient(180deg, color-mix(in srgb, white 5%, transparent), transparent 84px),
-    var(--lore-shell-strong);
-  border-color: var(--lore-border-strong);
-}
-
-.lore-recall-summary::before,
-.lore-recall-settings-header::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto auto 0;
-  width: 100%;
-  height: 2px;
-  background: linear-gradient(90deg, var(--lore-amber), color-mix(in srgb, var(--lore-crimson) 82%, var(--lore-amber) 18%));
-  opacity: 0.88;
-}
-
-.lore-recall-summary-head,
-.lore-recall-settings-top,
-.lore-recall-node-preview-head,
-.lore-recall-editor-header,
-.lore-recall-book-header,
-.lore-recall-modal-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
-}
-
-.lore-recall-summary-copy,
-.lore-recall-section-head,
-.lore-recall-modal-toolbar-copy,
-.lore-recall-source-copy,
-.lore-recall-node-preview-copy,
-.lore-recall-book-main-copy,
-.lore-recall-picker-copy,
-.lore-recall-editor-lead,
-.lore-recall-node-copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.lore-recall-eyebrow,
-.lore-recall-label,
-.lore-recall-node-section-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--lore-muted);
-}
-
-.lore-recall-summary-title,
-.lore-recall-section-title,
-.lore-recall-empty-title {
-  margin: 0;
-  color: var(--lore-ink);
-  font-family: "Fraunces", "Iowan Old Style", Georgia, serif;
-  letter-spacing: -0.025em;
-}
-
-.lore-recall-summary-title {
-  font-size: 28px;
-  line-height: 1.04;
-}
-
-.lore-recall-section-title,
-.lore-recall-empty-title {
-  font-size: 21px;
-  line-height: 1.14;
-}
-
-.lore-recall-summary-description,
-.lore-recall-section-copy,
-.lore-recall-empty-copy,
-.lore-recall-health-copy,
-.lore-recall-node-preview-meta,
-.lore-recall-node-preview-snippet,
-.lore-recall-source-description,
-.lore-recall-snapshot-detail,
-.lore-recall-picker-meta,
-.lore-recall-book-main-meta,
-.lore-recall-node-breadcrumb,
-.lore-recall-launch-copy,
-.lore-recall-editor-meta-copy,
-.lore-recall-toggle-copy {
-  margin: 0;
-  color: var(--lore-muted);
-}
-
-.lore-recall-summary-actions,
-.lore-recall-modal-toolbar-actions,
-.lore-recall-actions,
-.lore-recall-inline-meta,
-.lore-recall-summary-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.lore-recall-summary-actions,
-.lore-recall-modal-toolbar-actions {
-  justify-content: flex-end;
-}
-
-.lore-recall-status-chip,
-.lore-recall-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--lore-border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--lore-shell) 82%, black 18%);
-  color: var(--lore-ink);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.lore-recall-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--lore-muted);
-}
-
-.lore-recall-status-dot.active {
-  background: var(--lore-success);
-  box-shadow: 0 0 0 6px color-mix(in srgb, var(--lore-success) 16%, transparent);
-}
-
-.lore-recall-pill-accent {
-  border-color: color-mix(in srgb, var(--lore-amber) 50%, var(--lore-border));
-  background: color-mix(in srgb, var(--lore-amber-soft) 54%, black 46%);
-}
-
-.lore-recall-pill-good {
-  border-color: color-mix(in srgb, var(--lore-success) 44%, var(--lore-border));
-  background: color-mix(in srgb, var(--lore-success) 14%, black 86%);
-}
-
-.lore-recall-pill-warn {
-  border-color: color-mix(in srgb, var(--lore-warning) 48%, var(--lore-border));
-  background: color-mix(in srgb, var(--lore-warning) 14%, black 86%);
-}
-
-.lore-recall-health-item,
-.lore-recall-node-preview,
-.lore-recall-snapshot-card,
-.lore-recall-launch-card,
-.lore-recall-empty-state,
-.lore-recall-editor-meta-card,
-.lore-recall-editor-section,
-.lore-recall-book-group {
-  border: 1px solid var(--lore-border);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--lore-panel-soft) 82%, black 18%);
-}
-
-.lore-recall-health-item,
-.lore-recall-node-preview,
-.lore-recall-snapshot-card,
-.lore-recall-launch-card,
-.lore-recall-empty-state,
-.lore-recall-editor-meta-card,
-.lore-recall-editor-section {
-  padding: 14px;
-}
-
-.lore-recall-health-good {
-  border-color: color-mix(in srgb, var(--lore-success) 44%, var(--lore-border));
-}
-
-.lore-recall-health-warn,
-.lore-recall-snapshot-bucket {
-  border-color: color-mix(in srgb, var(--lore-warning) 38%, var(--lore-border));
-  background: color-mix(in srgb, var(--lore-warning) 7%, var(--lore-panel-soft) 93%);
-}
-
-.lore-recall-health-title,
-.lore-recall-source-title,
-.lore-recall-node-preview-title,
-.lore-recall-snapshot-title,
-.lore-recall-picker-title,
-.lore-recall-launch-title,
-.lore-recall-book-main-title,
-.lore-recall-node-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--lore-ink);
-}
-
-.lore-recall-snapshot-count {
-  font: 700 20px/1 "Fraunces", "Iowan Old Style", Georgia, serif;
-  color: color-mix(in srgb, var(--lore-amber) 74%, white 26%);
-}
-
-.lore-recall-segmented {
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  padding: 5px;
-  border: 1px solid var(--lore-border);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--lore-shell) 76%, black 24%);
-}
-
-.lore-recall-segment,
-.lore-recall-btn,
-.lore-recall-source-button,
-.lore-recall-book-main,
-.lore-recall-book-toggle,
-.lore-recall-node-button {
-  transition:
-    border-color 150ms ease,
-    background 150ms ease,
-    box-shadow 150ms ease,
-    transform 150ms ease,
-    color 150ms ease;
-}
-
-.lore-recall-segment {
-  min-height: 38px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--lore-muted);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.lore-recall-segment:hover {
-  background: color-mix(in srgb, var(--lore-amber-soft) 30%, transparent);
-  color: var(--lore-ink);
-}
-
-.lore-recall-segment.active {
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--lore-amber-soft) 54%, transparent), transparent),
-    color-mix(in srgb, var(--lore-shell) 24%, white 76%);
-  color: #160f0c;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lore-amber) 44%, transparent);
-}
-
-.lore-recall-pre {
-  margin: 0;
-  padding: 14px;
-  border: 1px solid var(--lore-border);
-  border-radius: 14px;
-  background: color-mix(in srgb, #090605 56%, var(--lore-panel-soft) 44%);
-  color: color-mix(in srgb, var(--lore-ink) 90%, #ffecdd 10%);
-  font: 12.5px/1.64 "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.lore-recall-pre-tight {
-  max-height: 280px;
-  overflow: auto;
-}
-
-.lore-recall-source-button,
-.lore-recall-book-main,
-.lore-recall-node-button,
-.lore-recall-picker-row {
-  width: 100%;
-  border: 1px solid var(--lore-border);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--lore-shell) 88%, black 12%);
-}
-
-.lore-recall-source-button,
-.lore-recall-book-main,
-.lore-recall-node-button {
-  cursor: pointer;
-}
-
-.lore-recall-source-button:hover,
-.lore-recall-book-main:hover,
-.lore-recall-node-button:hover,
-.lore-recall-book-toggle:hover,
-.lore-recall-btn:hover,
-.lore-recall-picker-row:hover {
-  border-color: var(--lore-border-strong);
-  box-shadow: 0 10px 24px color-mix(in srgb, black 18%, transparent);
-  transform: translateY(-1px);
-}
-
-.lore-recall-source-button,
-.lore-recall-book-main {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  text-align: left;
-}
-
-.lore-recall-source-button.active,
-.lore-recall-book-main.active,
-.lore-recall-node-button.active,
-.lore-recall-picker-row.active {
-  border-color: color-mix(in srgb, var(--lore-amber) 58%, var(--lore-border));
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--lore-amber-soft) 26%, transparent), transparent),
-    color-mix(in srgb, var(--lore-shell) 72%, white 28%);
-}
-
-.lore-recall-source-button.active .lore-recall-source-title,
-.lore-recall-book-main.active .lore-recall-book-main-title,
-.lore-recall-node-button.active .lore-recall-node-title,
-.lore-recall-picker-row.active .lore-recall-picker-title {
-  color: #170e0a;
-}
-
-.lore-recall-source-button.active .lore-recall-source-description,
-.lore-recall-book-main.active .lore-recall-book-main-meta,
-.lore-recall-node-button.active .lore-recall-node-breadcrumb,
-.lore-recall-picker-row.active .lore-recall-picker-meta {
-  color: color-mix(in srgb, #170e0a 74%, transparent);
-}
-
-.lore-recall-picker-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-  padding: 12px 14px;
-  cursor: pointer;
-}
-
-.lore-recall-picker-row input[type="checkbox"],
-.lore-recall-toggle input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--lore-amber);
-  flex-shrink: 0;
-}
-
-.lore-recall-btn {
-  min-height: 40px;
-  padding: 0 14px;
-  border: 1px solid var(--lore-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--lore-shell) 82%, black 18%);
-  color: var(--lore-ink);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.lore-recall-btn-primary {
-  border-color: color-mix(in srgb, var(--lore-amber) 48%, var(--lore-border));
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--lore-amber-soft) 54%, transparent), transparent),
-    color-mix(in srgb, var(--lore-shell) 20%, white 80%);
-  color: #180f0b;
-}
-
-.lore-recall-btn-ghost,
-.lore-recall-book-toggle {
-  background: color-mix(in srgb, var(--lore-shell) 92%, black 8%);
-}
-
-.lore-recall-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
-.lore-recall-config-grid,
-.lore-recall-form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.lore-recall-field {
-  display: grid;
-  gap: 8px;
-}
-
-.lore-recall-field-span {
-  grid-column: 1 / -1;
-}
-
-.lore-recall-input,
-.lore-recall-select,
-.lore-recall-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 12px 14px;
-  border: 1px solid var(--lore-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, #090605 44%, var(--lore-shell) 56%);
-  color: var(--lore-ink);
-  font: inherit;
-}
-
-.lore-recall-input:focus,
-.lore-recall-select:focus,
-.lore-recall-textarea:focus {
-  outline: none;
-  border-color: color-mix(in srgb, var(--lore-amber) 58%, var(--lore-border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lore-amber-soft) 24%, transparent);
-}
-
-.lore-recall-textarea {
-  min-height: 112px;
-  resize: vertical;
-}
-
-.lore-recall-textarea-tall {
-  min-height: 170px;
-}
-
-.lore-recall-toggle {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  padding: 0 14px;
-  border: 1px solid var(--lore-border);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--lore-shell) 88%, black 12%);
-}
-
-.lore-recall-launch-card {
-  display: grid;
-  gap: 10px;
-}
-
-.lore-recall-modal-host {
-  min-width: min(1120px, 100%);
-}
-
-.lore-recall-modal-toolbar {
-  padding-bottom: 2px;
-}
-
-.lore-recall-search {
-  min-width: 220px;
-}
-
-.lore-recall-modal-shell {
-  display: grid;
-  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
-  gap: 14px;
-  align-items: start;
-}
-
-.lore-recall-modal-rail,
-.lore-recall-modal-editor {
-  max-height: min(68vh, 640px);
-  overflow: auto;
-}
-
-.lore-recall-book-group {
-  padding: 12px;
-}
-
-.lore-recall-book-toggle {
-  min-width: 70px;
-  min-height: 44px;
-  padding: 0 12px;
-  border-radius: 12px;
-  color: var(--lore-ink);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.lore-recall-node-button {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  text-align: left;
-}
-
-.lore-recall-node-copy {
-  padding-left: calc(var(--lore-recall-node-depth, 0) * 12px);
-}
-
-.lore-recall-editor-meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.lore-recall-editor-meta-card {
-  display: grid;
-  gap: 6px;
-}
-
-.lore-recall-editor-actions {
-  position: sticky;
-  bottom: -16px;
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 12px;
-  margin-top: 2px;
-  border-top: 1px solid var(--lore-border);
-  background: linear-gradient(180deg, color-mix(in srgb, transparent 100%, black 0%), var(--lore-panel) 44%);
-}
-
-.lore-recall-empty-state {
-  display: grid;
-  gap: 8px;
-}
-
-@media (max-width: 1060px) {
-  .lore-recall-modal-shell,
-  .lore-recall-settings-grid,
-  .lore-recall-config-grid,
-  .lore-recall-form-grid,
-  .lore-recall-editor-meta {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 760px) {
-  .lore-recall-drawer {
-    padding: 12px 12px 22px;
-  }
-
-  .lore-recall-shell {
-    padding: 14px;
-  }
-
-  .lore-recall-summary-head,
-  .lore-recall-settings-top,
-  .lore-recall-node-preview-head,
-  .lore-recall-editor-header,
-  .lore-recall-book-header,
-  .lore-recall-modal-toolbar,
-  .lore-recall-source-button,
-  .lore-recall-book-main {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .lore-recall-modal-toolbar-actions,
-  .lore-recall-summary-actions {
-    width: 100%;
-    justify-content: stretch;
-  }
-
-  .lore-recall-search,
-  .lore-recall-btn,
-  .lore-recall-book-toggle {
-    width: 100%;
-  }
-
-  .lore-recall-picker-row {
-    grid-template-columns: 1fr;
-  }
-}
-`;
-
-// src/frontend.ts
-var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 3a3 3 0 0 1 3 3v1h4a3 3 0 0 1 3 3v1h1a3 3 0 1 1 0 2h-1v1a3 3 0 0 1-3 3h-1v1a3 3 0 1 1-2 0v-1H8a3 3 0 0 1-3-3v-1H4a3 3 0 1 1 0-2h1v-1a3 3 0 0 1 3-3h4V6a3 3 0 0 1-2.18-2.87L10 3A3 3 0 1 1 7 3Zm0 2a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm11 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM4 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm6 6a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm-3-7v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2H7Zm1-3a1 1 0 0 0-1 1v0h8v0a1 1 0 0 0-1-1H8Z"/></svg>`;
-function readChatId(payload) {
-  if (!payload || typeof payload !== "object")
-    return null;
-  const value = payload;
-  return typeof value.chatId === "string" && value.chatId.trim() ? value.chatId : null;
-}
-function readChatIdFromSettingsUpdate(payload) {
-  if (!payload || typeof payload !== "object")
-    return;
-  const value = payload;
-  if (value.key !== "activeChatId")
-    return;
-  return typeof value.value === "string" && value.value.trim() ? value.value : null;
-}
-function sendToBackend(ctx, message) {
-  ctx.sendToBackend(message);
-}
-function openSettingsWorkspace() {
-  window.dispatchEvent(new CustomEvent("spindle:open-settings", {
-    detail: { view: "extensions" }
-  }));
-}
+// src/ui/helpers.ts
 function createElement(tagName, className, textContent) {
   const element = document.createElement(tagName);
   if (className)
@@ -727,181 +119,529 @@ function truncateMiddle(value, lead = 10, tail = 8) {
     return value;
   return `${value.slice(0, lead)}...${value.slice(-tail)}`;
 }
-function buildTreeMaps(entries) {
-  const byNodeId = new Map(entries.map((entry) => [entry.nodeId, entry]));
-  const childrenByParent = new Map;
-  for (const entry of entries) {
-    const parentKey = entry.parentNodeId && entry.parentNodeId !== entry.nodeId && byNodeId.has(entry.parentNodeId) ? entry.parentNodeId : null;
-    const bucket = childrenByParent.get(parentKey) ?? [];
-    bucket.push(entry);
-    childrenByParent.set(parentKey, bucket);
-  }
-  const sortEntries = (parent, list) => {
-    const order = parent?.childrenOrder ?? [];
-    const orderIndex = new Map(order.map((nodeId, index) => [nodeId, index]));
-    return list.slice().sort((left, right) => {
-      const leftIndex = orderIndex.get(left.nodeId);
-      const rightIndex = orderIndex.get(right.nodeId);
-      if (typeof leftIndex === "number" && typeof rightIndex === "number" && leftIndex !== rightIndex) {
-        return leftIndex - rightIndex;
-      }
-      if (typeof leftIndex === "number")
-        return -1;
-      if (typeof rightIndex === "number")
-        return 1;
-      return left.label.localeCompare(right.label);
-    });
-  };
-  return { childrenByParent, sortEntries };
+function readChatId(payload) {
+  if (!payload || typeof payload !== "object")
+    return null;
+  const value = payload;
+  return typeof value.chatId === "string" && value.chatId.trim() ? value.chatId : null;
 }
-function orderEntries(entries) {
-  const { childrenByParent, sortEntries } = buildTreeMaps(entries);
-  const ordered = [];
-  const visited = new Set;
-  const visit = (entry, depth, trail) => {
-    if (visited.has(entry.nodeId))
+function readChatIdFromSettingsUpdate(payload) {
+  if (!payload || typeof payload !== "object")
+    return;
+  const value = payload;
+  if (value.key !== "activeChatId")
+    return;
+  return typeof value.value === "string" && value.value.trim() ? value.value : null;
+}
+function openSettingsWorkspace() {
+  window.dispatchEvent(new CustomEvent("spindle:open-settings", {
+    detail: { view: "extensions" }
+  }));
+}
+function getCategoryOptions(tree) {
+  const options = [{ value: "root", label: "Root" }, { value: "unassigned", label: "Unassigned" }];
+  const visit = (nodeId, depth) => {
+    const node = tree.nodes[nodeId];
+    if (!node)
       return;
-    visited.add(entry.nodeId);
-    const breadcrumb = [...trail, entry.label].join(" > ");
-    ordered.push({ ...entry, treeDepth: depth, breadcrumb });
-    const children = sortEntries(entry, childrenByParent.get(entry.nodeId) ?? []);
-    for (const child of children) {
-      visit(child, depth + 1, [...trail, entry.label]);
+    if (nodeId !== tree.rootId) {
+      options.push({ value: nodeId, label: `${"  ".repeat(depth)}${node.label}` });
     }
+    for (const childId of node.childIds)
+      visit(childId, depth + 1);
   };
-  for (const root of sortEntries(null, childrenByParent.get(null) ?? [])) {
-    visit(root, 0, []);
-  }
-  for (const entry of entries) {
-    if (!visited.has(entry.nodeId)) {
-      visit(entry, 0, []);
-    }
-  }
-  return ordered;
+  visit(tree.rootId, 0);
+  return options;
 }
-function countBranchNodes(entry, childrenByParent, sortEntries, path = new Set) {
-  if (path.has(entry.nodeId))
-    return 0;
-  const nextPath = new Set(path);
-  nextPath.add(entry.nodeId);
-  let total = 1;
-  for (const child of sortEntries(entry, childrenByParent.get(entry.nodeId) ?? [])) {
-    total += countBranchNodes(child, childrenByParent, sortEntries, nextPath);
-  }
-  return total;
-}
-function buildBranchSummaries(book) {
-  if (!book.entries.length)
-    return [];
-  const { childrenByParent, sortEntries } = buildTreeMaps(book.entries);
-  const roots = sortEntries(null, childrenByParent.get(null) ?? []);
-  const summaries = [];
-  const looseRoots = [];
-  for (const root of roots) {
-    const children = sortEntries(root, childrenByParent.get(root.nodeId) ?? []);
-    if (!children.length) {
-      looseRoots.push(root);
+function getAssignedCategoryId(tree, entryId) {
+  if (tree.unassignedEntryIds.includes(entryId))
+    return "unassigned";
+  for (const node of Object.values(tree.nodes)) {
+    if (!node.entryIds.includes(entryId))
       continue;
-    }
-    summaries.push({
-      id: root.nodeId,
-      label: root.label,
-      count: countBranchNodes(root, childrenByParent, sortEntries),
-      detail: `${children.length} direct child${children.length === 1 ? "" : "ren"}`
-    });
+    return node.id === tree.rootId ? "root" : node.id;
   }
-  if (looseRoots.length) {
-    summaries.push({
-      id: `${book.id}-root`,
-      label: "Root level",
-      count: looseRoots.length,
-      detail: clipText(looseRoots.map((entry) => entry.label).join(", "), 72),
-      isBucket: true
-    });
-  }
-  return summaries;
+  return "unassigned";
 }
-function matchesSearch(entry, query) {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized)
-    return true;
-  const haystack = [
+function getCategoryBreadcrumb(tree, nodeId) {
+  const labels = [];
+  const visited = new Set;
+  let cursor = tree.nodes[nodeId];
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
+    if (cursor.id !== tree.rootId)
+      labels.push(cursor.label);
+    cursor = cursor.parentId ? tree.nodes[cursor.parentId] : undefined;
+  }
+  return labels.reverse().join(" > ");
+}
+function getEntryBreadcrumb(tree, entry) {
+  const categoryId = getAssignedCategoryId(tree, entry.entryId);
+  if (categoryId === "unassigned")
+    return `Unassigned > ${entry.label}`;
+  if (categoryId === "root")
+    return `Root > ${entry.label}`;
+  const prefix = getCategoryBreadcrumb(tree, categoryId);
+  return prefix ? `${prefix} > ${entry.label}` : entry.label;
+}
+function filterBooks(state, filterText) {
+  if (!state)
+    return [];
+  const query = filterText.trim().toLowerCase();
+  const ids = new Set([
+    ...Object.keys(state.bookConfigs),
+    ...state.suggestedBookIds,
+    ...state.characterConfig?.managedBookIds ?? []
+  ]);
+  const base = state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id) || !query);
+  return base.filter((book) => {
+    if (!query)
+      return true;
+    return `${book.name} ${book.description}`.toLowerCase().includes(query);
+  }).map((book) => book.id);
+}
+function filterTreeEntries(entries, filterText) {
+  const query = filterText.trim().toLowerCase();
+  if (!query)
+    return entries;
+  return entries.filter((entry) => [
     entry.label,
-    entry.breadcrumb,
     entry.comment,
     entry.summary,
     entry.collapsedText,
     entry.aliases.join(" "),
     entry.tags.join(" "),
-    entry.key.join(" ")
-  ].join(" ").toLowerCase();
-  return haystack.includes(normalized);
+    entry.key.join(" "),
+    entry.keysecondary.join(" "),
+    entry.groupName
+  ].join(" ").toLowerCase().includes(query));
 }
-function createConfigDraft(config) {
-  return {
-    enabled: config.enabled,
-    defaultMode: config.defaultMode,
-    maxResults: String(config.maxResults),
-    maxTraversalDepth: String(config.maxTraversalDepth),
-    tokenBudget: String(config.tokenBudget),
-    rerankEnabled: config.rerankEnabled,
-    managedBookIds: new Set(config.managedBookIds)
-  };
+
+// src/ui/styles.ts
+var LORE_RECALL_CSS = `
+.lore-root {
+  --lore-bg: #0f1115;
+  --lore-shell: #171a21;
+  --lore-shell-2: #1c2028;
+  --lore-shell-3: #232833;
+  --lore-panel: #1a1e26;
+  --lore-panel-2: #11141a;
+  --lore-line: #343c4a;
+  --lore-line-strong: #5b4d3a;
+  --lore-ink: #f4efe5;
+  --lore-muted: #b0b8c6;
+  --lore-amber: #e4a052;
+  --lore-red: #c96c55;
+  --lore-green: #87c08a;
+  color: var(--lore-ink);
+  font: 13px/1.5 "IBM Plex Sans", "Aptos", "Segoe UI", sans-serif;
 }
-function configDraftToPatch(draft, fallback) {
-  const parsedMaxResults = Number.parseInt(draft.maxResults, 10);
-  const parsedTraversalDepth = Number.parseInt(draft.maxTraversalDepth, 10);
-  const parsedTokenBudget = Number.parseInt(draft.tokenBudget, 10);
-  return {
-    enabled: draft.enabled,
-    defaultMode: draft.defaultMode,
-    maxResults: Number.isFinite(parsedMaxResults) ? parsedMaxResults : fallback.maxResults,
-    maxTraversalDepth: Number.isFinite(parsedTraversalDepth) ? parsedTraversalDepth : fallback.maxTraversalDepth,
-    tokenBudget: Number.isFinite(parsedTokenBudget) ? parsedTokenBudget : fallback.tokenBudget,
-    rerankEnabled: draft.rerankEnabled,
-    managedBookIds: Array.from(draft.managedBookIds)
-  };
+
+.lore-drawer,
+.lore-workspace,
+.lore-stack,
+.lore-columns,
+.lore-list,
+.lore-form-grid,
+.lore-grid,
+.lore-modal,
+.lore-modal-body {
+  display: grid;
+  gap: 12px;
 }
-function createNodeDraft(entry) {
-  return {
-    label: entry.label,
-    parentNodeId: entry.parentNodeId ?? "",
-    aliases: joinCommaList(entry.aliases),
-    tags: joinCommaList(entry.tags),
-    summary: entry.summary,
-    collapsedText: entry.collapsedText
-  };
+
+.lore-drawer {
+  padding: 14px;
 }
-function buildStatusChip(enabled) {
-  const chip = createElement("div", "lore-recall-status-chip");
-  const dot = createElement("span", "lore-recall-status-dot");
-  if (enabled)
-    dot.classList.add("active");
-  chip.append(dot, document.createTextNode(enabled ? "Retrieval on" : "Retrieval off"));
-  return chip;
+
+.lore-workspace {
+  padding: 10px 0 28px;
 }
-function createPill(label, tone = "neutral") {
-  return createElement("span", `lore-recall-pill lore-recall-pill-${tone}`, label);
+
+.lore-columns {
+  grid-template-columns: minmax(320px, 0.92fr) minmax(320px, 1.08fr);
+  align-items: start;
 }
-function createStructuredEmpty(eyebrow, title, description) {
-  const card = createElement("div", "lore-recall-empty-state");
-  card.append(createElement("div", "lore-recall-eyebrow", eyebrow), createElement("h4", "lore-recall-empty-title", title), createElement("p", "lore-recall-empty-copy", description));
-  return card;
+
+.lore-card {
+  border: 1px solid var(--lore-line);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 72px),
+    linear-gradient(135deg, rgba(228,160,82,0.08), transparent 45%),
+    var(--lore-shell);
+  padding: 14px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.24);
 }
-function createHealthItem(tone, title, description) {
-  const item = createElement("div", `lore-recall-health-item lore-recall-health-${tone}`);
-  item.append(createElement("div", "lore-recall-health-title", title), createElement("div", "lore-recall-health-copy", description));
-  return item;
+
+.lore-hero,
+.lore-workspace-header {
+  border-color: var(--lore-line-strong);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03), transparent 80px),
+    radial-gradient(circle at top right, rgba(201,108,85,0.15), transparent 40%),
+    linear-gradient(135deg, rgba(228,160,82,0.1), transparent 45%),
+    var(--lore-shell-2);
 }
-function createSectionHead(eyebrow, title, description) {
-  const lead = createElement("div", "lore-recall-section-head");
-  lead.append(createElement("div", "lore-recall-eyebrow", eyebrow), createElement("h3", "lore-recall-section-title", title), createElement("p", "lore-recall-section-copy", description));
-  return lead;
+
+.lore-cta {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 72px),
+    linear-gradient(135deg, rgba(201,108,85,0.14), transparent 60%),
+    var(--lore-shell-2);
+}
+
+.lore-title {
+  margin: 0;
+  font: 700 26px/1.05 "Sora", "Aptos Display", "Segoe UI", sans-serif;
+  letter-spacing: -0.04em;
+}
+
+.lore-section-title,
+.lore-list-title,
+.lore-stat-label {
+  margin: 0;
+  font-weight: 700;
+  color: var(--lore-ink);
+}
+
+.lore-eyebrow,
+.lore-label,
+.lore-node-section {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--lore-muted);
+}
+
+.lore-copy,
+.lore-list-copy,
+.lore-list-meta,
+.lore-stat-copy,
+.lore-toggle-copy {
+  color: var(--lore-muted);
+}
+
+.lore-row,
+.lore-inline,
+.lore-hero-head,
+.lore-modal-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.lore-stack {
+  min-width: 0;
+}
+
+.lore-segments {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--lore-line);
+  border-radius: 12px;
+  background: var(--lore-panel-2);
+}
+
+.lore-segment,
+.lore-btn,
+.lore-chip,
+.lore-tree-row {
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.lore-segment {
+  min-height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--lore-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.lore-segment.active {
+  color: #120f0a;
+  background: linear-gradient(135deg, rgba(228,160,82,0.85), rgba(250,232,208,0.92));
+}
+
+.lore-btn,
+.lore-chip,
+.lore-source,
+.lore-tree-row,
+.lore-pill,
+.lore-toggle,
+.lore-input,
+.lore-select,
+.lore-textarea {
+  border: 1px solid var(--lore-line);
+  border-radius: 11px;
+  font: inherit;
+}
+
+.lore-btn,
+.lore-chip,
+.lore-tree-row {
+  cursor: pointer;
+}
+
+.lore-btn {
+  min-height: 38px;
+  padding: 0 12px;
+  background: var(--lore-shell-3);
+  color: var(--lore-ink);
+  font-weight: 700;
+}
+
+.lore-btn:hover,
+.lore-chip:hover,
+.lore-source:hover,
+.lore-tree-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--lore-amber);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.24);
+}
+
+.lore-btn-primary {
+  background: linear-gradient(135deg, rgba(228,160,82,0.92), rgba(250,236,216,0.92));
+  color: #1a130d;
+  border-color: rgba(228,160,82,0.65);
+}
+
+.lore-btn-ghost,
+.lore-chip {
+  background: var(--lore-panel-2);
+}
+
+.lore-chip.active {
+  background: linear-gradient(135deg, rgba(228,160,82,0.18), rgba(201,108,85,0.12));
+  border-color: var(--lore-amber);
+}
+
+.lore-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  background: var(--lore-panel-2);
+  color: var(--lore-ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.lore-pill-accent { border-color: rgba(228,160,82,0.65); }
+.lore-pill-good { border-color: rgba(135,192,138,0.6); }
+.lore-pill-warn { border-color: rgba(201,108,85,0.72); }
+
+.lore-source {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--lore-line);
+  border-radius: 12px;
+  background: var(--lore-shell-3);
+}
+
+.lore-source.active {
+  border-color: var(--lore-amber);
+  background: linear-gradient(135deg, rgba(228,160,82,0.12), rgba(201,108,85,0.08));
+}
+
+.lore-list-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--lore-line);
+  border-radius: 12px;
+  background: var(--lore-shell-3);
+}
+
+.tone-warn { border-color: rgba(201,108,85,0.6); }
+.tone-info { border-color: rgba(228,160,82,0.45); }
+
+.lore-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.lore-grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
+}
+
+.lore-stat {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--lore-line);
+  border-radius: 12px;
+  background: var(--lore-shell-3);
+}
+
+.lore-stat-value {
+  font: 700 24px/1 "Sora", "Aptos Display", sans-serif;
+  color: var(--lore-amber);
+}
+
+.lore-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.lore-field,
+.lore-field-span {
+  display: grid;
+  gap: 6px;
+}
+
+.lore-field-span {
+  grid-column: 1 / -1;
+}
+
+.lore-input,
+.lore-select,
+.lore-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  background: var(--lore-panel-2);
+  color: var(--lore-ink);
+}
+
+.lore-input:focus,
+.lore-select:focus,
+.lore-textarea:focus {
+  outline: none;
+  border-color: var(--lore-amber);
+  box-shadow: 0 0 0 3px rgba(228,160,82,0.16);
+}
+
+.lore-textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
+.lore-textarea-tall {
+  min-height: 170px;
+}
+
+.lore-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 12px;
+  background: var(--lore-shell-3);
+}
+
+.lore-toggle input {
+  accent-color: var(--lore-amber);
+}
+
+.lore-empty {
+  padding: 14px;
+  border: 1px dashed var(--lore-line);
+  border-radius: 12px;
+  color: var(--lore-muted);
+  background: rgba(0,0,0,0.14);
+}
+
+.lore-pre {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--lore-line);
+  border-radius: 12px;
+  background: #0d0f14;
+  color: #efe5d5;
+  font: 12.5px/1.6 "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lore-modal {
+  min-height: 560px;
+}
+
+.lore-modal-toolbar {
+  padding-bottom: 2px;
+}
+
+.lore-modal-body {
+  grid-template-columns: minmax(340px, 0.92fr) minmax(0, 1.08fr);
+  align-items: start;
+}
+
+.lore-modal-rail,
+.lore-modal-editor {
+  max-height: min(68vh, 680px);
+  overflow: auto;
+}
+
+.lore-search {
+  min-width: 240px;
+}
+
+.lore-tree-row {
+  width: 100%;
+  text-align: left;
+  min-height: 34px;
+  padding: 0 10px;
+  background: var(--lore-panel-2);
+  color: var(--lore-ink);
+  margin-top: 6px;
+}
+
+.lore-tree-row.active {
+  border-color: var(--lore-amber);
+  background: linear-gradient(135deg, rgba(228,160,82,0.18), rgba(201,108,85,0.08));
+}
+
+.lore-tree-entry {
+  color: #e6e0d3;
+}
+
+.lore-node-section {
+  margin-top: 12px;
+}
+
+.lore-book-tabs {
+  margin-bottom: 4px;
+}
+
+@media (max-width: 1080px) {
+  .lore-columns,
+  .lore-modal-body,
+  .lore-form-grid,
+  .lore-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .lore-drawer {
+    padding: 12px;
+  }
+
+  .lore-source {
+    grid-template-columns: 1fr;
+  }
+}
+`;
+
+// src/ui/app.ts
+var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 3a3 3 0 0 1 3 3v1h4a3 3 0 0 1 3 3v1h1a3 3 0 1 1 0 2h-1v1a3 3 0 0 1-3 3h-1v1a3 3 0 1 1-2 0v-1H8a3 3 0 0 1-3-3v-1H4a3 3 0 1 1 0-2h1v-1a3 3 0 0 1 3-3h4V6a3 3 0 0 1-2.18-2.87L10 3A3 3 0 1 1 7 3Zm0 2a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm11 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM4 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm6 6a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm-3-7v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2H7Zm1-3a1 1 0 0 0-1 1v0h8v0a1 1 0 0 0-1-1H8Z"/></svg>`;
+function sendToBackend(ctx, message) {
+  ctx.sendToBackend(message);
 }
 function setup(ctx) {
   const cleanups = [];
-  const removeStyle = ctx.dom.addStyle(LORE_RECALL_CSS);
-  cleanups.push(removeStyle);
+  cleanups.push(ctx.dom.addStyle(LORE_RECALL_CSS));
   const settingsMount = ctx.ui.mount("settings_extensions");
   const settingsRoot = createElement("div");
   settingsMount.appendChild(settingsRoot);
@@ -918,840 +658,90 @@ function setup(ctx) {
   let currentState = null;
   let refreshTimer = null;
   let pendingChatId = null;
-  let activeDrawerTab = "injected";
+  let drawerTabMode = "injected";
+  let sourceFilter = "";
+  let workspaceSearch = "";
   let selectedBookId = null;
-  let configDraft = null;
-  let configDraftCharacterId = null;
+  let selectedTreeByBook = new Map;
+  let globalDraft = null;
+  let globalDraftKey = "";
+  let characterDraft = null;
+  let characterDraftKey = "";
+  const bookDrafts = new Map;
+  const entryDrafts = new Map;
+  const categoryDrafts = new Map;
   let workspaceModal = null;
   let modalDismissUnsub = null;
-  let modalSearchQuery = "";
-  const selectedNodeIds = new Map;
-  const openBookIds = new Set;
-  const nodeDrafts = new Map;
-  function getManagedBook(bookId) {
+  let advancedOpen = true;
+  let importInput = null;
+  function getManagedBookIds() {
+    return currentState?.characterConfig?.managedBookIds ?? [];
+  }
+  function getBookTree(bookId) {
     if (!currentState || !bookId)
       return null;
-    return currentState.managedBooks.find((book) => book.id === bookId) ?? null;
+    return currentState.treeIndexes[bookId] ?? null;
   }
-  function getOrderedEntries(book) {
-    return book ? orderEntries(book.entries) : [];
+  function getBookEntries(bookId) {
+    if (!currentState || !bookId)
+      return [];
+    return currentState.managedEntries[bookId] ?? [];
   }
-  function getFilteredEntries(book, query = modalSearchQuery) {
-    const ordered = getOrderedEntries(book);
-    if (!query.trim())
-      return ordered;
-    return ordered.filter((entry) => matchesSearch(entry, query));
-  }
-  function syncConfigDraft() {
-    const characterId = currentState?.activeCharacterId ?? null;
-    const config = currentState?.config ? normalizeCharacterConfig(currentState.config) : null;
-    if (!characterId || !config) {
-      configDraft = null;
-      configDraftCharacterId = null;
-      return;
-    }
-    if (configDraftCharacterId !== characterId || !configDraft) {
-      configDraftCharacterId = characterId;
-      configDraft = createConfigDraft(config);
-    }
-  }
-  function ensureViewState() {
-    syncConfigDraft();
-    const books = currentState?.managedBooks ?? [];
-    const validBookIds = new Set(books.map((book) => book.id));
-    const validEntryIds = new Set(books.flatMap((book) => book.entries.map((entry) => entry.entryId)));
-    for (const bookId of Array.from(openBookIds)) {
-      if (!validBookIds.has(bookId))
-        openBookIds.delete(bookId);
-    }
-    for (const bookId of Array.from(selectedNodeIds.keys())) {
-      if (!validBookIds.has(bookId))
-        selectedNodeIds.delete(bookId);
-    }
-    for (const entryId of Array.from(nodeDrafts.keys())) {
-      if (!validEntryIds.has(entryId))
-        nodeDrafts.delete(entryId);
-    }
-    if (!books.length) {
-      selectedBookId = null;
-      openBookIds.clear();
-      return;
-    }
-    if (!selectedBookId || !validBookIds.has(selectedBookId)) {
-      selectedBookId = books[0].id;
-    }
-    if (!openBookIds.size && selectedBookId) {
-      openBookIds.add(selectedBookId);
-    }
-    for (const book of books) {
-      const ordered = getOrderedEntries(book);
-      if (!ordered.length) {
-        selectedNodeIds.delete(book.id);
-        continue;
-      }
-      const selectedNodeId = selectedNodeIds.get(book.id);
-      if (!selectedNodeId || !ordered.some((entry) => entry.nodeId === selectedNodeId)) {
-        selectedNodeIds.set(book.id, ordered[0].nodeId);
-      }
-    }
-  }
-  function getSelectedBook() {
-    return getManagedBook(selectedBookId);
-  }
-  function getSelectedNode(book, query = modalSearchQuery) {
-    if (!book)
-      return null;
-    const selectedNodeId = selectedNodeIds.get(book.id);
-    const filtered = getFilteredEntries(book, query);
-    const visibleSelection = filtered.find((entry) => entry.nodeId === selectedNodeId);
-    if (visibleSelection)
-      return visibleSelection;
-    if (filtered.length)
-      return filtered[0];
-    const allEntries = getOrderedEntries(book);
-    return allEntries.find((entry) => entry.nodeId === selectedNodeId) ?? allEntries[0] ?? null;
-  }
-  function getNodeDraft(entry) {
-    const existing = nodeDrafts.get(entry.entryId);
+  function getBookDraft(bookId) {
+    const existing = bookDrafts.get(bookId);
     if (existing)
       return existing;
-    const next = createNodeDraft(entry);
-    nodeDrafts.set(entry.entryId, next);
+    const next = { ...normalizeBookConfig(currentState?.bookConfigs[bookId]) };
+    bookDrafts.set(bookId, next);
     return next;
   }
-  function setSelectedBook(bookId) {
+  function getSelectedTree(bookId) {
+    return selectedTreeByBook.get(bookId) ?? null;
+  }
+  function setSelectedTree(bookId, selection) {
     selectedBookId = bookId;
-    openBookIds.add(bookId);
-    const book = getManagedBook(bookId);
-    const visibleEntries = getFilteredEntries(book);
-    if (visibleEntries.length) {
-      selectedNodeIds.set(bookId, visibleEntries[0].nodeId);
-    } else {
-      const ordered = getOrderedEntries(book);
-      if (ordered.length && !selectedNodeIds.has(bookId)) {
-        selectedNodeIds.set(bookId, ordered[0].nodeId);
-      }
-    }
+    selectedTreeByBook.set(bookId, selection);
     render();
   }
-  function setSelectedNode(bookId, nodeId) {
-    selectedBookId = bookId;
-    selectedNodeIds.set(bookId, nodeId);
-    openBookIds.add(bookId);
-    render();
-  }
-  function toggleBookGroup(bookId) {
-    if (openBookIds.has(bookId)) {
-      openBookIds.delete(bookId);
-    } else {
-      openBookIds.add(bookId);
+  function ensureDrafts() {
+    const nextGlobalKey = JSON.stringify(currentState?.globalSettings ?? {});
+    if (nextGlobalKey !== globalDraftKey) {
+      globalDraftKey = nextGlobalKey;
+      globalDraft = normalizeGlobalSettings(currentState?.globalSettings);
     }
-    render();
-  }
-  function syncSelectionForSearch() {
-    if (!modalSearchQuery.trim())
-      return;
-    const books = currentState?.managedBooks ?? [];
-    const activeBook = getSelectedBook();
-    if (activeBook) {
-      const visibleEntries = getFilteredEntries(activeBook);
-      if (visibleEntries.length) {
-        const activeNodeId = selectedNodeIds.get(activeBook.id);
-        if (!activeNodeId || !visibleEntries.some((entry) => entry.nodeId === activeNodeId)) {
-          selectedNodeIds.set(activeBook.id, visibleEntries[0].nodeId);
-        }
-        return;
-      }
+    const nextCharacterKey = JSON.stringify(currentState?.characterConfig ?? {});
+    if (nextCharacterKey !== characterDraftKey) {
+      characterDraftKey = nextCharacterKey;
+      characterDraft = currentState?.characterConfig ? normalizeCharacterConfig(currentState.characterConfig) : null;
     }
-    for (const book of books) {
-      const visibleEntries = getFilteredEntries(book);
-      if (!visibleEntries.length)
-        continue;
-      selectedBookId = book.id;
-      openBookIds.add(book.id);
-      selectedNodeIds.set(book.id, visibleEntries[0].nodeId);
+  }
+  function ensureSelection() {
+    ensureDrafts();
+    const managedBookIds = getManagedBookIds();
+    if (!managedBookIds.length) {
+      selectedBookId = currentState?.suggestedBookIds[0] ?? currentState?.allWorldBooks[0]?.id ?? null;
       return;
     }
-  }
-  function getSummaryNotice() {
-    if (!currentState) {
-      return {
-        tone: "neutral",
-        title: "Loading state",
-        description: "Lore Recall is still reading the active character and retrieval state."
-      };
+    if (!selectedBookId || !managedBookIds.includes(selectedBookId)) {
+      selectedBookId = managedBookIds[0];
     }
-    if (!currentState.activeChatId) {
-      return {
-        tone: "neutral",
-        title: "No active chat",
-        description: "Open a character chat to see preview, source status, and tree coverage."
-      };
-    }
-    if (!currentState.config?.enabled) {
-      return {
-        tone: "neutral",
-        title: "Retrieval disabled",
-        description: "This character is not currently injecting retrieved context."
-      };
-    }
-    if (!currentState.config.managedBookIds.length) {
-      return {
-        tone: "neutral",
-        title: "No managed sources",
-        description: "Choose one or more world books before Lore Recall can build context."
-      };
-    }
-    if (currentState.attachedManagedBookIds.length) {
-      return {
-        tone: "warn",
-        title: "Attached source warning",
-        description: "One or more managed books are still attached natively and may duplicate world info."
-      };
-    }
-    if (currentState.preview?.fallbackReason) {
-      return {
-        tone: "warn",
-        title: "Preview fallback",
-        description: currentState.preview.fallbackReason
-      };
-    }
-    if (currentState.preview) {
-      return {
-        tone: "good",
-        title: "Preview ready",
-        description: `${currentState.preview.selectedNodes.length} node(s) are currently selected for injection.`
-      };
-    }
-    return {
-      tone: "neutral",
-      title: "Waiting for preview",
-      description: "Send or edit messages in the current chat to build a fresh retrieval preview."
-    };
-  }
-  function openTreeWorkspaceModal() {
-    if (!workspaceModal) {
-      workspaceModal = ctx.ui.showModal({
-        title: currentState?.activeCharacterName ? `${currentState.activeCharacterName} | Lore Recall` : "Lore Recall Workspace",
-        width: 1160,
-        maxHeight: 820
-      });
-      modalDismissUnsub = workspaceModal.onDismiss(() => {
-        workspaceModal = null;
-        modalDismissUnsub = null;
-        modalSearchQuery = "";
-        render();
-      });
-    }
-    renderWorkspaceModal();
-  }
-  function renderDrawerSurface() {
-    drawerRoot.replaceChildren();
-    const wrapper = createElement("div", "lore-recall-root lore-recall-drawer");
-    const summary = createElement("section", "lore-recall-shell lore-recall-summary");
-    const summaryHead = createElement("div", "lore-recall-summary-head");
-    const summaryCopy = createElement("div", "lore-recall-summary-copy");
-    summaryCopy.append(createElement("div", "lore-recall-eyebrow", "Operations overview"), createElement("h2", "lore-recall-summary-title", currentState?.activeCharacterName || "Lore Recall"), createElement("p", "lore-recall-summary-description", currentState?.activeChatId ? `Active chat ${truncateMiddle(currentState.activeChatId)}` : "Open a character chat to inspect the live retrieval pipeline."));
-    const summaryActions = createElement("div", "lore-recall-summary-actions");
-    summaryActions.appendChild(currentState?.config ? buildStatusChip(!!currentState.config.enabled) : createPill("Awaiting chat"));
-    const refreshButton = createElement("button", "lore-recall-btn lore-recall-btn-ghost", "Refresh");
-    refreshButton.type = "button";
-    refreshButton.addEventListener("click", () => {
-      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null });
-    });
-    summaryActions.appendChild(refreshButton);
-    summaryHead.append(summaryCopy, summaryActions);
-    summary.appendChild(summaryHead);
-    const summaryMeta = createElement("div", "lore-recall-summary-meta");
-    if (currentState?.config) {
-      summaryMeta.append(createPill(currentState.config.defaultMode === "traversal" ? "Traversal mode" : "Collapsed mode", "accent"), createPill(`${currentState.config.managedBookIds.length} managed book${currentState.config.managedBookIds.length === 1 ? "" : "s"}`), createPill(`${currentState.config.tokenBudget} tokens`), createPill(`${currentState.config.maxResults} results`));
-    } else {
-      summaryMeta.append(createPill("Preview-led"), createPill("Modal tree workspace"));
-    }
-    summary.appendChild(summaryMeta);
-    const summaryNotice = getSummaryNotice();
-    if (summaryNotice) {
-      summary.appendChild(createHealthItem(summaryNotice.tone, summaryNotice.title, summaryNotice.description));
-    }
-    wrapper.appendChild(summary);
-    const retrievalPanel = createElement("section", "lore-recall-shell");
-    retrievalPanel.appendChild(createSectionHead("Current retrieval", "Preview", "Check the injected block, selected nodes, or the query snapshot without leaving the drawer."));
-    const segmented = createElement("div", "lore-recall-segmented");
-    const tabs = [
-      { id: "injected", label: "Injected" },
-      { id: "nodes", label: "Nodes" },
-      { id: "query", label: "Query" }
-    ];
-    for (const tab of tabs) {
-      const tabButton = createElement("button", "lore-recall-segment");
-      tabButton.type = "button";
-      tabButton.textContent = tab.label;
-      if (tab.id === activeDrawerTab)
-        tabButton.classList.add("active");
-      tabButton.addEventListener("click", () => {
-        activeDrawerTab = tab.id;
-        render();
-      });
-      segmented.appendChild(tabButton);
-    }
-    retrievalPanel.appendChild(segmented);
-    const retrievalBody = createElement("div", "lore-recall-retrieval-body");
-    if (!currentState) {
-      retrievalBody.appendChild(createStructuredEmpty("Loading", "Building live retrieval", "Lore Recall is still loading the active state from the backend."));
-    } else if (!currentState.activeCharacterId) {
-      retrievalBody.appendChild(createStructuredEmpty("No active chat", "Preview appears here", "Open a character chat to see injected text, selected nodes, and the current retrieval query."));
-    } else if (!currentState.config?.enabled) {
-      retrievalBody.appendChild(createStructuredEmpty("Retrieval disabled", "Turn Lore Recall on", "Enable retrieval in the settings launchpad before expecting live injected context."));
-    } else if (!currentState.managedBooks.length) {
-      retrievalBody.appendChild(createStructuredEmpty("No managed sources", "Choose world books first", "Select one or more world books in settings so Lore Recall has something to retrieve from."));
-    } else if (!currentState.preview) {
-      retrievalBody.appendChild(createStructuredEmpty("No preview yet", "Waiting for fresh retrieval", "Send or edit a chat message to generate a new preview payload."));
-    } else if (activeDrawerTab === "injected") {
-      const previewHeader = createElement("div", "lore-recall-inline-meta");
-      previewHeader.append(createPill(`${currentState.preview.mode} mode`, "accent"), createPill(`${currentState.preview.estimatedTokens} estimated tokens`));
-      retrievalBody.appendChild(previewHeader);
-      const block = createElement("pre", "lore-recall-pre lore-recall-pre-tight");
-      block.textContent = currentState.preview.injectedText || "No injected text was produced for this pass.";
-      retrievalBody.appendChild(block);
-    } else if (activeDrawerTab === "nodes") {
-      const list = createElement("div", "lore-recall-node-preview-list");
-      for (const node of currentState.preview.selectedNodes) {
-        const row = createElement("article", "lore-recall-node-preview");
-        const rowHead = createElement("div", "lore-recall-node-preview-head");
-        const rowCopy = createElement("div", "lore-recall-node-preview-copy");
-        rowCopy.append(createElement("div", "lore-recall-node-preview-title", node.label), createElement("div", "lore-recall-node-preview-meta", `${node.worldBookName} | ${clipText(node.breadcrumb, 88)}`));
-        const rowScore = createPill(`Score ${node.score}`, "accent");
-        rowHead.append(rowCopy, rowScore);
-        row.appendChild(rowHead);
-        const reasons = createElement("div", "lore-recall-inline-meta");
-        for (const reason of node.reasons) {
-          reasons.appendChild(createPill(reason));
-        }
-        row.appendChild(reasons);
-        row.appendChild(createElement("p", "lore-recall-node-preview-snippet", clipText(node.previewText, 180)));
-        list.appendChild(row);
-      }
-      if (!currentState.preview.selectedNodes.length) {
-        list.appendChild(createStructuredEmpty("No nodes", "Nothing was selected", "The current preview did not return any nodes for injection."));
-      }
-      retrievalBody.appendChild(list);
-    } else {
-      const queryMeta = createElement("div", "lore-recall-inline-meta");
-      queryMeta.append(createPill(`${currentState.preview.estimatedTokens} estimated tokens`, "accent"));
-      if (currentState.preview.fallbackReason) {
-        queryMeta.appendChild(createPill("Fallback used", "warn"));
-      }
-      retrievalBody.appendChild(queryMeta);
-      const queryBlock = createElement("pre", "lore-recall-pre lore-recall-pre-tight");
-      queryBlock.textContent = currentState.preview.queryText;
-      retrievalBody.appendChild(queryBlock);
-      if (currentState.preview.fallbackReason) {
-        retrievalBody.appendChild(createHealthItem("warn", "Fallback reason", currentState.preview.fallbackReason));
-      }
-    }
-    retrievalPanel.appendChild(retrievalBody);
-    wrapper.appendChild(retrievalPanel);
-    const sourcesPanel = createElement("section", "lore-recall-shell");
-    sourcesPanel.appendChild(createSectionHead("Managed sources", "Source stack", "Pick a retrieval book to inspect its coverage and branch layout."));
-    const sourceList = createElement("div", "lore-recall-source-list");
-    if (!currentState?.managedBooks.length) {
-      sourceList.appendChild(createStructuredEmpty("No books", "Nothing selected yet", "Managed world books will appear here once the active character has retrieval sources configured."));
-    } else {
-      for (const book of currentState.managedBooks) {
-        const sourceButton = createElement("button", "lore-recall-source-button");
-        sourceButton.type = "button";
-        if (selectedBookId === book.id)
-          sourceButton.classList.add("active");
-        sourceButton.addEventListener("click", () => {
-          setSelectedBook(book.id);
-        });
-        const sourceCopy = createElement("div", "lore-recall-source-copy");
-        sourceCopy.append(createElement("div", "lore-recall-source-title", book.name), createElement("div", "lore-recall-source-description", book.description || `${book.entries.length} tracked node${book.entries.length === 1 ? "" : "s"}`));
-        const sourceBadges = createElement("div", "lore-recall-inline-meta");
-        sourceBadges.appendChild(createPill(`${book.entries.length} nodes`));
-        if (book.attachedToCharacter)
-          sourceBadges.appendChild(createPill("Attached", "warn"));
-        if (selectedBookId === book.id)
-          sourceBadges.appendChild(createPill("Focused", "good"));
-        sourceButton.append(sourceCopy, sourceBadges);
-        sourceList.appendChild(sourceButton);
-      }
-    }
-    sourcesPanel.appendChild(sourceList);
-    wrapper.appendChild(sourcesPanel);
-    const snapshotPanel = createElement("section", "lore-recall-shell");
-    const selectedBook = getSelectedBook();
-    snapshotPanel.appendChild(createSectionHead("Tree snapshot", selectedBook ? selectedBook.name : "Branch overview", selectedBook ? "A compact read on the top-level branch structure in the focused source." : "Select a managed book to inspect top-level branches and root-level coverage."));
-    const snapshotBody = createElement("div", "lore-recall-snapshot-grid");
-    if (!selectedBook) {
-      snapshotBody.appendChild(createStructuredEmpty("No focused source", "Choose a managed book", "The branch snapshot appears here once one of the managed sources is focused."));
-    } else if (!selectedBook.entries.length) {
-      snapshotBody.appendChild(createStructuredEmpty("No nodes", "This source is empty", "Add entries in Lumiverse's world book editor, then refresh to inspect its branch coverage."));
-    } else {
-      const summaries = buildBranchSummaries(selectedBook);
-      for (const summaryItem of summaries) {
-        const card = createElement("article", `lore-recall-snapshot-card${summaryItem.isBucket ? " lore-recall-snapshot-bucket" : ""}`);
-        card.append(createElement("div", "lore-recall-snapshot-title", summaryItem.label), createElement("div", "lore-recall-snapshot-count", `${summaryItem.count} node${summaryItem.count === 1 ? "" : "s"}`), createElement("div", "lore-recall-snapshot-detail", summaryItem.detail || "Top-level coverage"));
-        snapshotBody.appendChild(card);
-      }
-    }
-    snapshotPanel.appendChild(snapshotBody);
-    wrapper.appendChild(snapshotPanel);
-    const ctaPanel = createElement("section", "lore-recall-shell lore-recall-cta-panel");
-    ctaPanel.appendChild(createSectionHead("Open workspace", "Go edit the tree", "Use the dedicated split workspace for node edits, hierarchy changes, and source browsing."));
-    const ctaActions = createElement("div", "lore-recall-actions");
-    const workspaceButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Open tree workspace");
-    workspaceButton.type = "button";
-    workspaceButton.addEventListener("click", () => {
-      openTreeWorkspaceModal();
-    });
-    const settingsButton = createElement("button", "lore-recall-btn lore-recall-btn-ghost", "Open settings");
-    settingsButton.type = "button";
-    settingsButton.addEventListener("click", () => {
-      openSettingsWorkspace();
-    });
-    ctaActions.append(workspaceButton, settingsButton);
-    ctaPanel.appendChild(ctaActions);
-    wrapper.appendChild(ctaPanel);
-    drawerRoot.appendChild(wrapper);
-  }
-  function renderSettingsSurface() {
-    settingsRoot.replaceChildren();
-    const wrapper = createElement("div", "lore-recall-root lore-recall-settings");
-    const header = createElement("section", "lore-recall-shell lore-recall-settings-header");
-    const headerTop = createElement("div", "lore-recall-settings-top");
-    const headerLead = createElement("div", "lore-recall-summary-copy");
-    headerLead.append(createElement("div", "lore-recall-eyebrow", "Settings launchpad"), createElement("h2", "lore-recall-summary-title", currentState?.activeCharacterName || "Lore Recall"), createElement("p", "lore-recall-summary-description", currentState?.activeCharacterId ? "Per-character retrieval settings live here. Use the tree workspace for actual node editing." : "Open a character chat to configure retrieval settings and launch the tree workspace."));
-    const headerActions = createElement("div", "lore-recall-summary-actions");
-    headerActions.appendChild(currentState?.config ? buildStatusChip(!!currentState.config.enabled) : createPill("Awaiting chat"));
-    const openWorkspaceButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Open tree workspace");
-    openWorkspaceButton.type = "button";
-    openWorkspaceButton.addEventListener("click", () => {
-      openTreeWorkspaceModal();
-    });
-    headerActions.appendChild(openWorkspaceButton);
-    headerTop.append(headerLead, headerActions);
-    header.appendChild(headerTop);
-    const headerMeta = createElement("div", "lore-recall-summary-meta");
-    if (currentState?.config) {
-      headerMeta.append(createPill(currentState.config.defaultMode === "traversal" ? "Traversal" : "Collapsed", "accent"), createPill(`${currentState.config.managedBookIds.length} managed source${currentState.config.managedBookIds.length === 1 ? "" : "s"}`), createPill(`${currentState.config.tokenBudget} tokens`));
-      if (currentState.attachedManagedBookIds.length) {
-        headerMeta.appendChild(createPill("Attached sources detected", "warn"));
-      }
-    }
-    header.appendChild(headerMeta);
-    wrapper.appendChild(header);
-    const setupGrid = createElement("div", "lore-recall-settings-grid");
-    const configPanel = createElement("section", "lore-recall-shell lore-recall-settings-panel");
-    configPanel.appendChild(createSectionHead("Retrieval setup", "Character configuration", "Tune how Lore Recall retrieves, ranks, and injects context for the active character."));
-    if (!currentState?.activeCharacterId || !currentState.config || !configDraft) {
-      configPanel.appendChild(createStructuredEmpty("No active character", "Settings appear once a chat is active", "Lore Recall stores retrieval behavior per character, so it needs an active character chat before it can save settings."));
-      setupGrid.appendChild(configPanel);
-      wrapper.appendChild(setupGrid);
-      settingsRoot.appendChild(wrapper);
+    const tree = getBookTree(selectedBookId);
+    const entries = getBookEntries(selectedBookId);
+    if (!tree)
+      return;
+    if (selectedTreeByBook.has(selectedBookId))
+      return;
+    const firstCategoryId = tree.nodes[tree.rootId]?.childIds[0];
+    if (firstCategoryId) {
+      selectedTreeByBook.set(selectedBookId, { kind: "category", bookId: selectedBookId, nodeId: firstCategoryId });
       return;
     }
-    const state = currentState;
-    const draft = configDraft;
-    const config = normalizeCharacterConfig(state.config);
-    const formGrid = createElement("div", "lore-recall-config-grid");
-    const enabledField = createElement("label", "lore-recall-field lore-recall-field-span");
-    enabledField.appendChild(createElement("span", "lore-recall-label", "Enable retrieval"));
-    const enabledToggle = createElement("div", "lore-recall-toggle");
-    const enabledInput = createElement("input");
-    enabledInput.type = "checkbox";
-    enabledInput.checked = draft.enabled;
-    enabledInput.addEventListener("change", () => {
-      draft.enabled = enabledInput.checked;
-    });
-    enabledToggle.append(enabledInput, createElement("div", "lore-recall-toggle-copy", "Inject retrieved context during generation for this character."));
-    enabledField.appendChild(enabledToggle);
-    formGrid.appendChild(enabledField);
-    const modeField = createElement("label", "lore-recall-field");
-    modeField.appendChild(createElement("span", "lore-recall-label", "Default mode"));
-    const modeSelect = createElement("select", "lore-recall-select");
-    modeSelect.innerHTML = `<option value="collapsed">Collapsed</option><option value="traversal">Traversal</option>`;
-    modeSelect.value = draft.defaultMode;
-    modeSelect.addEventListener("change", () => {
-      draft.defaultMode = modeSelect.value === "traversal" ? "traversal" : "collapsed";
-    });
-    modeField.appendChild(modeSelect);
-    formGrid.appendChild(modeField);
-    const resultsField = createElement("label", "lore-recall-field");
-    resultsField.appendChild(createElement("span", "lore-recall-label", "Max results"));
-    const resultsInput = createElement("input", "lore-recall-input");
-    resultsInput.type = "number";
-    resultsInput.min = "1";
-    resultsInput.max = "12";
-    resultsInput.value = draft.maxResults;
-    resultsInput.addEventListener("input", () => {
-      draft.maxResults = resultsInput.value;
-    });
-    resultsField.appendChild(resultsInput);
-    formGrid.appendChild(resultsField);
-    const depthField = createElement("label", "lore-recall-field");
-    depthField.appendChild(createElement("span", "lore-recall-label", "Traversal depth"));
-    const depthInput = createElement("input", "lore-recall-input");
-    depthInput.type = "number";
-    depthInput.min = "1";
-    depthInput.max = "6";
-    depthInput.value = draft.maxTraversalDepth;
-    depthInput.addEventListener("input", () => {
-      draft.maxTraversalDepth = depthInput.value;
-    });
-    depthField.appendChild(depthInput);
-    formGrid.appendChild(depthField);
-    const budgetField = createElement("label", "lore-recall-field");
-    budgetField.appendChild(createElement("span", "lore-recall-label", "Token budget"));
-    const budgetInput = createElement("input", "lore-recall-input");
-    budgetInput.type = "number";
-    budgetInput.min = "200";
-    budgetInput.max = "4000";
-    budgetInput.value = draft.tokenBudget;
-    budgetInput.addEventListener("input", () => {
-      draft.tokenBudget = budgetInput.value;
-    });
-    budgetField.appendChild(budgetInput);
-    formGrid.appendChild(budgetField);
-    const rerankField = createElement("label", "lore-recall-field lore-recall-field-span");
-    rerankField.appendChild(createElement("span", "lore-recall-label", "Collapsed rerank"));
-    const rerankToggle = createElement("div", "lore-recall-toggle");
-    const rerankInput = createElement("input");
-    rerankInput.type = "checkbox";
-    rerankInput.checked = draft.rerankEnabled;
-    rerankInput.addEventListener("change", () => {
-      draft.rerankEnabled = rerankInput.checked;
-    });
-    rerankToggle.append(rerankInput, createElement("div", "lore-recall-toggle-copy", "Use a quiet rerank pass after deterministic retrieval matching."));
-    rerankField.appendChild(rerankToggle);
-    formGrid.appendChild(rerankField);
-    configPanel.appendChild(formGrid);
-    const configActions = createElement("div", "lore-recall-actions");
-    const refreshButton = createElement("button", "lore-recall-btn lore-recall-btn-ghost", "Refresh state");
-    refreshButton.type = "button";
-    refreshButton.addEventListener("click", () => {
-      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null });
-    });
-    const saveConfigButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Save character settings");
-    saveConfigButton.type = "button";
-    saveConfigButton.addEventListener("click", () => {
-      if (!state.activeCharacterId)
-        return;
-      sendToBackend(ctx, {
-        type: "save_character_config",
-        characterId: state.activeCharacterId,
-        chatId: state.activeChatId,
-        patch: configDraftToPatch(draft, config)
-      });
-    });
-    configActions.append(refreshButton, saveConfigButton);
-    configPanel.appendChild(configActions);
-    setupGrid.appendChild(configPanel);
-    const sourcesPanel = createElement("section", "lore-recall-shell lore-recall-settings-panel");
-    sourcesPanel.appendChild(createSectionHead("Managed world books", "Source selection", "Choose the world books Lore Recall should treat as dedicated retrieval sources for this character."));
-    const pickerList = createElement("div", "lore-recall-picker-list");
-    const sortedBooks = state.allWorldBooks.slice().sort((left, right) => {
-      const leftSelected = draft.managedBookIds.has(left.id) ? 1 : 0;
-      const rightSelected = draft.managedBookIds.has(right.id) ? 1 : 0;
-      if (leftSelected !== rightSelected)
-        return rightSelected - leftSelected;
-      return left.name.localeCompare(right.name);
-    });
-    if (!sortedBooks.length) {
-      pickerList.appendChild(createStructuredEmpty("No world books", "Nothing to attach yet", "Create or import world books first, then come back here to choose managed retrieval sources."));
-    } else {
-      for (const book of sortedBooks) {
-        const row = createElement("label", "lore-recall-picker-row");
-        const checkbox = createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = draft.managedBookIds.has(book.id);
-        const rowCopy = createElement("div", "lore-recall-picker-copy");
-        rowCopy.append(createElement("div", "lore-recall-picker-title", book.name), createElement("div", "lore-recall-picker-meta", book.description || "No description"));
-        const rowBadges = createElement("div", "lore-recall-inline-meta");
-        const updateRowState = () => {
-          row.classList.toggle("active", checkbox.checked);
-          rowBadges.replaceChildren();
-          if (checkbox.checked)
-            rowBadges.appendChild(createPill("Selected", "good"));
-          if (state.attachedManagedBookIds.includes(book.id)) {
-            rowBadges.appendChild(createPill("Attached", "warn"));
-          }
-        };
-        checkbox.addEventListener("change", () => {
-          if (checkbox.checked) {
-            draft.managedBookIds.add(book.id);
-          } else {
-            draft.managedBookIds.delete(book.id);
-          }
-          updateRowState();
-        });
-        updateRowState();
-        row.append(checkbox, rowCopy, rowBadges);
-        pickerList.appendChild(row);
-      }
-    }
-    sourcesPanel.appendChild(pickerList);
-    const launchPanel = createElement("div", "lore-recall-launch-card");
-    launchPanel.append(createElement("div", "lore-recall-launch-title", "Tree workspace"), createElement("p", "lore-recall-launch-copy", "Use the dedicated split workspace for hierarchy changes, alias editing, summaries, and collapsed retrieval text."));
-    const launchActions = createElement("div", "lore-recall-actions");
-    const openWorkspaceLaunch = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Open tree workspace");
-    openWorkspaceLaunch.type = "button";
-    openWorkspaceLaunch.addEventListener("click", () => {
-      openTreeWorkspaceModal();
-    });
-    launchActions.appendChild(openWorkspaceLaunch);
-    launchPanel.appendChild(launchActions);
-    sourcesPanel.appendChild(launchPanel);
-    setupGrid.appendChild(sourcesPanel);
-    wrapper.appendChild(setupGrid);
-    settingsRoot.appendChild(wrapper);
-  }
-  function renderWorkspaceModal() {
-    if (!workspaceModal)
-      return;
-    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} | Lore Recall` : "Lore Recall Workspace");
-    workspaceModal.root.classList.add("lore-recall-modal-host");
-    workspaceModal.root.replaceChildren();
-    const shell = createElement("div", "lore-recall-root lore-recall-modal");
-    const toolbar = createElement("div", "lore-recall-modal-toolbar");
-    const toolbarCopy = createElement("div", "lore-recall-modal-toolbar-copy");
-    toolbarCopy.append(createElement("div", "lore-recall-eyebrow", "Tree workspace"), createElement("h3", "lore-recall-section-title", currentState?.activeCharacterName || "Lore Recall"), createElement("p", "lore-recall-section-copy", currentState?.activeChatId ? `Active chat ${truncateMiddle(currentState.activeChatId)}` : "Open a character chat to inspect or edit the retrieval tree."));
-    const toolbarActions = createElement("div", "lore-recall-modal-toolbar-actions");
-    const searchInput = createElement("input", "lore-recall-input lore-recall-search");
-    searchInput.type = "search";
-    searchInput.placeholder = "Filter nodes";
-    searchInput.value = modalSearchQuery;
-    searchInput.addEventListener("input", () => {
-      modalSearchQuery = searchInput.value;
-      syncSelectionForSearch();
-      render();
-    });
-    const modalRefresh = createElement("button", "lore-recall-btn lore-recall-btn-ghost", "Refresh");
-    modalRefresh.type = "button";
-    modalRefresh.addEventListener("click", () => {
-      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null });
-    });
-    const modalClose = createElement("button", "lore-recall-btn lore-recall-btn-ghost", "Close");
-    modalClose.type = "button";
-    modalClose.addEventListener("click", () => {
-      workspaceModal?.dismiss();
-    });
-    toolbarActions.append(searchInput, modalRefresh, modalClose);
-    toolbar.append(toolbarCopy, toolbarActions);
-    shell.appendChild(toolbar);
-    const modalBody = createElement("div", "lore-recall-modal-shell");
-    const rail = createElement("aside", "lore-recall-shell lore-recall-modal-rail");
-    rail.appendChild(createSectionHead("Managed books", "Source tree", "Pick a source, browse its nodes, and keep the focused branch editor on the right."));
-    if (!currentState?.managedBooks.length) {
-      rail.appendChild(createStructuredEmpty("No managed books", "The workspace is waiting on sources", "Choose one or more managed world books in settings, then reopen this workspace."));
-      modalBody.appendChild(rail);
-      modalBody.appendChild(createElement("section", "lore-recall-shell lore-recall-modal-editor"));
-      shell.appendChild(modalBody);
-      workspaceModal.root.appendChild(shell);
+    const firstEntryId = tree.nodes[tree.rootId]?.entryIds[0] ?? tree.unassignedEntryIds[0] ?? entries[0]?.entryId;
+    if (firstEntryId) {
+      selectedTreeByBook.set(selectedBookId, { kind: "entry", bookId: selectedBookId, entryId: firstEntryId });
       return;
     }
-    syncSelectionForSearch();
-    const selectedBook = getSelectedBook();
-    const selectedNode = getSelectedNode(selectedBook);
-    const bookGroups = createElement("div", "lore-recall-book-groups");
-    for (const book of currentState.managedBooks) {
-      const group = createElement("section", "lore-recall-book-group");
-      const groupHeader = createElement("div", "lore-recall-book-header");
-      const selectButton = createElement("button", "lore-recall-book-main");
-      selectButton.type = "button";
-      if (selectedBookId === book.id)
-        selectButton.classList.add("active");
-      selectButton.addEventListener("click", () => {
-        setSelectedBook(book.id);
-      });
-      const summaries = buildBranchSummaries(book);
-      const selectCopy = createElement("div", "lore-recall-book-main-copy");
-      selectCopy.append(createElement("div", "lore-recall-book-main-title", book.name), createElement("div", "lore-recall-book-main-meta", `${book.entries.length} node${book.entries.length === 1 ? "" : "s"} | ${summaries.filter((item) => !item.isBucket).length} branch${summaries.filter((item) => !item.isBucket).length === 1 ? "" : "es"}`));
-      const selectBadges = createElement("div", "lore-recall-inline-meta");
-      if (book.attachedToCharacter)
-        selectBadges.appendChild(createPill("Attached", "warn"));
-      if (selectedBookId === book.id)
-        selectBadges.appendChild(createPill("Focused", "good"));
-      selectButton.append(selectCopy, selectBadges);
-      const toggleButton = createElement("button", "lore-recall-book-toggle", openBookIds.has(book.id) ? "Hide" : "Show");
-      toggleButton.type = "button";
-      toggleButton.addEventListener("click", () => {
-        toggleBookGroup(book.id);
-      });
-      groupHeader.append(selectButton, toggleButton);
-      group.appendChild(groupHeader);
-      if (openBookIds.has(book.id)) {
-        const treeWrap = createElement("div", "lore-recall-book-tree");
-        const visibleEntries = getFilteredEntries(book);
-        const rootLevelEntries = visibleEntries.filter((entry) => entry.treeDepth === 0);
-        if (rootLevelEntries.length) {
-          treeWrap.appendChild(createElement("div", "lore-recall-node-section-label", "Root level"));
-        }
-        if (!visibleEntries.length) {
-          treeWrap.appendChild(createStructuredEmpty(modalSearchQuery.trim() ? "No matches" : "No nodes", modalSearchQuery.trim() ? "Nothing matches this filter" : "This source is empty", modalSearchQuery.trim() ? "Try a different search or clear the filter to browse the full tree." : "Add entries in Lumiverse's world book editor, then refresh the workspace."));
-        } else {
-          for (const entry of visibleEntries) {
-            const nodeButton = createElement("button", "lore-recall-node-button");
-            nodeButton.type = "button";
-            if (selectedNodeIds.get(book.id) === entry.nodeId)
-              nodeButton.classList.add("active");
-            nodeButton.addEventListener("click", () => {
-              setSelectedNode(book.id, entry.nodeId);
-            });
-            const nodeCopy = createElement("div", "lore-recall-node-copy");
-            nodeCopy.style.setProperty("--lore-recall-node-depth", String(Math.min(entry.treeDepth, 5)));
-            nodeCopy.append(createElement("div", "lore-recall-node-title", entry.label), createElement("div", "lore-recall-node-breadcrumb", entry.breadcrumb));
-            const nodeBadges = createElement("div", "lore-recall-inline-meta");
-            if (entry.disabled)
-              nodeBadges.appendChild(createPill("Disabled", "warn"));
-            if (!entry.parentNodeId)
-              nodeBadges.appendChild(createPill("Root"));
-            if (entry.tags.length)
-              nodeBadges.appendChild(createPill(`${entry.tags.length} tag${entry.tags.length === 1 ? "" : "s"}`));
-            nodeButton.append(nodeCopy, nodeBadges);
-            treeWrap.appendChild(nodeButton);
-          }
-        }
-        group.appendChild(treeWrap);
-      }
-      bookGroups.appendChild(group);
-    }
-    rail.appendChild(bookGroups);
-    const editor = createElement("section", "lore-recall-shell lore-recall-modal-editor");
-    if (!selectedBook || !selectedNode) {
-      editor.appendChild(createStructuredEmpty("Select a node", "The editor opens on the right", "Choose a managed source and a node from the left rail to edit labels, hierarchy, aliases, summaries, and collapsed text."));
-      modalBody.append(rail, editor);
-      shell.appendChild(modalBody);
-      workspaceModal.root.appendChild(shell);
-      return;
-    }
-    const draft = getNodeDraft(selectedNode);
-    const editorHeader = createElement("div", "lore-recall-editor-header");
-    const editorLead = createElement("div", "lore-recall-editor-lead");
-    editorLead.append(createElement("div", "lore-recall-eyebrow", selectedBook.name), createElement("h3", "lore-recall-section-title", selectedNode.label), createElement("p", "lore-recall-section-copy", selectedNode.breadcrumb));
-    const editorBadges = createElement("div", "lore-recall-inline-meta");
-    editorBadges.appendChild(createPill(`Entry ${selectedNode.entryId}`));
-    if (selectedNode.disabled)
-      editorBadges.appendChild(createPill("Disabled", "warn"));
-    editorHeader.append(editorLead, editorBadges);
-    editor.appendChild(editorHeader);
-    const sourceMeta = createElement("div", "lore-recall-editor-meta");
-    const commentCard = createElement("div", "lore-recall-editor-meta-card");
-    commentCard.append(createElement("div", "lore-recall-label", "Comment"), createElement("div", "lore-recall-editor-meta-copy", selectedNode.comment || "No comment"));
-    const keysCard = createElement("div", "lore-recall-editor-meta-card");
-    keysCard.append(createElement("div", "lore-recall-label", "Keys"), createElement("div", "lore-recall-editor-meta-copy", selectedNode.key.join(", ") || "No keys"));
-    sourceMeta.append(commentCard, keysCard);
-    editor.appendChild(sourceMeta);
-    const form = createElement("div", "lore-recall-editor-form");
-    const structureCard = createElement("section", "lore-recall-editor-section");
-    structureCard.appendChild(createSectionHead("Structure", "Label and hierarchy", "Adjust the visible label and decide where this node sits in the tree."));
-    const structureGrid = createElement("div", "lore-recall-form-grid");
-    const labelField = createElement("label", "lore-recall-field");
-    labelField.appendChild(createElement("span", "lore-recall-label", "Label"));
-    const labelInput = createElement("input", "lore-recall-input");
-    labelInput.value = draft.label;
-    labelInput.addEventListener("input", () => {
-      draft.label = labelInput.value;
-    });
-    labelField.appendChild(labelInput);
-    structureGrid.appendChild(labelField);
-    const parentField = createElement("label", "lore-recall-field");
-    parentField.appendChild(createElement("span", "lore-recall-label", "Parent node"));
-    const parentSelect = createElement("select", "lore-recall-select");
-    parentSelect.appendChild(new Option("Root", ""));
-    for (const optionEntry of getOrderedEntries(selectedBook)) {
-      if (optionEntry.entryId === selectedNode.entryId)
-        continue;
-      const optionLabel = `${"  ".repeat(optionEntry.treeDepth)}${optionEntry.label}`;
-      parentSelect.appendChild(new Option(optionLabel, optionEntry.nodeId));
-    }
-    parentSelect.value = draft.parentNodeId;
-    parentSelect.addEventListener("change", () => {
-      draft.parentNodeId = parentSelect.value;
-    });
-    parentField.appendChild(parentSelect);
-    structureGrid.appendChild(parentField);
-    structureCard.appendChild(structureGrid);
-    form.appendChild(structureCard);
-    const taxonomyCard = createElement("section", "lore-recall-editor-section");
-    taxonomyCard.appendChild(createSectionHead("Recall signals", "Aliases and tags", "Add alternate language and retrieval tags that make this node easier to find."));
-    const taxonomyGrid = createElement("div", "lore-recall-form-grid");
-    const aliasField = createElement("label", "lore-recall-field lore-recall-field-span");
-    aliasField.appendChild(createElement("span", "lore-recall-label", "Aliases"));
-    const aliasInput = createElement("input", "lore-recall-input");
-    aliasInput.value = draft.aliases;
-    aliasInput.addEventListener("input", () => {
-      draft.aliases = aliasInput.value;
-    });
-    aliasField.appendChild(aliasInput);
-    taxonomyGrid.appendChild(aliasField);
-    const tagField = createElement("label", "lore-recall-field lore-recall-field-span");
-    tagField.appendChild(createElement("span", "lore-recall-label", "Tags"));
-    const tagInput = createElement("input", "lore-recall-input");
-    tagInput.value = draft.tags;
-    tagInput.addEventListener("input", () => {
-      draft.tags = tagInput.value;
-    });
-    tagField.appendChild(tagInput);
-    taxonomyGrid.appendChild(tagField);
-    taxonomyCard.appendChild(taxonomyGrid);
-    form.appendChild(taxonomyCard);
-    const summaryCard = createElement("section", "lore-recall-editor-section");
-    summaryCard.appendChild(createSectionHead("Summary", "Short retrieval summary", "Keep this concise so it works well for previewing and reranking."));
-    const summaryField = createElement("label", "lore-recall-field");
-    summaryField.appendChild(createElement("span", "lore-recall-label", "Summary"));
-    const summaryInput = createElement("textarea", "lore-recall-textarea");
-    summaryInput.value = draft.summary;
-    summaryInput.addEventListener("input", () => {
-      draft.summary = summaryInput.value;
-    });
-    summaryField.appendChild(summaryInput);
-    summaryCard.appendChild(summaryField);
-    form.appendChild(summaryCard);
-    const collapsedCard = createElement("section", "lore-recall-editor-section");
-    collapsedCard.appendChild(createSectionHead("Collapsed retrieval", "Injected fallback text", "This is the compact text Lore Recall can inject when it retrieves this node."));
-    const collapsedField = createElement("label", "lore-recall-field");
-    collapsedField.appendChild(createElement("span", "lore-recall-label", "Collapsed text"));
-    const collapsedInput = createElement("textarea", "lore-recall-textarea lore-recall-textarea-tall");
-    collapsedInput.value = draft.collapsedText;
-    collapsedInput.addEventListener("input", () => {
-      draft.collapsedText = collapsedInput.value;
-    });
-    collapsedField.appendChild(collapsedInput);
-    collapsedCard.appendChild(collapsedField);
-    form.appendChild(collapsedCard);
-    editor.appendChild(form);
-    const stickyActions = createElement("div", "lore-recall-editor-actions");
-    const saveNodeButton = createElement("button", "lore-recall-btn lore-recall-btn-primary", "Save node");
-    saveNodeButton.type = "button";
-    saveNodeButton.addEventListener("click", () => {
-      sendToBackend(ctx, {
-        type: "save_entry_meta",
-        entryId: selectedNode.entryId,
-        chatId: currentState?.activeChatId ?? null,
-        meta: {
-          nodeId: selectedNode.nodeId,
-          parentNodeId: draft.parentNodeId || null,
-          label: draft.label.trim() || selectedNode.label,
-          aliases: splitCommaList(draft.aliases),
-          summary: draft.summary.trim(),
-          childrenOrder: selectedNode.childrenOrder,
-          collapsedText: draft.collapsedText.trim(),
-          tags: splitCommaList(draft.tags)
-        }
-      });
-    });
-    stickyActions.appendChild(saveNodeButton);
-    editor.appendChild(stickyActions);
-    modalBody.append(rail, editor);
-    shell.appendChild(modalBody);
-    workspaceModal.root.appendChild(shell);
-  }
-  function render() {
-    ensureViewState();
-    renderSettingsSurface();
-    renderDrawerSurface();
-    renderWorkspaceModal();
+    selectedTreeByBook.set(selectedBookId, { kind: "unassigned", bookId: selectedBookId });
   }
   function scheduleRefresh(chatId) {
     pendingChatId = typeof chatId === "undefined" ? currentState?.activeChatId ?? null : chatId;
@@ -1762,14 +752,808 @@ function setup(ctx) {
       refreshTimer = null;
     }, 250);
   }
+  function saveJsonDownload(filename, payload) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+  function ensureImportInput() {
+    if (importInput)
+      return importInput;
+    importInput = document.createElement("input");
+    importInput.type = "file";
+    importInput.accept = "application/json,.json";
+    importInput.style.display = "none";
+    importInput.addEventListener("change", async () => {
+      const file = importInput?.files?.[0];
+      if (!file)
+        return;
+      const text = await file.text();
+      try {
+        const parsed = JSON.parse(text);
+        sendToBackend(ctx, { type: "import_snapshot", chatId: currentState?.activeChatId ?? null, snapshot: parsed });
+      } catch (error) {
+        console.warn("[Lore Recall] Snapshot import failed", error);
+      } finally {
+        if (importInput)
+          importInput.value = "";
+      }
+    });
+    document.body.appendChild(importInput);
+    cleanups.push(() => importInput?.remove());
+    return importInput;
+  }
+  function getEntryDraft(bookId, entry) {
+    const key = `${bookId}:${entry.entryId}`;
+    const existing = entryDrafts.get(key);
+    if (existing)
+      return existing;
+    const tree = getBookTree(bookId);
+    const next = {
+      label: entry.label,
+      aliases: [...entry.aliases],
+      tags: [...entry.tags],
+      summary: entry.summary,
+      collapsedText: entry.collapsedText,
+      location: tree ? getAssignedCategoryId(tree, entry.entryId) : "unassigned"
+    };
+    entryDrafts.set(key, next);
+    return next;
+  }
+  function getCategoryDraft(bookId, nodeId) {
+    const key = `${bookId}:${nodeId}`;
+    const existing = categoryDrafts.get(key);
+    if (existing)
+      return existing;
+    const tree = getBookTree(bookId);
+    const node = tree?.nodes[nodeId];
+    if (!tree || !node || node.id === tree.rootId)
+      return null;
+    const next = {
+      label: node.label,
+      summary: node.summary,
+      collapsed: node.collapsed,
+      parentId: node.parentId || "root"
+    };
+    categoryDrafts.set(key, next);
+    return next;
+  }
+  function createBadge(label, tone = "neutral") {
+    return createElement("span", `lore-pill lore-pill-${tone}`, label);
+  }
+  function createButton(label, className, onClick) {
+    const button = createElement("button", className, label);
+    button.type = "button";
+    button.addEventListener("click", onClick);
+    return button;
+  }
+  function openWorkspace() {
+    if (!workspaceModal) {
+      workspaceModal = ctx.ui.showModal({
+        title: "Lore Recall Workspace",
+        width: 1220,
+        maxHeight: 860
+      });
+      modalDismissUnsub = workspaceModal.onDismiss(() => {
+        workspaceModal = null;
+        modalDismissUnsub?.();
+        modalDismissUnsub = null;
+      });
+    }
+    renderWorkspaceModal();
+  }
+  function renderDrawer() {
+    drawerRoot.replaceChildren();
+    const shell = createElement("div", "lore-root lore-drawer");
+    drawerRoot.appendChild(shell);
+    const state = currentState;
+    const hero = createElement("section", "lore-card lore-hero");
+    const heroHead = createElement("div", "lore-row lore-hero-head");
+    const heroCopy = createElement("div", "lore-stack");
+    heroCopy.append(createElement("div", "lore-eyebrow", "Live Retrieval"), createElement("h2", "lore-title", state?.activeCharacterName || "Lore Recall"), createElement("p", "lore-copy", state?.activeChatId ? `Chat ${truncateMiddle(state.activeChatId)}` : "Open a character chat to inspect retrieval."));
+    const heroActions = createElement("div", "lore-inline");
+    heroActions.append(createBadge(state?.characterConfig?.enabled ? "Enabled" : "Disabled", state?.characterConfig?.enabled ? "good" : "warn"), createButton("Refresh", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })));
+    heroHead.append(heroCopy, heroActions);
+    hero.append(heroHead, createElement("div", "lore-inline", ""));
+    hero.lastElementChild?.append(createBadge(`${state?.characterConfig?.searchMode ?? "collapsed"} mode`, "accent"), createBadge(`${state?.characterConfig?.tokenBudget ?? 0} token budget`), createBadge(`${getManagedBookIds().length} managed book${getManagedBookIds().length === 1 ? "" : "s"}`));
+    const previewCard = createElement("section", "lore-card");
+    previewCard.append(createElement("div", "lore-section-title", "Current Retrieval"), createElement("p", "lore-copy", "Live preview for the active chat."));
+    const segments = createElement("div", "lore-segments");
+    for (const [value, label] of [
+      ["injected", "Injected"],
+      ["nodes", "Nodes"],
+      ["query", "Query"]
+    ]) {
+      segments.appendChild(createButton(label, `lore-segment${drawerTabMode === value ? " active" : ""}`, () => {
+        drawerTabMode = value;
+        render();
+      }));
+    }
+    previewCard.appendChild(segments);
+    if (!state?.preview) {
+      previewCard.appendChild(createElement("div", "lore-empty", "No preview is available for the current chat yet."));
+    } else if (drawerTabMode === "injected") {
+      previewCard.appendChild(createElement("pre", "lore-pre", state.preview.injectedText));
+    } else if (drawerTabMode === "query") {
+      previewCard.appendChild(createElement("pre", "lore-pre", state.preview.queryText));
+    } else {
+      const list = createElement("div", "lore-list");
+      for (const node of state.preview.selectedNodes) {
+        const item = createElement("div", "lore-list-item");
+        item.append(createElement("div", "lore-list-title", node.label), createElement("div", "lore-list-meta", `${node.worldBookName} · ${node.breadcrumb}`), createElement("div", "lore-list-copy", node.previewText));
+        list.appendChild(item);
+      }
+      previewCard.appendChild(list);
+    }
+    const sourcesCard = createElement("section", "lore-card");
+    sourcesCard.append(createElement("div", "lore-section-title", "Managed Sources"));
+    const sourcesList = createElement("div", "lore-list");
+    for (const bookId of getManagedBookIds()) {
+      const book = state?.allWorldBooks.find((item2) => item2.id === bookId);
+      const status = state?.bookStatuses[bookId];
+      const item = createElement("div", "lore-list-item");
+      const badges = createElement("div", "lore-inline");
+      if (status?.attachedToCharacter)
+        badges.appendChild(createBadge("Attached", "warn"));
+      if (status?.treeMissing)
+        badges.appendChild(createBadge("No tree", "warn"));
+      if (state?.bookConfigs[bookId]?.permission === "write_only")
+        badges.appendChild(createBadge("Write only", "warn"));
+      item.append(createElement("div", "lore-list-title", book?.name || bookId), createElement("div", "lore-list-copy", `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`), badges);
+      sourcesList.appendChild(item);
+    }
+    if (!sourcesList.childElementCount)
+      sourcesList.appendChild(createElement("div", "lore-empty", "No managed sources selected."));
+    sourcesCard.appendChild(sourcesList);
+    const snapshotCard = createElement("section", "lore-card");
+    snapshotCard.append(createElement("div", "lore-section-title", "Tree Snapshot"));
+    const stats = createElement("div", "lore-grid lore-grid-compact");
+    for (const bookId of getManagedBookIds().slice(0, 4)) {
+      const book = state?.allWorldBooks.find((item) => item.id === bookId);
+      const status = state?.bookStatuses[bookId];
+      const stat = createElement("div", "lore-stat");
+      stat.append(createElement("div", "lore-stat-value", String(status?.categoryCount ?? 0)), createElement("div", "lore-stat-label", book?.name || "Book"), createElement("div", "lore-stat-copy", `${status?.rootEntryCount ?? 0} root · ${status?.unassignedCount ?? 0} unassigned`));
+      stats.appendChild(stat);
+    }
+    if (!stats.childElementCount)
+      stats.appendChild(createElement("div", "lore-empty", "No source trees loaded yet."));
+    snapshotCard.appendChild(stats);
+    const cta = createElement("section", "lore-card lore-cta");
+    cta.append(createElement("div", "lore-section-title", "Open Workspace"), createElement("p", "lore-copy", "Use the full workspace for source setup, build tools, diagnostics, and the split tree editor."), createButton("Open Tree Workspace", "lore-btn lore-btn-primary", () => openWorkspace()), createButton("Open Extension Settings", "lore-btn lore-btn-ghost", () => openSettingsWorkspace()));
+    shell.append(hero, previewCard, sourcesCard, snapshotCard, cta);
+  }
+  function renderSourcePicker(state) {
+    const section = createElement("section", "lore-card");
+    section.append(createElement("div", "lore-section-title", "Lorebook Selection"), createElement("p", "lore-copy", "Detached managed books drive retrieval. Native attachments only generate warnings."));
+    const filterInput = createElement("input", "lore-input");
+    filterInput.type = "search";
+    filterInput.placeholder = "Filter books";
+    filterInput.value = sourceFilter;
+    filterInput.addEventListener("input", () => {
+      sourceFilter = filterInput.value;
+      render();
+    });
+    section.appendChild(filterInput);
+    if (state.suggestedBookIds.length && state.activeCharacterId) {
+      section.appendChild(createButton(`Add ${state.suggestedBookIds.length} suggested`, "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+        type: "apply_suggested_books",
+        characterId: state.activeCharacterId,
+        chatId: state.activeChatId,
+        bookIds: state.suggestedBookIds,
+        mode: "append"
+      })));
+    }
+    const list = createElement("div", "lore-list");
+    for (const bookId of filterBooks(state, sourceFilter)) {
+      const book = state.allWorldBooks.find((item) => item.id === bookId);
+      if (!book)
+        continue;
+      const status = state.bookStatuses[bookId];
+      const isSelected = getManagedBookIds().includes(bookId);
+      const row = createElement("div", `lore-source${selectedBookId === bookId ? " active" : ""}`);
+      row.addEventListener("click", () => {
+        selectedBookId = bookId;
+        render();
+      });
+      const copy = createElement("div", "lore-stack");
+      copy.append(createElement("div", "lore-list-title", book.name), createElement("div", "lore-list-copy", clipText(state.bookConfigs[bookId]?.description || book.description, 110)));
+      const meta = createElement("div", "lore-inline");
+      if (isSelected)
+        meta.appendChild(createBadge("Managed", "good"));
+      if (state.suggestedBookIds.includes(bookId))
+        meta.appendChild(createBadge("Suggested", "accent"));
+      if (status?.attachedToCharacter)
+        meta.appendChild(createBadge("Attached", "warn"));
+      if (status?.treeMissing)
+        meta.appendChild(createBadge("No tree", "warn"));
+      const toggle = createButton(isSelected ? "Remove" : "Manage", "lore-btn lore-btn-ghost", () => {
+        if (!state.activeCharacterId || !state.characterConfig)
+          return;
+        const nextIds = isSelected ? state.characterConfig.managedBookIds.filter((id) => id !== bookId) : [...state.characterConfig.managedBookIds, bookId];
+        sendToBackend(ctx, {
+          type: "save_character_config",
+          characterId: state.activeCharacterId,
+          chatId: state.activeChatId,
+          patch: { managedBookIds: nextIds }
+        });
+      });
+      row.append(copy, meta, toggle);
+      list.appendChild(row);
+    }
+    section.appendChild(list);
+    return section;
+  }
+  function renderBuildTools(state) {
+    const section = createElement("section", "lore-card");
+    section.append(createElement("div", "lore-section-title", "Build Tree"), createElement("p", "lore-copy", "Seed categories from metadata or rebuild with the selected controller connection."));
+    const actions = createElement("div", "lore-inline");
+    actions.append(createButton("Build From Metadata", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_from_metadata", bookIds: getManagedBookIds(), chatId: state.activeChatId })), createButton("Build With LLM", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_with_llm", bookIds: getManagedBookIds(), chatId: state.activeChatId })), createButton("Open Tree Workspace", "lore-btn lore-btn-ghost", () => openWorkspace()));
+    section.appendChild(actions);
+    return section;
+  }
+  function renderOverviewAndDiagnostics(state) {
+    const wrapper = createElement("div", "lore-stack");
+    const overview = createElement("section", "lore-card");
+    overview.append(createElement("div", "lore-section-title", "Tree Overview"), createElement("p", "lore-copy", "Quick health view across the managed source set."));
+    const stats = createElement("div", "lore-grid lore-grid-compact");
+    for (const bookId of getManagedBookIds()) {
+      const book = state.allWorldBooks.find((item) => item.id === bookId);
+      const status = state.bookStatuses[bookId];
+      const stat = createElement("div", "lore-stat");
+      stat.append(createElement("div", "lore-stat-value", String(status?.categoryCount ?? 0)), createElement("div", "lore-stat-label", book?.name || bookId), createElement("div", "lore-stat-copy", `${status?.entryCount ?? 0} entries · ${status?.unassignedCount ?? 0} unassigned`));
+      stats.appendChild(stat);
+    }
+    if (!stats.childElementCount)
+      stats.appendChild(createElement("div", "lore-empty", "No managed books selected."));
+    overview.appendChild(stats);
+    const backup = createElement("section", "lore-card");
+    backup.append(createElement("div", "lore-section-title", "Backup & Restore"), createElement("p", "lore-copy", "Export or import Lore Recall-owned settings, tree indexes, and recall metadata."), createButton("Export Snapshot", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "export_snapshot", chatId: state.activeChatId })), createButton("Import Snapshot", "lore-btn lore-btn-ghost", () => ensureImportInput().click()));
+    const diagnostics = createElement("section", "lore-card");
+    diagnostics.append(createElement("div", "lore-section-title", "Diagnostics"), createElement("p", "lore-copy", "Warnings for attached books, missing trees, write-only sources, and metadata gaps."));
+    const list = createElement("div", "lore-list");
+    for (const item of state.diagnosticsResults) {
+      const row = createElement("div", `lore-list-item tone-${item.severity}`);
+      row.append(createElement("div", "lore-list-title", item.title), createElement("div", "lore-list-copy", item.detail));
+      list.appendChild(row);
+    }
+    if (!list.childElementCount)
+      list.appendChild(createElement("div", "lore-empty", "No diagnostics are currently raised."));
+    diagnostics.appendChild(list);
+    wrapper.append(overview, backup, diagnostics);
+    return wrapper;
+  }
+  function renderCharacterSettings(state) {
+    const section = createElement("section", "lore-card");
+    section.append(createElement("div", "lore-section-title", "Character Settings"), createElement("p", "lore-copy", "Retrieval behavior for the active character."));
+    if (!characterDraft || !state.activeCharacterId) {
+      section.appendChild(createElement("div", "lore-empty", "Open a character chat to edit per-character retrieval settings."));
+      return section;
+    }
+    const grid = createElement("div", "lore-form-grid");
+    const enabled = createElement("label", "lore-toggle");
+    const enabledInput = createElement("input");
+    enabledInput.type = "checkbox";
+    enabledInput.checked = characterDraft.enabled;
+    enabledInput.addEventListener("change", () => {
+      characterDraft.enabled = enabledInput.checked;
+    });
+    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Enable retrieval"));
+    grid.appendChild(enabled);
+    const modeField = createElement("label", "lore-field");
+    modeField.appendChild(createElement("span", "lore-label", "Search Mode"));
+    const modeSelect = createElement("select", "lore-select");
+    for (const value of ["collapsed", "traversal"])
+      modeSelect.appendChild(new Option(value, value));
+    modeSelect.value = characterDraft.searchMode;
+    modeSelect.addEventListener("change", () => {
+      characterDraft.searchMode = modeSelect.value;
+    });
+    modeField.appendChild(modeSelect);
+    grid.appendChild(modeField);
+    for (const [key, label] of [
+      ["collapsedDepth", "Collapsed Depth"],
+      ["maxResults", "Max Results"],
+      ["maxTraversalDepth", "Traversal Depth"],
+      ["traversalStepLimit", "Traversal Step Limit"],
+      ["tokenBudget", "Token Budget"],
+      ["contextMessages", "Context Messages"]
+    ]) {
+      const field = createElement("label", "lore-field");
+      field.appendChild(createElement("span", "lore-label", label));
+      const input = createElement("input", "lore-input");
+      input.type = "number";
+      input.value = String(characterDraft[key]);
+      input.addEventListener("input", () => {
+        characterDraft[key] = Number.parseInt(input.value, 10) || 0;
+      });
+      field.appendChild(input);
+      grid.appendChild(field);
+    }
+    const rerank = createElement("label", "lore-toggle");
+    const rerankInput = createElement("input");
+    rerankInput.type = "checkbox";
+    rerankInput.checked = characterDraft.rerankEnabled;
+    rerankInput.addEventListener("change", () => {
+      characterDraft.rerankEnabled = rerankInput.checked;
+    });
+    rerank.append(rerankInput, createElement("span", "lore-toggle-copy", "Rerank top candidates"));
+    grid.appendChild(rerank);
+    const selective = createElement("label", "lore-toggle");
+    const selectiveInput = createElement("input");
+    selectiveInput.type = "checkbox";
+    selectiveInput.checked = characterDraft.selectiveRetrieval;
+    selectiveInput.addEventListener("change", () => {
+      characterDraft.selectiveRetrieval = selectiveInput.checked;
+    });
+    selective.append(selectiveInput, createElement("span", "lore-toggle-copy", "Selective retrieval"));
+    grid.appendChild(selective);
+    const multiBookField = createElement("label", "lore-field");
+    multiBookField.appendChild(createElement("span", "lore-label", "Multi-Book Mode"));
+    const multiBookSelect = createElement("select", "lore-select");
+    for (const value of ["unified", "per_book"])
+      multiBookSelect.appendChild(new Option(value, value));
+    multiBookSelect.value = characterDraft.multiBookMode;
+    multiBookSelect.addEventListener("change", () => {
+      characterDraft.multiBookMode = multiBookSelect.value;
+    });
+    multiBookField.appendChild(multiBookSelect);
+    grid.appendChild(multiBookField);
+    section.append(grid, createButton("Save Character Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+      type: "save_character_config",
+      characterId: state.activeCharacterId,
+      chatId: state.activeChatId,
+      patch: characterDraft
+    })));
+    return section;
+  }
+  function renderBookSettings(state) {
+    const section = createElement("section", "lore-card");
+    section.append(createElement("div", "lore-section-title", "Book Settings"), createElement("p", "lore-copy", "Per-book enable, permission, and description controls."));
+    if (!selectedBookId) {
+      section.appendChild(createElement("div", "lore-empty", "Select a book on the left to edit its settings."));
+      return section;
+    }
+    const book = state.allWorldBooks.find((item) => item.id === selectedBookId);
+    const draft = getBookDraft(selectedBookId);
+    const grid = createElement("div", "lore-form-grid");
+    const enabled = createElement("label", "lore-toggle");
+    const enabledInput = createElement("input");
+    enabledInput.type = "checkbox";
+    enabledInput.checked = draft.enabled;
+    enabledInput.addEventListener("change", () => {
+      draft.enabled = enabledInput.checked;
+    });
+    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Enable this managed source"));
+    grid.appendChild(enabled);
+    const permissionField = createElement("label", "lore-field");
+    permissionField.appendChild(createElement("span", "lore-label", "Permission"));
+    const permissionSelect = createElement("select", "lore-select");
+    for (const value of ["read_write", "read_only", "write_only"])
+      permissionSelect.appendChild(new Option(value, value));
+    permissionSelect.value = draft.permission;
+    permissionSelect.addEventListener("change", () => {
+      draft.permission = permissionSelect.value;
+    });
+    permissionField.appendChild(permissionSelect);
+    grid.appendChild(permissionField);
+    const descriptionField = createElement("label", "lore-field lore-field-span");
+    descriptionField.appendChild(createElement("span", "lore-label", "Description"));
+    const descriptionInput = createElement("textarea", "lore-textarea");
+    descriptionInput.value = draft.description || book?.description || "";
+    descriptionInput.addEventListener("input", () => {
+      draft.description = descriptionInput.value;
+    });
+    descriptionField.appendChild(descriptionInput);
+    grid.appendChild(descriptionField);
+    section.append(grid, createButton("Save Book Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+      type: "save_book_config",
+      bookId: selectedBookId,
+      chatId: state.activeChatId,
+      patch: draft
+    })));
+    return section;
+  }
+  function renderAdvancedSettings(state) {
+    const section = createElement("section", "lore-card");
+    section.append(createElement("div", "lore-section-title", "Advanced Settings"));
+    section.appendChild(createButton(advancedOpen ? "Collapse" : "Expand", "lore-btn lore-btn-ghost", () => {
+      advancedOpen = !advancedOpen;
+      render();
+    }));
+    if (!advancedOpen || !globalDraft)
+      return section;
+    const grid = createElement("div", "lore-form-grid");
+    const enabled = createElement("label", "lore-toggle");
+    const enabledInput = createElement("input");
+    enabledInput.type = "checkbox";
+    enabledInput.checked = globalDraft.enabled;
+    enabledInput.addEventListener("change", () => {
+      globalDraft.enabled = enabledInput.checked;
+    });
+    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Master enable"));
+    grid.appendChild(enabled);
+    const patternField = createElement("label", "lore-field");
+    patternField.appendChild(createElement("span", "lore-label", "Auto-Detect Pattern"));
+    const patternInput = createElement("input", "lore-input");
+    patternInput.value = globalDraft.autoDetectPattern;
+    patternInput.addEventListener("input", () => {
+      globalDraft.autoDetectPattern = patternInput.value;
+    });
+    patternField.appendChild(patternInput);
+    grid.appendChild(patternField);
+    const connectionField = createElement("label", "lore-field");
+    connectionField.appendChild(createElement("span", "lore-label", "Controller Connection"));
+    const connectionSelect = createElement("select", "lore-select");
+    connectionSelect.appendChild(new Option("Use default connection", ""));
+    for (const connection of state.availableConnections) {
+      connectionSelect.appendChild(new Option(`${connection.name} · ${connection.model}`, connection.id));
+    }
+    connectionSelect.value = globalDraft.controllerConnectionId ?? "";
+    connectionSelect.addEventListener("change", () => {
+      globalDraft.controllerConnectionId = connectionSelect.value || null;
+    });
+    connectionField.appendChild(connectionSelect);
+    grid.appendChild(connectionField);
+    for (const [key, label] of [
+      ["controllerTemperature", "Controller Temperature"],
+      ["controllerMaxTokens", "Controller Max Tokens"],
+      ["treeGranularity", "Tree Granularity"],
+      ["chunkTokens", "Chunk Tokens"]
+    ]) {
+      const field = createElement("label", "lore-field");
+      field.appendChild(createElement("span", "lore-label", label));
+      const input = createElement("input", "lore-input");
+      input.type = "number";
+      input.value = String(globalDraft[key] ?? 0);
+      input.addEventListener("input", () => {
+        globalDraft[key] = Number.parseFloat(input.value) || 0;
+      });
+      field.appendChild(input);
+      grid.appendChild(field);
+    }
+    const buildDetailField = createElement("label", "lore-field");
+    buildDetailField.appendChild(createElement("span", "lore-label", "Build Detail"));
+    const buildDetailSelect = createElement("select", "lore-select");
+    for (const value of ["lite", "full"])
+      buildDetailSelect.appendChild(new Option(value, value));
+    buildDetailSelect.value = globalDraft.buildDetail;
+    buildDetailSelect.addEventListener("change", () => {
+      globalDraft.buildDetail = buildDetailSelect.value;
+    });
+    buildDetailField.appendChild(buildDetailSelect);
+    grid.appendChild(buildDetailField);
+    const dedupField = createElement("label", "lore-field");
+    dedupField.appendChild(createElement("span", "lore-label", "Dedup Mode"));
+    const dedupSelect = createElement("select", "lore-select");
+    for (const value of ["none", "lexical", "llm"])
+      dedupSelect.appendChild(new Option(value, value));
+    dedupSelect.value = globalDraft.dedupMode;
+    dedupSelect.addEventListener("change", () => {
+      globalDraft.dedupMode = dedupSelect.value;
+    });
+    dedupField.appendChild(dedupSelect);
+    grid.appendChild(dedupField);
+    section.append(createElement("p", "lore-copy", "These settings cover the TunnelVision-like retrieval surface that still makes sense in Lumiverse. SillyTavern-only prompt/tool orchestration controls stay intentionally omitted."), grid, createButton("Save Advanced Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "save_global_settings", chatId: state.activeChatId, patch: globalDraft })));
+    return section;
+  }
+  function renderSettings() {
+    settingsRoot.replaceChildren();
+    const shell = createElement("div", "lore-root lore-workspace");
+    settingsRoot.appendChild(shell);
+    const header = createElement("section", "lore-card lore-workspace-header");
+    header.append(createElement("div", "lore-eyebrow", "Lore Recall"), createElement("h1", "lore-title", currentState?.activeCharacterName || "Retrieval Workspace"), createElement("p", "lore-copy", currentState?.activeChatId ? `Dense retrieval + tree workspace for ${currentState.activeCharacterName || "the active character"}.` : "Open a character chat to configure retrieval, source selection, and tree operations."));
+    if (!currentState) {
+      shell.append(header, createElement("div", "lore-empty", "Loading Lore Recall state..."));
+      return;
+    }
+    const body = createElement("div", "lore-columns");
+    const left = createElement("div", "lore-stack");
+    left.append(renderSourcePicker(currentState), renderBuildTools(currentState), renderOverviewAndDiagnostics(currentState));
+    const right = createElement("div", "lore-stack");
+    right.append(renderCharacterSettings(currentState), renderBookSettings(currentState), renderAdvancedSettings(currentState));
+    body.append(left, right);
+    shell.append(header, body);
+  }
+  function renderTreeSidebar(bookId, tree, entries, container) {
+    const filteredEntries = filterTreeEntries(entries, workspaceSearch);
+    const entryMap = new Map(filteredEntries.map((entry) => [entry.entryId, entry]));
+    const renderCategory = (nodeId, depth) => {
+      const node = tree.nodes[nodeId];
+      if (!node)
+        return;
+      if (nodeId !== tree.rootId && (!workspaceSearch.trim() || node.label.toLowerCase().includes(workspaceSearch.trim().toLowerCase()))) {
+        const selected = getSelectedTree(bookId);
+        const row = createButton(node.label, `lore-tree-row${selected?.kind === "category" && selected.nodeId === nodeId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "category", bookId, nodeId }));
+        row.style.paddingLeft = `${12 + depth * 14}px`;
+        container.appendChild(row);
+      }
+      for (const entryId of node.entryIds) {
+        const entry = entryMap.get(entryId);
+        if (!entry)
+          continue;
+        const selected = getSelectedTree(bookId);
+        const row = createButton(entry.label, `lore-tree-row lore-tree-entry${selected?.kind === "entry" && selected.entryId === entryId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "entry", bookId, entryId }));
+        row.style.paddingLeft = `${28 + depth * 14}px`;
+        container.appendChild(row);
+      }
+      for (const childId of node.childIds)
+        renderCategory(childId, depth + (nodeId === tree.rootId ? 0 : 1));
+    };
+    renderCategory(tree.rootId, 0);
+    const unassignedEntries = filteredEntries.filter((entry) => tree.unassignedEntryIds.includes(entry.entryId));
+    if (unassignedEntries.length) {
+      container.appendChild(createElement("div", "lore-node-section", "Unassigned"));
+      for (const entry of unassignedEntries) {
+        const selected = getSelectedTree(bookId);
+        const row = createButton(entry.label, `lore-tree-row lore-tree-entry${selected?.kind === "entry" && selected.entryId === entry.entryId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "entry", bookId, entryId: entry.entryId }));
+        row.style.paddingLeft = "28px";
+        container.appendChild(row);
+      }
+    }
+  }
+  function renderWorkspaceEditor(bookId) {
+    const panel = createElement("div", "lore-card lore-modal-editor");
+    const tree = getBookTree(bookId);
+    const entries = getBookEntries(bookId);
+    const selected = getSelectedTree(bookId);
+    if (!tree || !selected || selected.kind === "unassigned") {
+      panel.appendChild(createElement("div", "lore-empty", "Select a category or entry from the tree to edit it."));
+      return panel;
+    }
+    if (selected.kind === "category") {
+      const draft2 = getCategoryDraft(bookId, selected.nodeId);
+      if (!draft2) {
+        panel.appendChild(createElement("div", "lore-empty", "That category is no longer available."));
+        return panel;
+      }
+      panel.append(createElement("div", "lore-section-title", "Category Editor"), createElement("p", "lore-copy", getCategoryBreadcrumb(tree, selected.nodeId) || "Root category"));
+      const grid2 = createElement("div", "lore-form-grid");
+      const labelField2 = createElement("label", "lore-field");
+      labelField2.appendChild(createElement("span", "lore-label", "Label"));
+      const labelInput2 = createElement("input", "lore-input");
+      labelInput2.value = draft2.label;
+      labelInput2.addEventListener("input", () => {
+        draft2.label = labelInput2.value;
+      });
+      labelField2.appendChild(labelInput2);
+      grid2.appendChild(labelField2);
+      const parentField = createElement("label", "lore-field");
+      parentField.appendChild(createElement("span", "lore-label", "Parent"));
+      const parentSelect = createElement("select", "lore-select");
+      for (const option of getCategoryOptions(tree).filter((option2) => option2.value !== selected.nodeId && option2.value !== "unassigned")) {
+        parentSelect.appendChild(new Option(option.label, option.value));
+      }
+      parentSelect.value = draft2.parentId;
+      parentSelect.addEventListener("change", () => {
+        draft2.parentId = parentSelect.value;
+      });
+      parentField.appendChild(parentSelect);
+      grid2.appendChild(parentField);
+      const summaryField2 = createElement("label", "lore-field lore-field-span");
+      summaryField2.appendChild(createElement("span", "lore-label", "Summary"));
+      const summaryInput2 = createElement("textarea", "lore-textarea");
+      summaryInput2.value = draft2.summary;
+      summaryInput2.addEventListener("input", () => {
+        draft2.summary = summaryInput2.value;
+      });
+      summaryField2.appendChild(summaryInput2);
+      grid2.appendChild(summaryField2);
+      const collapsedToggle = createElement("label", "lore-toggle");
+      const collapsedInput2 = createElement("input");
+      collapsedInput2.type = "checkbox";
+      collapsedInput2.checked = draft2.collapsed;
+      collapsedInput2.addEventListener("change", () => {
+        draft2.collapsed = collapsedInput2.checked;
+      });
+      collapsedToggle.append(collapsedInput2, createElement("span", "lore-toggle-copy", "Collapsed branch"));
+      grid2.appendChild(collapsedToggle);
+      panel.appendChild(grid2);
+      const actions2 = createElement("div", "lore-inline");
+      actions2.append(createButton("Save Category", "lore-btn lore-btn-primary", () => {
+        sendToBackend(ctx, {
+          type: "save_category",
+          bookId,
+          nodeId: selected.nodeId,
+          chatId: currentState?.activeChatId,
+          patch: { label: draft2.label, summary: draft2.summary, collapsed: draft2.collapsed }
+        });
+        sendToBackend(ctx, {
+          type: "move_category",
+          bookId,
+          nodeId: selected.nodeId,
+          parentId: draft2.parentId === "root" ? null : draft2.parentId,
+          chatId: currentState?.activeChatId
+        });
+      }), createButton("Create Child", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
+        type: "create_category",
+        bookId,
+        parentId: selected.nodeId,
+        label: "New Category",
+        chatId: currentState?.activeChatId
+      })), createButton("Delete Category", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
+        type: "delete_category",
+        bookId,
+        nodeId: selected.nodeId,
+        chatId: currentState?.activeChatId,
+        target: "unassigned"
+      })), createButton("Regenerate Summary", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
+        type: "regenerate_summaries",
+        bookId,
+        nodeIds: [selected.nodeId],
+        chatId: currentState?.activeChatId
+      })));
+      panel.appendChild(actions2);
+      return panel;
+    }
+    const entry = entries.find((item) => item.entryId === selected.entryId);
+    if (!entry) {
+      panel.appendChild(createElement("div", "lore-empty", "That entry is no longer available."));
+      return panel;
+    }
+    const draft = getEntryDraft(bookId, entry);
+    panel.append(createElement("div", "lore-section-title", "Entry Editor"), createElement("p", "lore-copy", getEntryBreadcrumb(tree, entry)));
+    const grid = createElement("div", "lore-form-grid");
+    const labelField = createElement("label", "lore-field");
+    labelField.appendChild(createElement("span", "lore-label", "Label"));
+    const labelInput = createElement("input", "lore-input");
+    labelInput.value = draft.label;
+    labelInput.addEventListener("input", () => {
+      draft.label = labelInput.value;
+    });
+    labelField.appendChild(labelInput);
+    grid.appendChild(labelField);
+    const locationField = createElement("label", "lore-field");
+    locationField.appendChild(createElement("span", "lore-label", "Location"));
+    const locationSelect = createElement("select", "lore-select");
+    for (const option of getCategoryOptions(tree)) {
+      locationSelect.appendChild(new Option(option.label, option.value));
+    }
+    locationSelect.value = draft.location;
+    locationSelect.addEventListener("change", () => {
+      draft.location = locationSelect.value;
+    });
+    locationField.appendChild(locationSelect);
+    grid.appendChild(locationField);
+    const aliasesField = createElement("label", "lore-field lore-field-span");
+    aliasesField.appendChild(createElement("span", "lore-label", "Aliases"));
+    const aliasesInput = createElement("input", "lore-input");
+    aliasesInput.value = joinCommaList(draft.aliases);
+    aliasesInput.addEventListener("input", () => {
+      draft.aliases = splitCommaList(aliasesInput.value);
+    });
+    aliasesField.appendChild(aliasesInput);
+    grid.appendChild(aliasesField);
+    const tagsField = createElement("label", "lore-field lore-field-span");
+    tagsField.appendChild(createElement("span", "lore-label", "Tags"));
+    const tagsInput = createElement("input", "lore-input");
+    tagsInput.value = joinCommaList(draft.tags);
+    tagsInput.addEventListener("input", () => {
+      draft.tags = splitCommaList(tagsInput.value);
+    });
+    tagsField.appendChild(tagsInput);
+    grid.appendChild(tagsField);
+    const summaryField = createElement("label", "lore-field lore-field-span");
+    summaryField.appendChild(createElement("span", "lore-label", "Summary"));
+    const summaryInput = createElement("textarea", "lore-textarea");
+    summaryInput.value = draft.summary;
+    summaryInput.addEventListener("input", () => {
+      draft.summary = summaryInput.value;
+    });
+    summaryField.appendChild(summaryInput);
+    grid.appendChild(summaryField);
+    const collapsedField = createElement("label", "lore-field lore-field-span");
+    collapsedField.appendChild(createElement("span", "lore-label", "Collapsed Text"));
+    const collapsedInput = createElement("textarea", "lore-textarea lore-textarea-tall");
+    collapsedInput.value = draft.collapsedText;
+    collapsedInput.addEventListener("input", () => {
+      draft.collapsedText = collapsedInput.value;
+    });
+    collapsedField.appendChild(collapsedInput);
+    grid.appendChild(collapsedField);
+    panel.appendChild(grid);
+    const actions = createElement("div", "lore-inline");
+    actions.append(createButton("Save Entry", "lore-btn lore-btn-primary", () => {
+      sendToBackend(ctx, {
+        type: "save_entry_meta",
+        entryId: entry.entryId,
+        chatId: currentState?.activeChatId,
+        meta: {
+          label: draft.label.trim() || entry.label,
+          aliases: draft.aliases,
+          summary: draft.summary.trim(),
+          collapsedText: draft.collapsedText.trim(),
+          tags: draft.tags
+        }
+      });
+      const target = draft.location === "unassigned" ? "unassigned" : draft.location === "root" ? "root" : { categoryId: draft.location };
+      sendToBackend(ctx, {
+        type: "assign_entries",
+        bookId,
+        entryIds: [entry.entryId],
+        chatId: currentState?.activeChatId,
+        target
+      });
+    }), createButton("Regenerate Summary", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
+      type: "regenerate_summaries",
+      bookId,
+      entryIds: [entry.entryId],
+      chatId: currentState?.activeChatId
+    })));
+    panel.appendChild(actions);
+    return panel;
+  }
+  function renderWorkspaceModal() {
+    if (!workspaceModal)
+      return;
+    workspaceModal.root.replaceChildren();
+    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree Workspace` : "Lore Recall Workspace");
+    const shell = createElement("div", "lore-root lore-modal");
+    const toolbar = createElement("div", "lore-modal-toolbar");
+    const search = createElement("input", "lore-input lore-search");
+    search.type = "search";
+    search.placeholder = "Filter tree";
+    search.value = workspaceSearch;
+    search.addEventListener("input", () => {
+      workspaceSearch = search.value;
+      renderWorkspaceModal();
+    });
+    toolbar.append(search, createElement("div", "lore-inline"));
+    toolbar.lastElementChild?.append(createButton("Refresh", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })), createButton("Close", "lore-btn lore-btn-ghost", () => workspaceModal?.dismiss()));
+    const body = createElement("div", "lore-modal-body");
+    const rail = createElement("div", "lore-card lore-modal-rail");
+    rail.append(createElement("div", "lore-section-title", "Source Tree"));
+    const books = getManagedBookIds();
+    if (!books.length) {
+      rail.appendChild(createElement("div", "lore-empty", "Choose managed books first."));
+      body.appendChild(rail);
+      shell.append(toolbar, body);
+      workspaceModal.root.appendChild(shell);
+      return;
+    }
+    const bookTabs = createElement("div", "lore-inline lore-book-tabs");
+    for (const bookId of books) {
+      const book = currentState?.allWorldBooks.find((item) => item.id === bookId);
+      bookTabs.appendChild(createButton(book?.name || bookId, `lore-chip${selectedBookId === bookId ? " active" : ""}`, () => {
+        selectedBookId = bookId;
+        render();
+      }));
+    }
+    rail.appendChild(bookTabs);
+    if (selectedBookId) {
+      const tree = getBookTree(selectedBookId);
+      const entries = getBookEntries(selectedBookId);
+      if (tree)
+        renderTreeSidebar(selectedBookId, tree, entries, rail);
+    }
+    body.append(rail, selectedBookId ? renderWorkspaceEditor(selectedBookId) : createElement("div", "lore-empty", "Choose a managed book."));
+    shell.append(toolbar, body);
+    workspaceModal.root.appendChild(shell);
+  }
+  function render() {
+    ensureSelection();
+    renderSettings();
+    renderDrawer();
+    renderWorkspaceModal();
+  }
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw;
     if (message.type === "state") {
       currentState = {
         ...message.state,
-        config: message.state.config ? normalizeCharacterConfig(message.state.config) : null
+        globalSettings: normalizeGlobalSettings(message.state.globalSettings),
+        characterConfig: message.state.characterConfig ? normalizeCharacterConfig(message.state.characterConfig) : null
       };
       render();
+      return;
+    }
+    if (message.type === "export_snapshot_ready") {
+      saveJsonDownload(message.filename, message.snapshot);
       return;
     }
     if (message.type === "error") {
@@ -1777,7 +1561,7 @@ function setup(ctx) {
     }
   });
   cleanups.push(onBackendMessage);
-  const eventNames = [
+  for (const eventName of [
     "CHAT_CHANGED",
     "MESSAGE_SENT",
     "MESSAGE_EDITED",
@@ -1785,35 +1569,23 @@ function setup(ctx) {
     "MESSAGE_SWIPED",
     "GENERATION_ENDED",
     "GENERATION_STOPPED"
-  ];
-  for (const eventName of eventNames) {
-    const unsubscribe = ctx.events.on(eventName, (payload) => {
-      scheduleRefresh(readChatId(payload));
-    });
-    cleanups.push(unsubscribe);
+  ]) {
+    cleanups.push(ctx.events.on(eventName, (payload) => scheduleRefresh(readChatId(payload))));
   }
-  const settingsUpdatedUnsub = ctx.events.on("SETTINGS_UPDATED", (payload) => {
+  cleanups.push(ctx.events.on("SETTINGS_UPDATED", (payload) => {
     const nextChatId = readChatIdFromSettingsUpdate(payload);
-    if (typeof nextChatId === "undefined")
-      return;
-    scheduleRefresh(nextChatId);
-  });
-  cleanups.push(settingsUpdatedUnsub);
+    if (typeof nextChatId !== "undefined")
+      scheduleRefresh(nextChatId);
+  }));
   sendToBackend(ctx, { type: "ready" });
   render();
   return () => {
     if (refreshTimer)
       clearTimeout(refreshTimer);
-    if (modalDismissUnsub) {
-      try {
-        modalDismissUnsub();
-      } catch {}
-    }
-    if (workspaceModal) {
-      try {
-        workspaceModal.dismiss();
-      } catch {}
-    }
+    if (modalDismissUnsub)
+      modalDismissUnsub();
+    if (workspaceModal)
+      workspaceModal.dismiss();
     for (const cleanup of cleanups.reverse()) {
       try {
         cleanup();
