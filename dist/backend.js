@@ -90,6 +90,7 @@ function normalizeEntryTreeMeta(raw, seed) {
 
 // src/backend.ts
 var lastFrontendUserId = null;
+var chatUserIds = new Map;
 var CHARACTER_CONFIG_DIR = "characters";
 var CACHE_DIR = "cache";
 var CACHE_VERSION = 1;
@@ -97,36 +98,55 @@ var PAGE_LIMIT = 200;
 function send(message, userId = lastFrontendUserId ?? undefined) {
   spindle.sendToFrontend(message);
 }
+function rememberChatUser(chatId, userId) {
+  if (!chatId || !userId)
+    return;
+  chatUserIds.set(chatId, userId);
+}
+function resolveUserId(chatId) {
+  if (chatId) {
+    const mappedUserId = chatUserIds.get(chatId);
+    if (mappedUserId)
+      return mappedUserId;
+  }
+  return lastFrontendUserId;
+}
+function readChatIdFromMessage(message) {
+  if (!("chatId" in message))
+    return null;
+  return typeof message.chatId === "string" && message.chatId.trim() ? message.chatId : null;
+}
 function getCharacterConfigPath(characterId) {
   return `${CHARACTER_CONFIG_DIR}/${characterId}.json`;
 }
 function getBookCachePath(bookId) {
   return `${CACHE_DIR}/${bookId}.json`;
 }
-async function ensureStorageFolders() {
-  await spindle.userStorage.mkdir(CHARACTER_CONFIG_DIR).catch(() => {});
-  await spindle.userStorage.mkdir(CACHE_DIR).catch(() => {});
+async function ensureStorageFolders(userId) {
+  await spindle.userStorage.mkdir(CHARACTER_CONFIG_DIR, userId).catch(() => {});
+  await spindle.userStorage.mkdir(CACHE_DIR, userId).catch(() => {});
 }
-async function loadCharacterConfig(characterId) {
+async function loadCharacterConfig(characterId, userId) {
   const stored = await spindle.userStorage.getJson(getCharacterConfigPath(characterId), {
-    fallback: DEFAULT_CHARACTER_CONFIG
+    fallback: DEFAULT_CHARACTER_CONFIG,
+    userId
   });
   return normalizeCharacterConfig(stored);
 }
-async function saveCharacterConfig(characterId, patch) {
-  const current = await loadCharacterConfig(characterId);
+async function saveCharacterConfig(characterId, patch, userId) {
+  const current = await loadCharacterConfig(characterId, userId);
   const next = normalizeCharacterConfig({ ...current, ...patch });
-  await spindle.userStorage.setJson(getCharacterConfigPath(characterId), next, { indent: 2 });
+  await spindle.userStorage.setJson(getCharacterConfigPath(characterId), next, { indent: 2, userId });
   return next;
 }
-async function invalidateBookCache(bookId) {
-  await spindle.userStorage.delete(getBookCachePath(bookId)).catch(() => {});
+async function invalidateBookCache(bookId, userId) {
+  await spindle.userStorage.delete(getBookCachePath(bookId), userId).catch(() => {});
 }
-async function listAllWorldBooks() {
+async function listAllWorldBooks(userId) {
   const books = [];
   let offset = 0;
   while (true) {
-    const page = await spindle.world_books.list({ limit: PAGE_LIMIT, offset });
+    const page = await spindle.world_books.list({ limit: PAGE_LIMIT, offset, userId });
     books.push(...page.data);
     if (books.length >= page.total || page.data.length === 0)
       break;
@@ -134,11 +154,11 @@ async function listAllWorldBooks() {
   }
   return books;
 }
-async function listAllEntries(worldBookId) {
+async function listAllEntries(worldBookId, userId) {
   const entries = [];
   let offset = 0;
   while (true) {
-    const page = await spindle.world_books.entries.list(worldBookId, { limit: PAGE_LIMIT, offset });
+    const page = await spindle.world_books.entries.list(worldBookId, { limit: PAGE_LIMIT, offset, userId });
     entries.push(...page.data);
     if (entries.length >= page.total || page.data.length === 0)
       break;
@@ -205,16 +225,16 @@ function toIndexedEntry(book, entry) {
     ...meta
   };
 }
-async function loadBookCache(bookId) {
-  const book = await spindle.world_books.get(bookId);
+async function loadBookCache(bookId, userId) {
+  const book = await spindle.world_books.get(bookId, userId);
   if (!book)
     return null;
   const cachePath = getBookCachePath(bookId);
-  const cached = await spindle.userStorage.getJson(cachePath, { fallback: null });
+  const cached = await spindle.userStorage.getJson(cachePath, { fallback: null, userId });
   if (cached && cached.version === CACHE_VERSION && cached.bookId === bookId && cached.bookUpdatedAt === book.updated_at) {
     return cached;
   }
-  const entries = await listAllEntries(bookId);
+  const entries = await listAllEntries(bookId, userId);
   const rebuilt = {
     version: CACHE_VERSION,
     bookId: book.id,
@@ -223,7 +243,7 @@ async function loadBookCache(bookId) {
     description: book.description,
     entries: entries.map((entry) => toIndexedEntry(book, entry))
   };
-  await spindle.userStorage.setJson(cachePath, rebuilt, { indent: 2 });
+  await spindle.userStorage.setJson(cachePath, rebuilt, { indent: 2, userId });
   return rebuilt;
 }
 function toManagedBookView(cache, attachedToCharacter) {
@@ -357,7 +377,7 @@ function scoreEntries(entries, queryText) {
   const byNodeId = createNodeMap(entries);
   return entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, queryNormalized, queryTokens, byNodeId)).filter((scored) => scored.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
-async function maybeRerankEntries(queryText, scored) {
+async function maybeRerankEntries(queryText, scored, userId) {
   if (scored.length <= 1)
     return scored;
   const prompt = [
@@ -384,7 +404,8 @@ async function maybeRerankEntries(queryText, scored) {
     const result = await spindle.generate.quiet({
       type: "quiet",
       messages: [{ role: "user", content: prompt }],
-      parameters: { temperature: 0.1, max_tokens: 220 }
+      parameters: { temperature: 0.1, max_tokens: 220 },
+      userId
     });
     const parsed = parseJsonObject(getGenerationContent(result));
     const ids = Array.isArray(parsed?.ids) ? parsed.ids.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
@@ -442,7 +463,7 @@ function buildTraversalCandidateSet(entries, shortlist, maxTraversalDepth) {
   }
   return orderedIds.map((nodeId) => byNodeId.get(nodeId)).filter((entry) => !!entry);
 }
-async function selectTraversalEntries(entries, config, queryText) {
+async function selectTraversalEntries(entries, config, queryText, userId) {
   const deterministic = scoreEntries(entries, queryText).slice(0, Math.max(config.maxResults * 4, 12));
   if (!deterministic.length) {
     return { selected: [], fallbackReason: "No scored nodes were available for traversal." };
@@ -473,7 +494,8 @@ async function selectTraversalEntries(entries, config, queryText) {
     const result = await spindle.generate.quiet({
       type: "quiet",
       messages: [{ role: "user", content: prompt }],
-      parameters: { temperature: 0.1, max_tokens: 260 }
+      parameters: { temperature: 0.1, max_tokens: 260 },
+      userId
     });
     const parsed = parseJsonObject(getGenerationContent(result));
     const requestedIds = Array.isArray(parsed?.nodeIds) ? parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
@@ -581,7 +603,7 @@ function buildInjectionText(scoredEntries, tokenBudget, byNodeId) {
     estimatedTokens: Math.ceil(text.length / 4)
   };
 }
-async function buildRetrievalPreview(messages, config, managedBooks) {
+async function buildRetrievalPreview(messages, config, managedBooks, userId) {
   const entries = managedBooks.flatMap((book) => book.entries);
   if (!entries.length)
     return null;
@@ -591,13 +613,13 @@ async function buildRetrievalPreview(messages, config, managedBooks) {
   let selected = [];
   let fallbackReason = null;
   if (config.defaultMode === "traversal") {
-    const traversal = await selectTraversalEntries(entries, config, queryText);
+    const traversal = await selectTraversalEntries(entries, config, queryText, userId);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
   } else {
     let collapsed = scoreEntries(entries, queryText);
     if (config.rerankEnabled) {
-      collapsed = await maybeRerankEntries(queryText, collapsed);
+      collapsed = await maybeRerankEntries(queryText, collapsed, userId);
     }
     selected = collapsed.slice(0, config.maxResults);
   }
@@ -616,13 +638,13 @@ async function buildRetrievalPreview(messages, config, managedBooks) {
     fallbackReason
   };
 }
-async function resolveActiveChat(chatId) {
+async function resolveActiveChat(userId, chatId) {
   if (chatId)
-    return spindle.chats.get(chatId);
-  return spindle.chats.getActive();
+    return spindle.chats.get(chatId, userId);
+  return spindle.chats.getActive(userId);
 }
-async function buildState(chatId) {
-  const [allBooks, activeChat] = await Promise.all([listAllWorldBooks(), resolveActiveChat(chatId)]);
+async function buildState(userId, chatId) {
+  const [allBooks, activeChat] = await Promise.all([listAllWorldBooks(userId), resolveActiveChat(userId, chatId)]);
   const sortedBooks = allBooks.slice().sort((left, right) => left.name.localeCompare(right.name)).map(toBookSummary);
   if (!activeChat?.character_id) {
     return {
@@ -636,7 +658,7 @@ async function buildState(chatId) {
       preview: null
     };
   }
-  const character = await spindle.characters.get(activeChat.character_id);
+  const character = await spindle.characters.get(activeChat.character_id, userId);
   if (!character) {
     return {
       activeChatId: activeChat.id,
@@ -649,16 +671,16 @@ async function buildState(chatId) {
       preview: null
     };
   }
-  const config = await loadCharacterConfig(character.id);
+  const config = await loadCharacterConfig(character.id, userId);
   const characterWithBooks = character;
   const characterWorldBookIds = Array.isArray(characterWithBooks.world_book_ids) ? characterWithBooks.world_book_ids.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   const selectedBookIds = config.managedBookIds.filter((bookId) => allBooks.some((book) => book.id === bookId));
   const attachedManagedBookIds = selectedBookIds.filter((bookId) => characterWorldBookIds.includes(bookId));
-  const managedBookCaches = (await Promise.all(selectedBookIds.map((bookId) => loadBookCache(bookId)))).filter((book) => !!book);
+  const managedBookCaches = (await Promise.all(selectedBookIds.map((bookId) => loadBookCache(bookId, userId)))).filter((book) => !!book);
   const preview = activeChat.id && config.enabled && managedBookCaches.length ? await buildRetrievalPreview((await spindle.chat.getMessages(activeChat.id)).map((message) => ({
     role: message.role,
     content: message.content
-  })), config, managedBookCaches) : null;
+  })), config, managedBookCaches, userId) : null;
   return {
     activeChatId: activeChat.id,
     activeCharacterId: character.id,
@@ -670,12 +692,13 @@ async function buildState(chatId) {
     preview
   };
 }
-async function pushState(chatId, userId) {
-  const state = await buildState(chatId);
+async function pushState(userId, chatId) {
+  const state = await buildState(userId, chatId);
+  rememberChatUser(state.activeChatId, userId);
   send({ type: "state", state }, userId);
 }
-async function saveEntryMeta(entryId, meta) {
-  const entry = await spindle.world_books.entries.get(entryId);
+async function saveEntryMeta(entryId, meta, userId) {
+  const entry = await spindle.world_books.entries.get(entryId, userId);
   if (!entry) {
     throw new Error("That world book entry no longer exists.");
   }
@@ -698,8 +721,8 @@ async function saveEntryMeta(entryId, meta) {
       ...entry.extensions || {},
       [EXTENSION_KEY]: nextMeta
     }
-  });
-  await invalidateBookCache(entry.world_book_id);
+  }, userId);
+  await invalidateBookCache(entry.world_book_id, userId);
 }
 spindle.registerInterceptor(async (messages, context) => {
   try {
@@ -707,16 +730,23 @@ spindle.registerInterceptor(async (messages, context) => {
     const chatId = typeof contextValue.chatId === "string" ? contextValue.chatId : null;
     if (!chatId)
       return messages;
-    const chat = await spindle.chats.get(chatId);
+    const userId = resolveUserId(chatId);
+    if (!userId) {
+      spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
+      return messages;
+    }
+    await ensureStorageFolders(userId);
+    const chat = await spindle.chats.get(chatId, userId);
     if (!chat?.character_id)
       return messages;
-    const config = await loadCharacterConfig(chat.character_id);
+    rememberChatUser(chatId, userId);
+    const config = await loadCharacterConfig(chat.character_id, userId);
     if (!config.enabled || !config.managedBookIds.length)
       return messages;
-    const books = (await Promise.all(config.managedBookIds.map((bookId) => loadBookCache(bookId)))).filter((book) => !!book);
+    const books = (await Promise.all(config.managedBookIds.map((bookId) => loadBookCache(bookId, userId)))).filter((book) => !!book);
     if (!books.length)
       return messages;
-    const preview = await buildRetrievalPreview(messages, config, books);
+    const preview = await buildRetrievalPreview(messages, config, books, userId);
     if (!preview?.injectedText.trim())
       return messages;
     return [{ role: "system", content: preview.injectedText }, ...messages];
@@ -728,20 +758,21 @@ spindle.registerInterceptor(async (messages, context) => {
 spindle.onFrontendMessage(async (payload, userId) => {
   lastFrontendUserId = userId;
   const message = payload;
+  rememberChatUser(readChatIdFromMessage(message), userId);
   try {
-    await ensureStorageFolders();
+    await ensureStorageFolders(userId);
     switch (message.type) {
       case "ready":
       case "refresh":
-        await pushState(message.chatId, userId);
+        await pushState(userId, message.chatId);
         break;
       case "save_character_config":
-        await saveCharacterConfig(message.characterId, message.patch);
-        await pushState(message.chatId, userId);
+        await saveCharacterConfig(message.characterId, message.patch, userId);
+        await pushState(userId, message.chatId);
         break;
       case "save_entry_meta":
-        await saveEntryMeta(message.entryId, message.meta);
-        await pushState(message.chatId, userId);
+        await saveEntryMeta(message.entryId, message.meta, userId);
+        await pushState(userId, message.chatId);
         break;
     }
   } catch (error) {
@@ -750,7 +781,4 @@ spindle.onFrontendMessage(async (payload, userId) => {
     send({ type: "error", message: description }, userId);
   }
 });
-(async () => {
-  await ensureStorageFolders();
-  spindle.log.info("Lore Recall loaded.");
-})();
+spindle.log.info("Lore Recall loaded.");
