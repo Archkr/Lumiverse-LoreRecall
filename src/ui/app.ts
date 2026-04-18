@@ -40,6 +40,7 @@ type BookDraft = { enabled: boolean; description: string; permission: BookPermis
 type EntryDraft = EntryRecallMeta & { location: string };
 type CategoryDraft = { label: string; summary: string; collapsed: boolean; parentId: string };
 type NoticeTone = "error" | "warn" | "success" | "info";
+type WorkspaceSection = "sources" | "build" | "retrieval" | "book" | "maintenance";
 type TrackedFrontendMessage = Extract<
   FrontendToBackend,
   { type: "build_tree_from_metadata" | "build_tree_with_llm" | "regenerate_summaries" | "export_snapshot" | "import_snapshot" }
@@ -89,6 +90,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let drawerTabMode: DrawerPreviewTab = "injected";
   let sourceFilter = "";
   let workspaceSearch = "";
+  let workspaceSection: WorkspaceSection = "sources";
   let selectedBookId: string | null = null;
   let selectedTreeByBook = new Map<string, TreeSelection>();
   let globalDraft: GlobalDraft | null = null;
@@ -114,9 +116,41 @@ export function setup(ctx: SpindleFrontendContext) {
     return currentState?.characterConfig?.managedBookIds ?? [];
   }
 
+  function isManagedBook(bookId: string | null): boolean {
+    return !!bookId && getManagedBookIds().includes(bookId);
+  }
+
   function getBookTree(bookId: string | null): BookTreeIndex | null {
     if (!currentState || !bookId) return null;
     return currentState.treeIndexes[bookId] ?? null;
+  }
+
+  function getSelectedBookSummary() {
+    if (!currentState || !selectedBookId) return null;
+    return currentState.allWorldBooks.find((item) => item.id === selectedBookId) ?? null;
+  }
+
+  function hasBuiltTree(bookId: string | null): boolean {
+    if (!currentState || !bookId) return false;
+    const tree = getBookTree(bookId);
+    const status = currentState.bookStatuses[bookId];
+    return !!tree && !status?.treeMissing && (!!tree.lastBuiltAt || tree.buildSource !== null);
+  }
+
+  function getRebuildMessage(bookId: string | null): TrackedFrontendMessage | null {
+    if (!currentState || !bookId || !isManagedBook(bookId) || !hasBuiltTree(bookId)) return null;
+    const source = getBookTree(bookId)?.buildSource;
+    return {
+      type: source === "llm" ? "build_tree_with_llm" : "build_tree_from_metadata",
+      bookIds: [bookId],
+      chatId: currentState.activeChatId,
+    };
+  }
+
+  function dispatchRebuild(bookId: string | null): void {
+    const message = getRebuildMessage(bookId);
+    if (!message) return;
+    dispatchTracked(message);
   }
 
   function getBookEntries(bookId: string | null): ManagedBookEntryView[] {
@@ -743,11 +777,11 @@ export function setup(ctx: SpindleFrontendContext) {
     return cards.childElementCount ? cards : null;
   }
 
-  function renderOperationStrip(): HTMLElement {
+  function renderOperationStrip(showEmpty = true): HTMLElement | null {
     const active = getActiveOperation();
     const latest = getLatestFinishedOperation();
     const wrap = createElement("section", "lore-section");
-    wrap.appendChild(createSectionHead("Operations", "Live progress, completion, and failure state."));
+    wrap.appendChild(createSectionHead("Operations", "Progress and results."));
 
     const noticesBlock = renderOperationNotices();
     if (active) {
@@ -758,10 +792,11 @@ export function setup(ctx: SpindleFrontendContext) {
 
     if (noticesBlock) wrap.appendChild(noticesBlock);
 
-    if (!active && !latest && !noticesBlock) {
+    if (!active && !latest && !noticesBlock && showEmpty) {
       wrap.appendChild(createEmpty("No operations yet", "Long-running Lore Recall actions will show their progress here."));
     }
 
+    if (!active && !latest && !noticesBlock && !showEmpty) return null;
     return wrap;
   }
 
@@ -940,31 +975,36 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderWorkspaceHeader(): HTMLElement {
     const wrap = createElement("div", "lore-page-head");
+    const state = currentState;
+    const selectedBook = getSelectedBookSummary();
+    const managedCount = getManagedBookIds().length;
+    const enabled = !!state?.characterConfig?.enabled;
 
     const copy = createElement("div", "lore-stack");
     copy.style.gap = "4px";
-    copy.appendChild(
-      createElement("div", "lore-page-title", "Lore Recall"),
-    );
+    copy.appendChild(createElement("div", "lore-page-title", "Lore Recall"));
     const sub = createElement("div", "lore-page-meta");
-    if (currentState?.activeCharacterName) {
-      sub.appendChild(createElement("span", "", currentState.activeCharacterName));
+    if (state?.activeCharacterName) {
+      sub.appendChild(createElement("span", "", state.activeCharacterName));
       sub.appendChild(createElement("span", "sep", "·"));
     }
     sub.appendChild(
       createElement(
         "span",
         "",
-        currentState?.activeChatId ? "Dense retrieval + tree workspace" : "Open a character chat to configure retrieval.",
+        state?.activeChatId ? "Retrieval setup, build, and maintenance." : "Open a character chat to configure retrieval.",
       ),
     );
     copy.appendChild(sub);
     wrap.appendChild(copy);
 
     const actions = createElement("div", "lore-cluster");
-    actions.appendChild(
-      createButton("Open tree workspace", "lore-btn lore-btn-sm", () => openWorkspace()),
+    actions.append(
+      createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"),
+      createTag(`${managedCount} managed`, managedCount ? "good" : "accent"),
     );
+    if (selectedBook) actions.appendChild(createTag(`Book: ${clipText(selectedBook.name, 26)}`, "accent"));
+    actions.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-sm", () => openWorkspace()));
     wrap.appendChild(actions);
     return wrap;
   }
@@ -1064,6 +1104,214 @@ export function setup(ctx: SpindleFrontendContext) {
     }
     section.appendChild(list);
     return section;
+  }
+
+  function createWorkspaceNavButton(section: WorkspaceSection, label: string, detail: string): HTMLButtonElement {
+    const button = createElement(
+      "button",
+      `lore-nav-btn${workspaceSection === section ? " active" : ""}`,
+    ) as HTMLButtonElement;
+    button.type = "button";
+    button.addEventListener("click", () => {
+      workspaceSection = section;
+      render();
+    });
+    const copy = createElement("span", "lore-nav-copy");
+    copy.append(createElement("span", "lore-nav-label", label), createElement("span", "lore-nav-detail", detail));
+    button.appendChild(copy);
+    return button;
+  }
+
+  function renderWorkspaceRail(state: FrontendState): HTMLElement {
+    const rail = createElement("aside", "lore-workspace-rail");
+    rail.append(
+      createWorkspaceNavButton("sources", "Sources", `${filterBooks(state, sourceFilter).length} lorebooks`),
+      createWorkspaceNavButton("build", "Build", `${getManagedBookIds().length} managed book${getManagedBookIds().length === 1 ? "" : "s"}`),
+      createWorkspaceNavButton("retrieval", "Retrieval", state.activeCharacterName || "No active character"),
+      createWorkspaceNavButton("book", "Book", getSelectedBookSummary()?.name || "Select a lorebook"),
+      createWorkspaceNavButton("maintenance", "Maintenance", "Diagnostics, backup, advanced"),
+    );
+    return rail;
+  }
+
+  function renderSourcesPanel(state: FrontendState): HTMLElement {
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Sources", "Pick the lorebooks this character can retrieve from."));
+
+    const tools = createElement("div", "lore-cluster");
+    const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (value) => {
+      sourceFilter = value;
+      render();
+    });
+    filterInput.type = "search";
+    filterInput.className = "lore-input lore-search";
+    tools.appendChild(filterInput);
+    if (state.suggestedBookIds.length && state.activeCharacterId) {
+      tools.appendChild(
+        createButton(`Add ${state.suggestedBookIds.length} suggested`, "lore-btn lore-btn-sm", () =>
+          sendToBackend(ctx, {
+            type: "apply_suggested_books",
+            characterId: state.activeCharacterId!,
+            chatId: state.activeChatId,
+            bookIds: state.suggestedBookIds,
+            mode: "append",
+          }),
+        ),
+      );
+    }
+    section.appendChild(tools);
+
+    const bookIds = filterBooks(state, sourceFilter);
+    if (!bookIds.length) {
+      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      return section;
+    }
+
+    const listWrap = createElement("div", "lore-scroll-panel");
+    const list = createElement("div", "lore-rows");
+    const activeOperation = getActiveOperation();
+    for (const bookId of bookIds) {
+      const book = state.allWorldBooks.find((item) => item.id === bookId);
+      if (!book) continue;
+      const status = state.bookStatuses[bookId];
+      const isManaged = isManagedBook(bookId);
+      const hasTree = hasBuiltTree(bookId);
+
+      const row = createElement("div", `lore-row${selectedBookId === bookId ? " active" : ""}`);
+      row.addEventListener("click", () => {
+        selectedBookId = bookId;
+        render();
+      });
+
+      const body = createElement("div", "lore-row-body");
+      body.appendChild(createElement("div", "lore-row-title", book.name));
+      row.appendChild(body);
+
+      const tags = createElement("div", "lore-row-tags");
+      if (isManaged) tags.appendChild(createTag("Managed", "good"));
+      if (state.suggestedBookIds.includes(bookId)) tags.appendChild(createTag("Suggested", "accent"));
+      if (status?.attachedToCharacter) tags.appendChild(createTag("Attached", "warn"));
+      if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
+      if (hasTree) tags.appendChild(createTag("Built", "accent"));
+      row.appendChild(tags);
+
+      const actions = createElement("div", "lore-row-actions");
+      const toggle = createButton(
+        isManaged ? "Remove" : "Manage",
+        `lore-btn lore-btn-sm lore-row-action lore-row-action-fixed${isManaged ? "" : " lore-btn-primary"}`,
+        (event) => {
+          event.stopPropagation();
+          if (!state.activeCharacterId || !state.characterConfig) return;
+          const nextIds = isManaged
+            ? state.characterConfig.managedBookIds.filter((id) => id !== bookId)
+            : [...state.characterConfig.managedBookIds, bookId];
+          sendToBackend(ctx, {
+            type: "save_character_config",
+            characterId: state.activeCharacterId,
+            chatId: state.activeChatId,
+            patch: { managedBookIds: nextIds },
+          });
+        },
+      );
+      actions.appendChild(toggle);
+
+      const rebuildMessage = getRebuildMessage(bookId);
+      if (isManaged && rebuildMessage) {
+        const rebuild = createButton("Rebuild", "lore-btn lore-btn-sm lore-row-action-fixed", (event) => {
+          event.stopPropagation();
+          dispatchTracked(rebuildMessage);
+        });
+        if (activeOperation) rebuild.disabled = true;
+        actions.appendChild(rebuild);
+      }
+
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+    listWrap.appendChild(list);
+    section.appendChild(listWrap);
+    return section;
+  }
+
+  function renderBuildPanel(state: FrontendState): HTMLElement {
+    const wrap = createElement("div", "lore-stack");
+    const summary = createElement("section", "lore-section");
+    const managed = getManagedBookIds();
+    const builtCount = managed.filter((bookId) => hasBuiltTree(bookId)).length;
+    const needsBuild = managed.length - builtCount;
+    summary.appendChild(createSectionHead("Build", "Run a global build or rebuild managed lorebooks."));
+    const metrics = createElement("div", "lore-metrics");
+    const metric = (value: string | number, label: string) => {
+      const item = createElement("div", "lore-metric");
+      item.append(createElement("div", "lore-metric-value", String(value)), createElement("div", "lore-metric-label", label));
+      return item;
+    };
+    metrics.append(metric(managed.length, "managed"), metric(builtCount, "built"), metric(needsBuild, "need build"));
+    summary.appendChild(metrics);
+    if (!managed.length) {
+      summary.appendChild(createEmpty("No managed books", "Manage at least one lorebook before building a tree."));
+    } else if (needsBuild) {
+      summary.appendChild(
+        createElement(
+          "div",
+          "lore-hint",
+          `${needsBuild} managed book${needsBuild === 1 ? "" : "s"} still need an initial build before retrieval can use them.`,
+        ),
+      );
+    }
+    wrap.append(summary, renderBuildTools(state), renderOverview(state));
+    return wrap;
+  }
+
+  function renderBookPanel(state: FrontendState): HTMLElement {
+    const wrap = createElement("div", "lore-stack");
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Book", "Selected lorebook details and maintenance."));
+
+    if (!selectedBookId) {
+      section.appendChild(createEmpty("No book selected", "Pick a lorebook from Sources to inspect its settings."));
+      wrap.appendChild(section);
+      return wrap;
+    }
+
+    const book = getSelectedBookSummary();
+    const status = state.bookStatuses[selectedBookId];
+    const managed = isManagedBook(selectedBookId);
+    const tree = getBookTree(selectedBookId);
+    const statusRow = createElement("div", "lore-cluster");
+    statusRow.append(
+      createTag(managed ? "Managed" : "Not managed", managed ? "good" : "accent"),
+      createTag(status?.attachedToCharacter ? "Attached" : "Detached", status?.attachedToCharacter ? "warn" : "accent"),
+      createTag(hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"),
+    );
+    if (tree?.buildSource) statusRow.appendChild(createTag(`Last build: ${tree.buildSource}`, "accent"));
+    section.append(
+      createElement("div", "lore-book-title", book?.name || selectedBookId),
+      statusRow,
+    );
+    wrap.appendChild(section);
+
+    wrap.appendChild(renderBookSettings(state));
+
+    const actions = createElement("section", "lore-section");
+    actions.appendChild(createSectionHead("Book actions", "Quick actions for the selected lorebook."));
+    const cluster = createElement("div", "lore-cluster");
+    if (managed && hasBuiltTree(selectedBookId)) {
+      const rebuild = createButton("Rebuild", "lore-btn lore-btn-sm", () => dispatchRebuild(selectedBookId));
+      if (getActiveOperation()) rebuild.disabled = true;
+      cluster.appendChild(rebuild);
+    }
+    cluster.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace()));
+    actions.appendChild(cluster);
+    wrap.appendChild(actions);
+
+    return wrap;
+  }
+
+  function renderMaintenancePanel(state: FrontendState): HTMLElement {
+    const wrap = createElement("div", "lore-stack");
+    wrap.append(renderDiagnostics(state), renderBackup(state), renderAdvancedSettings(state));
+    return wrap;
   }
 
   function renderBuildTools(state: FrontendState): HTMLElement {
@@ -1533,24 +1781,35 @@ export function setup(ctx: SpindleFrontendContext) {
       return;
     }
 
-    const cols = createElement("div", "lore-columns");
-    const left = createElement("div", "lore-stack");
-    left.append(
-      renderOperationStrip(),
-      renderSourcePicker(currentState),
-      renderBuildTools(currentState),
-      renderOverview(currentState),
-      renderBackup(currentState),
-      renderDiagnostics(currentState),
-    );
-    const right = createElement("div", "lore-stack");
-    right.append(
-      renderCharacterSettings(currentState),
-      renderBookSettings(currentState),
-      renderAdvancedSettings(currentState),
-    );
-    cols.append(left, right);
-    shell.appendChild(cols);
+    const workspace = createElement("div", "lore-workspace-shell");
+    workspace.appendChild(renderWorkspaceRail(currentState));
+
+    const detail = createElement("div", "lore-workspace-detail");
+    const operationStrip = renderOperationStrip(false);
+    if (operationStrip) detail.appendChild(operationStrip);
+
+    const activePanel = createElement("div", "lore-detail-stack");
+    switch (workspaceSection) {
+      case "sources":
+        activePanel.appendChild(renderSourcesPanel(currentState));
+        break;
+      case "build":
+        activePanel.appendChild(renderBuildPanel(currentState));
+        break;
+      case "retrieval":
+        activePanel.appendChild(renderCharacterSettings(currentState));
+        break;
+      case "book":
+        activePanel.appendChild(renderBookPanel(currentState));
+        break;
+      case "maintenance":
+        activePanel.appendChild(renderMaintenancePanel(currentState));
+        break;
+    }
+
+    detail.appendChild(activePanel);
+    workspace.appendChild(detail);
+    shell.appendChild(workspace);
   }
 
   // ---------- Modal workspace ------------------------------------------
@@ -1712,6 +1971,7 @@ export function setup(ctx: SpindleFrontendContext) {
       panel.appendChild(form);
 
       const actions = createElement("div", "lore-actions");
+      actions.classList.add("lore-editor-actions");
       actions.append(
         createButton("Create child", "lore-btn lore-btn-sm", () =>
           sendToBackend(ctx, {
@@ -1857,6 +2117,7 @@ export function setup(ctx: SpindleFrontendContext) {
     panel.appendChild(form);
 
     const actions = createElement("div", "lore-actions");
+    actions.classList.add("lore-editor-actions");
     actions.append(
       createButton("Regenerate summary", "lore-btn lore-btn-sm", () =>
         dispatchTracked({
@@ -1941,6 +2202,17 @@ export function setup(ctx: SpindleFrontendContext) {
     shell.appendChild(toolbar);
 
     const books = getManagedBookIds();
+    const selectedBook = getSelectedBookSummary();
+    if (selectedBookId && selectedBook) {
+      const context = createElement("div", "lore-modal-context");
+      context.append(
+        createTag(selectedBook.name, "accent"),
+        createTag(hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"),
+      );
+      const tree = getBookTree(selectedBookId);
+      if (tree?.buildSource) context.appendChild(createTag(`Last build: ${tree.buildSource}`, "accent"));
+      shell.appendChild(context);
+    }
 
     // Empty state: no books managed → collapsed single-column layout
     if (!books.length) {

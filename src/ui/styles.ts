@@ -63,6 +63,33 @@ export const LORE_RECALL_CSS = `
   padding: 4px 0 24px;
 }
 
+.lore-workspace-shell {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.lore-workspace-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--lr-panel);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r-lg);
+  position: sticky;
+  top: 0;
+}
+
+.lore-workspace-detail,
+.lore-detail-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 .lore-modal {
   display: flex;
   flex-direction: column;
@@ -89,6 +116,53 @@ export const LORE_RECALL_CSS = `
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.lore-nav-btn {
+  appearance: none;
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: transparent;
+  color: var(--lr-text);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--lr-t), border-color var(--lr-t), color var(--lr-t);
+}
+
+.lore-nav-btn:hover {
+  border-color: var(--lr-line-2);
+  background: color-mix(in srgb, var(--lr-text) 4%, transparent);
+}
+
+.lore-nav-btn.active {
+  border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-acc) 12%, transparent);
+}
+
+.lore-nav-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lore-nav-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-nav-detail {
+  font-size: 11px;
+  color: var(--lr-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---------- Page header (no card chrome) ------------------ */
@@ -462,7 +536,7 @@ export const LORE_RECALL_CSS = `
 .lore-row-body {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -492,9 +566,29 @@ export const LORE_RECALL_CSS = `
 
 .lore-row-tags:empty { display: none; }
 
-.lore-row-action {
+.lore-row-actions {
   grid-row: 1 / span 2;
   align-self: start;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lore-row-action-fixed {
+  width: 84px;
+}
+
+.lore-scroll-panel {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.lore-book-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--lr-text);
 }
 
 /* diagnostic-style list items */
@@ -850,6 +944,13 @@ export const LORE_RECALL_CSS = `
 
 .lore-actions-spacer { flex: 1 1 auto; }
 
+.lore-editor-actions {
+  position: sticky;
+  bottom: -18px;
+  padding-bottom: 2px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--lr-panel) 80%, transparent), var(--lr-panel) 24px);
+}
+
 /* ---------- Modal workspace ------------------------------- */
 
 .lore-modal-toolbar {
@@ -860,6 +961,13 @@ export const LORE_RECALL_CSS = `
 }
 
 .lore-modal-toolbar .lore-search { flex: 1 1 260px; min-width: 0; }
+
+.lore-modal-context {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: -2px;
+}
 
 .lore-modal-body {
   display: grid;
@@ -1037,6 +1145,16 @@ export const LORE_RECALL_CSS = `
 /* ---------- Responsive ------------------------------------ */
 
 @media (max-width: 1060px) {
+  .lore-workspace-shell { grid-template-columns: 1fr; }
+  .lore-workspace-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .lore-nav-btn {
+    width: auto;
+    flex: 1 1 180px;
+  }
   .lore-columns { grid-template-columns: 1fr; }
   .lore-modal-body { grid-template-columns: 1fr; }
 }
