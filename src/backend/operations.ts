@@ -118,6 +118,84 @@ async function runControllerJson(
   return null;
 }
 
+function collectCategorySummaryContext(
+  tree: any,
+  nodeId: string,
+  entries: IndexedEntry[],
+): { childLabels: string[]; sampleEntries: IndexedEntry[] } {
+  const node = tree.nodes[nodeId];
+  if (!node) return { childLabels: [], sampleEntries: [] };
+  const descendantIds = getDescendantCategoryIds(tree, nodeId, 2);
+  const childLabels = uniqueStrings(
+    descendantIds
+      .filter((id) => id !== nodeId)
+      .map((id) => tree.nodes[id]?.label)
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
+  ).slice(0, 8);
+  const sampleEntryIds = uniqueStrings(descendantIds.flatMap((id) => tree.nodes[id]?.entryIds ?? [])).slice(0, 8);
+  const sampleEntries = sampleEntryIds
+    .map((entryId) => entries.find((entry) => entry.entryId === entryId))
+    .filter((entry): entry is IndexedEntry => !!entry);
+  return { childLabels, sampleEntries };
+}
+
+async function generateCategorySummary(
+  tree: any,
+  nodeIds: string[],
+  entries: IndexedEntry[],
+  settings: GlobalLoreRecallSettings,
+  userId: string,
+) : Promise<Record<string, string>> {
+  const targets = uniqueStrings(nodeIds)
+    .map((nodeId) => ({
+      nodeId,
+      node: tree.nodes[nodeId],
+      context: collectCategorySummaryContext(tree, nodeId, entries),
+    }))
+    .filter(
+      (value): value is {
+        nodeId: string;
+        node: { label: string };
+        context: { childLabels: string[]; sampleEntries: IndexedEntry[] };
+      } => !!value.node,
+    );
+  if (!targets.length) return {};
+
+  const prompt = [
+    "Write short category summaries for these lore branches.",
+    'Return ONLY JSON in this exact shape: {"summaries":[{"nodeId":"...","summary":"..."}]}',
+    "",
+    "Categories:",
+    ...targets.map(({ nodeId, node, context }) =>
+      JSON.stringify({
+        nodeId,
+        label: node.label,
+        childCategories: context.childLabels,
+        entries: context.sampleEntries.map((entry) => ({
+          label: entry.label,
+          text: truncateText(entry.summary || entry.content, 180),
+        })),
+      }),
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const parsed = await runControllerJson(prompt, settings, userId);
+  if (!Array.isArray(parsed?.summaries)) {
+    throw new Error("The controller did not return usable category summary JSON.");
+  }
+  const result: Record<string, string> = {};
+  for (const item of parsed.summaries) {
+    if (!item || typeof item !== "object") continue;
+    const nodeId = typeof item.nodeId === "string" ? item.nodeId : "";
+    const summary = typeof item.summary === "string" ? item.summary.trim() : "";
+    if (!nodeId || !summary) continue;
+    result[nodeId] = summary;
+  }
+  return result;
+}
+
 export async function updateEntryMeta(entryId: string, meta: EntryRecallMeta, userId: string): Promise<void> {
   const entry = await spindle.world_books.entries.get(entryId, userId);
   if (!entry) throw new Error("That world book entry no longer exists.");
@@ -471,6 +549,66 @@ export async function buildTreeWithLlm(
         completedUnits += 1;
       }
 
+      const categoryNodeIds = Object.keys(tree.nodes).filter((nodeId) => {
+        if (nodeId === tree.rootId) return false;
+        const node = tree.nodes[nodeId];
+        return !!node && (node.entryIds.length > 0 || node.childIds.length > 0);
+      });
+
+      const categoryBatchSize = 6;
+      const categoryBatches = Array.from({ length: Math.ceil(categoryNodeIds.length / categoryBatchSize) }, (_, index) =>
+        categoryNodeIds.slice(index * categoryBatchSize, (index + 1) * categoryBatchSize),
+      ).filter((batch) => batch.length > 0);
+
+      for (const [batchIndex, nodeBatch] of categoryBatches.entries()) {
+        operation?.progress({
+          phase: "category_controller",
+          message: `Generating category summaries batch ${batchIndex + 1} of ${categoryBatches.length} for ${bookName}.`,
+          current: originalIndex + 1,
+          total: ids.length,
+          percent: null,
+          bookId,
+          bookName,
+          chunkCurrent: batchIndex + 1,
+          chunkTotal: categoryBatches.length,
+        });
+
+        try {
+          const summaries = await generateCategorySummary(tree, nodeBatch, cache.entries, settings, userId);
+          for (const nodeId of nodeBatch) {
+            const node = tree.nodes[nodeId];
+            if (!node) continue;
+            const summary = summaries[nodeId];
+            if (summary) {
+              node.summary = summary;
+              continue;
+            }
+            const issue: OperationIssue = {
+              severity: "warn",
+              message: `No category summary was returned for ${node.label}.`,
+              bookId,
+              bookName,
+              phase: "category_controller",
+            };
+            issues.push(issue);
+            operation?.addIssue(issue);
+          }
+        } catch (error: unknown) {
+          for (const nodeId of nodeBatch) {
+            const node = tree.nodes[nodeId];
+            const issue: OperationIssue = {
+              severity: "error",
+              message: `Category summary generation failed for ${node?.label ?? nodeId}: ${describeError(error)}`,
+              bookId,
+              bookName,
+              phase: "category_controller",
+            };
+            issues.push(issue);
+            operation?.addIssue(issue);
+          }
+        }
+      }
+
       operation?.progress({
         phase: "saving_tree",
         message: `Saving tree for ${bookName}.`,
@@ -820,63 +958,71 @@ export async function regenerateSummaries(
     }
   }
 
-  for (const nodeId of targetNodeIds) {
-    const node = loaded.tree.nodes[nodeId];
-    if (!node) continue;
+  const categoryBatchSize = 6;
+  const nodeBatches = Array.from({ length: Math.ceil(targetNodeIds.length / categoryBatchSize) }, (_, index) =>
+    targetNodeIds.slice(index * categoryBatchSize, (index + 1) * categoryBatchSize),
+  ).filter((batch) => batch.length > 0);
+
+  for (const [batchIndex, nodeBatch] of nodeBatches.entries()) {
+    const firstNode = loaded.tree.nodes[nodeBatch[0]];
 
     operation?.progress({
       phase: "category_controller",
-      message: `Generating a category summary for ${node.label} in ${bookName}.`,
+      message: `Generating category summaries batch ${batchIndex + 1} of ${nodeBatches.length} in ${bookName}.`,
       current: completed,
       total: totalTargets,
       percent: Math.round((completed / totalTargets) * 100),
       bookId,
       bookName,
-      chunkCurrent: null,
-      chunkTotal: null,
+      chunkCurrent: batchIndex + 1,
+      chunkTotal: nodeBatches.length,
     });
 
     try {
-      const descendantIds = getDescendantCategoryIds(loaded.tree, nodeId, 2);
-      const sampleEntryIds = uniqueStrings(descendantIds.flatMap((id) => loaded.tree.nodes[id]?.entryIds ?? [])).slice(0, 8);
-      const prompt = [
-        "Write a short category summary for this lore branch.",
-        'Return ONLY JSON in this exact shape: {"summary":"..."}',
-        "",
-        `Category: ${node.label}`,
-        "Entries:",
-        ...sampleEntryIds
-          .map((entryId) => cache.entries.find((entry) => entry.entryId === entryId))
-          .filter((entry): entry is IndexedEntry => !!entry)
-          .map((entry) => `- ${entry.label}: ${truncateText(entry.summary || entry.content, 180)}`),
-      ].join("\n");
-      const parsed = await runControllerJson(prompt, settings, userId);
-      if (typeof parsed?.summary !== "string" || !parsed.summary.trim()) {
-        throw new Error("The controller did not return a usable category summary.");
+      const summaries = await generateCategorySummary(loaded.tree, nodeBatch, cache.entries, settings, userId);
+      for (const nodeId of nodeBatch) {
+        const node = loaded.tree.nodes[nodeId];
+        if (!node) continue;
+        const summary = summaries[nodeId];
+        if (summary) {
+          node.summary = summary;
+          completed += 1;
+          continue;
+        }
+        const issue: OperationIssue = {
+          severity: "warn",
+          message: `No category summary was returned for ${node.label}.`,
+          bookId,
+          bookName,
+          phase: "category_controller",
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
       }
-      node.summary = parsed.summary.trim();
-      completed += 1;
       operation?.progress({
         phase: "category_complete",
-        message: `Updated category summary for ${node.label}.`,
+        message: `Updated category summaries for ${firstNode?.label ?? bookName}.`,
         current: completed,
         total: totalTargets,
         percent: Math.round((completed / totalTargets) * 100),
         bookId,
         bookName,
-        chunkCurrent: null,
-        chunkTotal: null,
+        chunkCurrent: batchIndex + 1,
+        chunkTotal: nodeBatches.length,
       });
     } catch (error: unknown) {
-      const issue: OperationIssue = {
-        severity: "error",
-        message: `Category summary regeneration failed for ${node.label}: ${describeError(error)}`,
-        bookId,
-        bookName,
-        phase: "category_controller",
-      };
-      issues.push(issue);
-      operation?.addIssue(issue);
+      for (const nodeId of nodeBatch) {
+        const node = loaded.tree.nodes[nodeId];
+        const issue: OperationIssue = {
+          severity: "error",
+          message: `Category summary regeneration failed for ${node?.label ?? nodeId}: ${describeError(error)}`,
+          bookId,
+          bookName,
+          phase: "category_controller",
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+      }
     }
   }
 
