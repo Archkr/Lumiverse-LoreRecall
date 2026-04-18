@@ -6,7 +6,7 @@
   "github": "https://github.com/lumiverse-ai/lumiverse",
   "homepage": "https://lumiverse.chat",
   "description": "Tree-aware retrieval over managed world books with per-character bindings.",
-  "permissions": ["world_books", "characters", "chats", "generation", "interceptor"],
+  "permissions": ["world_books", "characters", "chats", "chat_mutation", "generation", "interceptor"],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
   "minimum_lumiverse_version": "0.1.0"
