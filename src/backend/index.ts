@@ -55,14 +55,6 @@ const previewCache = new Map<string, RetrievalPreview | null>();
 
 interface StateBuildEnvelope {
   state: FrontendState;
-  previewContext:
-    | {
-        chatId: string;
-        settings: FrontendState["globalSettings"];
-        characterConfig: NonNullable<FrontendState["characterConfig"]>;
-        runtimeBooks: Awaited<ReturnType<typeof getRuntimeBooks>>["runtimeBooks"];
-      }
-    | null;
 }
 
 async function resolveActiveChat(userId: string, chatId?: string | null) {
@@ -122,12 +114,12 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   };
 
   if (!activeChat?.character_id) {
-    return { state: baseState, previewContext: null };
+    return { state: baseState };
   }
 
   const character = await spindle.characters.get(activeChat.character_id, userId);
   if (!character) {
-    return { state: baseState, previewContext: null };
+    return { state: baseState };
   }
 
   const characterConfig = await loadCharacterConfig(character.id, userId);
@@ -163,60 +155,9 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     suggestedBookIds,
   };
 
-  const previewContext =
-    settings.enabled && characterConfig.enabled && runtimeBooks.length
-      ? {
-          chatId: activeChat.id,
-          settings,
-          characterConfig,
-          runtimeBooks,
-        }
-      : null;
-
-  if (!previewContext) {
-    nextState.preview = null;
-  }
-
   return {
     state: nextState,
-    previewContext,
   };
-}
-
-async function refreshPreviewState(
-  userId: string,
-  sequence: number,
-  envelope: StateBuildEnvelope,
-): Promise<void> {
-  const previewContext = envelope.previewContext;
-  if (!previewContext) return;
-
-  const messages = await spindle.chat.getMessages(previewContext.chatId);
-  const preview = await buildRetrievalPreview(
-    messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-    })),
-    previewContext.settings,
-    previewContext.characterConfig,
-    previewContext.runtimeBooks,
-    userId,
-    { allowController: false },
-  );
-
-  if (latestStateSequence.get(userId) !== sequence) return;
-
-  previewCache.set(getPreviewCacheKey(userId, previewContext.chatId), preview);
-  send(
-    {
-      type: "state",
-      state: {
-        ...envelope.state,
-        preview,
-      },
-    },
-    userId,
-  );
 }
 
 async function pushState(userId: string, chatId?: string | null): Promise<void> {
@@ -228,10 +169,6 @@ async function pushState(userId: string, chatId?: string | null): Promise<void> 
 
   rememberChatUser(envelope.state.activeChatId, userId);
   send({ type: "state", state: envelope.state }, userId);
-
-  if (envelope.previewContext) {
-    void refreshPreviewState(userId, sequence, envelope);
-  }
 }
 
 const activeTrackedOperations = new Map<string, string>();
@@ -416,6 +353,10 @@ spindle.registerInterceptor(async (messages, context) => {
       context && typeof context === "object" && typeof (context as { chatId?: unknown }).chatId === "string"
         ? ((context as { chatId?: unknown }).chatId as string)
         : null;
+    const connectionId =
+      context && typeof context === "object" && typeof (context as { connectionId?: unknown }).connectionId === "string"
+        ? ((context as { connectionId?: unknown }).connectionId as string)
+        : null;
     if (!chatId) return messages;
 
     const userId = resolveUserId(chatId);
@@ -450,7 +391,13 @@ spindle.registerInterceptor(async (messages, context) => {
       config,
       runtimeBooks,
       userId,
+      {
+        connectionId,
+        isActual: true,
+        capturedAt: Date.now(),
+      },
     );
+    previewCache.set(getPreviewCacheKey(userId, chatId), preview);
     if (!preview?.injectedText.trim()) return messages;
 
     return [{ role: "system", content: preview.injectedText }, ...messages] satisfies LlmMessageDTO[];

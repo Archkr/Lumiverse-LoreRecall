@@ -719,6 +719,10 @@ function canEditBook(config) {
 }
 
 // src/backend/retrieval.ts
+var CONTROLLER_TIMEOUT_MS = 2000;
+var CONTROLLER_TOTAL_BUDGET_MS = 8500;
+var TRAVERSAL_CATEGORY_LIMIT = 24;
+var TRAVERSAL_ENTRY_LIMIT = 14;
 function stripCodeFences(content) {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
@@ -749,6 +753,24 @@ function getGenerationContent(result) {
     return "";
   const content = result.content;
   return typeof content === "string" ? content : "";
+}
+function resolveControllerConnectionId(settings, fallbackConnectionId) {
+  if (settings.controllerConnectionId?.trim())
+    return settings.controllerConnectionId.trim();
+  if (fallbackConnectionId?.trim())
+    return fallbackConnectionId.trim();
+  return null;
+}
+function pushTrace(trace, phase, label, summary, extra = {}) {
+  trace.push({
+    step: trace.length + 1,
+    phase,
+    label,
+    summary,
+    bookId: extra.bookId ?? null,
+    nodeId: extra.nodeId ?? null,
+    entryCount: extra.entryCount ?? null
+  });
 }
 function stripSearchMarkup(value) {
   return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -859,27 +881,48 @@ function scoreEntries(queryText, books) {
     return [];
   return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
-async function runControllerJson(prompt, settings, userId) {
+async function runControllerJson(prompt, controller) {
+  const remainingMs = controller.deadlineAt - Date.now();
+  if (remainingMs <= 250) {
+    return { parsed: null, error: "Traversal controller ran out of time." };
+  }
+  const abortController = new AbortController;
+  const timer = setTimeout(() => abortController.abort(), Math.min(CONTROLLER_TIMEOUT_MS, remainingMs));
   try {
     const result = await spindle.generate.quiet({
       type: "quiet",
       messages: [{ role: "user", content: prompt }],
       parameters: {
-        temperature: settings.controllerTemperature,
-        max_tokens: settings.controllerMaxTokens
+        temperature: controller.settings.controllerTemperature,
+        max_tokens: controller.settings.controllerMaxTokens
       },
-      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
-      userId
+      ...controller.connectionId ? { connection_id: controller.connectionId } : {},
+      userId: controller.userId,
+      signal: abortController.signal
     });
-    return parseJsonObject(getGenerationContent(result));
+    const parsed = parseJsonObject(getGenerationContent(result));
+    if (parsed) {
+      controller.controllerUsed = true;
+      return { parsed, error: null };
+    }
+    spindle.log.warn("Lore Recall controller call returned invalid JSON.");
+    return { parsed: null, error: "Traversal controller returned invalid JSON." };
   } catch (error) {
-    spindle.log.warn(`Lore Recall controller call failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    const message = error instanceof Error ? error.message : String(error);
+    const isAbort = error instanceof Error && error.name === "AbortError";
+    spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
+    return {
+      parsed: null,
+      error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`
+    };
+  } finally {
+    clearTimeout(timer);
   }
 }
-async function maybeChooseBooks(queryText, books, config, settings, userId, allowController) {
-  if (!allowController || config.multiBookMode !== "per_book" || books.length <= 1)
-    return books;
+async function maybeChooseBooks(queryText, books, config, controller, allowController) {
+  if (!allowController || config.multiBookMode !== "per_book" || books.length <= 1) {
+    return { books, trace: [] };
+  }
   const prompt = [
     "Choose the most relevant lore books for the query.",
     'Return ONLY JSON in this exact shape: {"bookIds":["book-id-1","book-id-2"]}.',
@@ -891,14 +934,17 @@ async function maybeChooseBooks(queryText, books, config, settings, userId, allo
     ...books.map((book) => `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(book.config.description || book.summary.description, 140)}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings, userId);
+  const { parsed } = await runControllerJson(prompt, controller);
   const ids = Array.isArray(parsed?.bookIds) ? parsed.bookIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
-    return books;
+    return { books, trace: [] };
   const chosen = books.filter((book) => ids.includes(book.summary.id));
-  return chosen.length ? chosen : books;
+  const nextBooks = chosen.length ? chosen : books;
+  const trace = [];
+  pushTrace(trace, "choose_book", "Book selection", nextBooks.length ? `Controller selected ${nextBooks.length} book(s): ${nextBooks.map((book) => book.summary.name).join(", ")}.` : "Controller kept all readable books in scope.", { entryCount: nextBooks.reduce((total, book) => total + book.cache.entries.length, 0) });
+  return { books: nextBooks, trace };
 }
-async function maybeRerankEntries(queryText, scored, settings, userId, allowController) {
+async function maybeRerankEntries(queryText, scored, controller, allowController) {
   if (!allowController || scored.length <= 1)
     return scored;
   const prompt = [
@@ -912,7 +958,7 @@ async function maybeRerankEntries(queryText, scored, settings, userId, allowCont
     ...scored.map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 120)}; preview=${truncateText(getEntryBody(item.entry), 160)}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings, userId);
+  const { parsed } = await runControllerJson(prompt, controller);
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return scored;
@@ -933,7 +979,7 @@ async function maybeRerankEntries(queryText, scored, settings, userId, allowCont
   }
   return ordered;
 }
-async function maybeSelectEntries(queryText, candidates, config, settings, userId, allowController) {
+async function maybeSelectEntries(queryText, candidates, config, controller, allowController) {
   if (!allowController || !config.selectiveRetrieval || !candidates.length)
     return candidates.slice(0, config.maxResults);
   const prompt = [
@@ -947,7 +993,7 @@ async function maybeSelectEntries(queryText, candidates, config, settings, userI
     ...candidates.slice(0, Math.max(config.maxResults * 3, 12)).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings, userId);
+  const { parsed } = await runControllerJson(prompt, controller);
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return candidates.slice(0, config.maxResults);
@@ -995,93 +1041,288 @@ function getDescendantCategoryIds(tree, nodeId, depthLimit) {
   }
   return result;
 }
-async function selectTraversalEntries(queryText, books, config, settings, userId, allowController) {
+function makeCategoryChoiceId(bookId, nodeId) {
+  return `category:${bookId}:${nodeId}`;
+}
+function parseCategoryChoiceId(choiceId) {
+  const match = choiceId.match(/^category:([^:]+):(.+)$/);
+  if (!match)
+    return null;
+  return { bookId: match[1], nodeId: match[2] };
+}
+function makeEntryChoiceId(entryId) {
+  return `entry:${entryId}`;
+}
+function parseEntryChoiceId(choiceId) {
+  const match = choiceId.match(/^entry:(.+)$/);
+  return match?.[1] ?? null;
+}
+function getScopedEntryIds(book, nodeId, includeDescendants) {
+  const node = book.tree.nodes[nodeId];
+  if (!node)
+    return [];
+  const nodeIds = includeDescendants ? getDescendantCategoryIds(book.tree, nodeId, Number.MAX_SAFE_INTEGER) : [nodeId];
+  const scopedEntryIds = uniqueStrings(nodeIds.flatMap((currentNodeId) => book.tree.nodes[currentNodeId]?.entryIds ?? []));
+  if (nodeId === book.tree.rootId) {
+    scopedEntryIds.push(...book.tree.unassignedEntryIds);
+  }
+  return uniqueStrings(scopedEntryIds);
+}
+function collectEntriesByIds(entryIds, deterministicById) {
+  const selected = [];
+  const seen = new Set;
+  for (const entryId of entryIds) {
+    if (seen.has(entryId))
+      continue;
+    const match = deterministicById.get(entryId);
+    if (!match)
+      continue;
+    seen.add(entryId);
+    selected.push(match);
+  }
+  return selected;
+}
+function rescoreEntries(queryText, candidates, booksById) {
+  const normalized = normalizeSearchText(queryText);
+  const queryTokens = tokenize(queryText);
+  if (!normalized || !queryTokens.length || !candidates.length)
+    return [];
+  return candidates.map((candidate) => {
+    const book = booksById.get(candidate.entry.worldBookId);
+    if (!book)
+      return null;
+    return scoreEntry(candidate.entry, book.tree, normalized, queryTokens);
+  }).filter((item) => !!item && item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
+}
+function buildTraversalFrontier(scopes, deterministicById, config, overrideEntries) {
+  const categories = [];
+  const entries = [];
+  const seenCategories = new Set;
+  const seenEntries = new Set;
+  for (const scope of scopes) {
+    const node = scope.book.tree.nodes[scope.nodeId];
+    if (!node)
+      continue;
+    if (getNodeDepth(scope.book.tree, scope.nodeId) < config.maxTraversalDepth) {
+      for (const childId of node.childIds) {
+        const child = scope.book.tree.nodes[childId];
+        if (!child)
+          continue;
+        const choiceId = makeCategoryChoiceId(scope.book.summary.id, child.id);
+        if (seenCategories.has(choiceId))
+          continue;
+        seenCategories.add(choiceId);
+        categories.push({
+          choiceId,
+          book: scope.book,
+          nodeId: child.id,
+          label: `${scope.book.summary.name} :: ${child.label}`,
+          summary: truncateText(child.summary, 160),
+          depth: getNodeDepth(scope.book.tree, child.id),
+          childCount: child.childIds.length,
+          entryCount: getScopedEntryIds(scope.book, child.id, true).length
+        });
+      }
+    }
+    if (overrideEntries)
+      continue;
+    for (const entry of collectEntriesByIds(getScopedEntryIds(scope.book, scope.nodeId, false), deterministicById)) {
+      if (seenEntries.has(entry.entry.entryId))
+        continue;
+      seenEntries.add(entry.entry.entryId);
+      entries.push(entry);
+    }
+  }
+  if (overrideEntries) {
+    for (const entry of overrideEntries) {
+      if (seenEntries.has(entry.entry.entryId))
+        continue;
+      seenEntries.add(entry.entry.entryId);
+      entries.push(entry);
+    }
+  }
+  return {
+    scopeLabel: scopes.map((scope) => {
+      const node = scope.book.tree.nodes[scope.nodeId];
+      if (!node || scope.nodeId === scope.book.tree.rootId)
+        return scope.book.summary.name;
+      return `${scope.book.summary.name} :: ${node.label}`;
+    }).join(" | "),
+    categories: categories.sort((left, right) => left.depth - right.depth || left.label.localeCompare(right.label)).slice(0, TRAVERSAL_CATEGORY_LIMIT),
+    entries: entries.sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, TRAVERSAL_ENTRY_LIMIT)
+  };
+}
+function buildTraversalPrompt(queryText, frontier, step, config) {
+  return [
+    "You are the Lore Recall traversal controller.",
+    'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","choiceIds":["..."],"query":"optional search query","reason":"short reason"}.',
+    "Rules:",
+    "- Use action navigate to drill into category choiceIds from the current frontier.",
+    "- Use action retrieve to pull content from category or entry choiceIds in the current frontier.",
+    "- Use action search to narrow the current scope with a short search query.",
+    "- Use action finish only when the currently visible entry set is enough to inject.",
+    `- Stay within ${config.traversalStepLimit} total steps and prefer the smallest useful branch.`,
+    "",
+    `Original query: ${queryText}`,
+    `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
+    `Current scope: ${frontier.scopeLabel || "All selected books"}`,
+    "",
+    "Category choices:",
+    ...frontier.categories.length ? frontier.categories.map((category) => `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"],
+    "",
+    "Direct entry choices:",
+    ...frontier.entries.length ? frontier.entries.map((entry) => `- choiceId=${makeEntryChoiceId(entry.entry.entryId)}; label=${entry.entry.label}; book=${entry.entry.worldBookName}; breadcrumb=${entry.entry.worldBookName} :: ${entry.entry.label}; summary=${truncateText(entry.entry.summary || getEntryBody(entry.entry), 180)}`) : ["- none"]
+  ].join(`
+`);
+}
+async function selectTraversalEntries(queryText, books, config, controller, allowController) {
   const deterministic = scoreEntries(queryText, books).slice(0, Math.max(config.maxResults * 4, 16));
+  const trace = [];
   if (!deterministic.length) {
+    pushTrace(trace, "fallback", "No traversal candidates", "Traversal found no scored entries, so nothing was injected.");
     return {
       selected: [],
       fallbackReason: "Traversal found no scored entries, so nothing was injected.",
-      steps: ["No traversal candidates scored above zero."]
+      steps: ["No traversal candidates scored above zero."],
+      trace
     };
   }
   if (!allowController) {
+    pushTrace(trace, "fallback", "Traversal controller skipped", "Fast preview mode skipped traversal controller selection and used deterministic fallback results.", { entryCount: Math.min(config.maxResults, deterministic.length) });
     return {
       selected: deterministic.slice(0, config.maxResults),
       fallbackReason: "Fast preview skipped traversal controller selection and used deterministic fallback results.",
-      steps: ["Fast preview mode skipped controller-driven traversal."]
+      steps: ["Fast preview mode skipped controller-driven traversal."],
+      trace
     };
   }
-  const categoryRows = [];
-  for (const book of books) {
-    for (const node of Object.values(book.tree.nodes)) {
-      if (node.id === book.tree.rootId)
-        continue;
-      const depth = getNodeDepth(book.tree, node.id);
-      if (depth > Math.min(config.maxTraversalDepth, config.traversalStepLimit))
-        continue;
-      categoryRows.push({
-        id: `${book.summary.id}:${node.id}`,
-        label: `${book.summary.name} :: ${node.label}`,
-        summary: truncateText(node.summary, 140),
-        depth,
-        entryCount: node.entryIds.length
-      });
-    }
-  }
-  const prompt = [
-    "Choose relevant traversal branches and direct entry IDs.",
-    'Return ONLY JSON in this exact shape: {"categoryIds":["book:node"],"entryIds":["entry-id"]}.',
-    `You may choose up to ${config.maxTraversalDepth} categoryIds and ${config.maxResults} entryIds.`,
-    "",
-    `Query: ${queryText}`,
-    "",
-    "Categories:",
-    ...categoryRows.slice(0, 80).map((row) => `- categoryId=${row.id}; label=${row.label}; depth=${row.depth}; entries=${row.entryCount}; summary=${row.summary}`),
-    "",
-    "Fallback entries:",
-    ...deterministic.slice(0, 24).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 120)}`)
-  ].join(`
-`);
-  const parsed = await runControllerJson(prompt, settings, userId);
-  const categoryIds = Array.isArray(parsed?.categoryIds) ? parsed.categoryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-  const entryIds = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
-  const selectedMap = new Map;
+  const booksById = new Map(books.map((book) => [book.summary.id, book]));
+  let scopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  let overrideEntries = null;
   const steps = [
     `${books.length} book(s) considered for traversal.`,
-    `${categoryRows.length} category branch(es) exposed to the controller.`
+    `${deterministic.length} scored entry candidate(s) available for traversal.`
   ];
-  for (const categoryId of categoryIds) {
-    const [bookId, nodeId] = categoryId.split(":");
-    const book = books.find((item) => item.summary.id === bookId);
-    if (!book || !book.tree.nodes[nodeId])
-      continue;
-    const nodeIds = getDescendantCategoryIds(book.tree, nodeId, Math.min(config.maxTraversalDepth, config.traversalStepLimit));
-    const entryIdsFromCategories = uniqueStrings(nodeIds.flatMap((id) => book.tree.nodes[id]?.entryIds ?? []));
-    for (const entryId of entryIdsFromCategories) {
-      const match = deterministicById.get(entryId);
-      if (match)
-        selectedMap.set(entryId, match);
+  for (let step = 0;step < config.traversalStepLimit; step += 1) {
+    const frontier = buildTraversalFrontier(scopes, deterministicById, config, overrideEntries);
+    if (!frontier.categories.length && !frontier.entries.length) {
+      pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
+      return {
+        selected: deterministic.slice(0, config.maxResults),
+        fallbackReason: "Traversal reached an empty frontier, so collapsed retrieval was used instead.",
+        steps: [...steps, "Collapsed fallback used because traversal had no frontier choices."],
+        trace
+      };
     }
-  }
-  for (const entryId of entryIds) {
-    const match = deterministicById.get(entryId);
-    if (match)
-      selectedMap.set(entryId, match);
-  }
-  const selected = Array.from(selectedMap.values()).sort((left, right) => right.score - left.score);
-  if (!selected.length) {
+    const response = await runControllerJson(buildTraversalPrompt(queryText, frontier, step, config), controller);
+    if (!response.parsed) {
+      const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
+      pushTrace(trace, "fallback", "Controller failed", fallbackReason);
+      return {
+        selected: deterministic.slice(0, config.maxResults),
+        fallbackReason: `${fallbackReason} Collapsed retrieval was used instead.`,
+        steps: [...steps, "Collapsed fallback used because traversal controller output was invalid."],
+        trace
+      };
+    }
+    const action = typeof response.parsed.action === "string" ? response.parsed.action.trim().toLowerCase() : "";
+    const choiceIds = Array.isArray(response.parsed.choiceIds) ? response.parsed.choiceIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+    const reason = typeof response.parsed.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "No controller reason provided.";
+    if (action === "navigate") {
+      const nextScopes = choiceIds.map(parseCategoryChoiceId).filter((value) => !!value).map((value) => ({ book: booksById.get(value.bookId) ?? null, nodeId: value.nodeId })).filter((value) => !!value.book && !!value.book.tree.nodes[value.nodeId]);
+      if (!nextScopes.length) {
+        pushTrace(trace, "fallback", "Invalid navigate", "Controller picked no valid traversal branches.");
+        return {
+          selected: deterministic.slice(0, config.maxResults),
+          fallbackReason: "Traversal controller chose no valid branches, so collapsed retrieval was used instead.",
+          steps: [...steps, "Collapsed fallback used because no valid traversal branch was selected."],
+          trace
+        };
+      }
+      scopes = nextScopes;
+      overrideEntries = null;
+      pushTrace(trace, "navigate", "Navigate deeper", `${reason} Opened ${nextScopes.length} branch(es).`, {
+        bookId: nextScopes[0]?.book.summary.id ?? null,
+        nodeId: nextScopes[0]?.nodeId ?? null
+      });
+      continue;
+    }
+    if (action === "search") {
+      const searchQuery = typeof response.parsed.query === "string" && response.parsed.query.trim() ? response.parsed.query.trim() : queryText;
+      const scopeEntries = collectEntriesByIds(uniqueStrings(scopes.flatMap((scope) => getScopedEntryIds(scope.book, scope.nodeId, true))), deterministicById);
+      const rescored = rescoreEntries(searchQuery, scopeEntries, booksById).slice(0, Math.max(config.maxResults * 2, 10));
+      if (!rescored.length) {
+        pushTrace(trace, "fallback", "Search found nothing", `Search "${searchQuery}" found no scoped traversal matches.`);
+        return {
+          selected: deterministic.slice(0, config.maxResults),
+          fallbackReason: `Traversal search "${searchQuery}" found no usable results, so collapsed retrieval was used instead.`,
+          steps: [...steps, `Collapsed fallback used because traversal search "${searchQuery}" found nothing.`],
+          trace
+        };
+      }
+      overrideEntries = rescored;
+      pushTrace(trace, "search", `Search: ${searchQuery}`, `${reason} Search surfaced ${rescored.length} direct entry option(s).`, { entryCount: rescored.length });
+      continue;
+    }
+    if (action === "retrieve" || action === "finish") {
+      let selectedCandidates = [];
+      if (action === "finish") {
+        selectedCandidates = ((overrideEntries?.length) ? overrideEntries : frontier.entries).slice(0, Math.max(config.maxResults * 2, 10));
+      } else {
+        const selectedMap = new Map;
+        for (const choiceId of choiceIds) {
+          const categoryChoice = parseCategoryChoiceId(choiceId);
+          if (categoryChoice) {
+            const book = booksById.get(categoryChoice.bookId);
+            if (!book || !book.tree.nodes[categoryChoice.nodeId])
+              continue;
+            for (const item of collectEntriesByIds(getScopedEntryIds(book, categoryChoice.nodeId, true), deterministicById)) {
+              selectedMap.set(item.entry.entryId, item);
+            }
+            continue;
+          }
+          const entryId = parseEntryChoiceId(choiceId);
+          if (!entryId)
+            continue;
+          const match = deterministicById.get(entryId);
+          if (match)
+            selectedMap.set(entryId, match);
+        }
+        selectedCandidates = Array.from(selectedMap.values()).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
+      }
+      if (!selectedCandidates.length) {
+        pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal did not resolve any entries from the selected choices.");
+        return {
+          selected: deterministic.slice(0, config.maxResults),
+          fallbackReason: "Traversal controller returned no usable entries, so collapsed retrieval was used instead.",
+          steps: [...steps, "Collapsed fallback used because traversal did not resolve any entries."],
+          trace
+        };
+      }
+      const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selectedCandidates, config, controller, allowController) : selectedCandidates.slice(0, config.maxResults);
+      pushTrace(trace, action === "finish" ? "finish" : "retrieve", action === "finish" ? "Finish traversal" : "Retrieve entries", `${reason} Resolved ${finalSelected.length} entry candidate(s).`, { entryCount: finalSelected.length });
+      return {
+        selected: finalSelected,
+        fallbackReason: null,
+        steps: [...steps, `Traversal selected ${finalSelected.length} entry candidate(s).`],
+        trace
+      };
+    }
+    pushTrace(trace, "fallback", "Unknown action", `Traversal controller returned unsupported action "${action || "empty"}".`);
     return {
       selected: deterministic.slice(0, config.maxResults),
-      fallbackReason: "Traversal controller returned no usable branches, so collapsed retrieval was used instead.",
-      steps: [...steps, "Collapsed fallback used because no traversal branch resolved to entries."]
+      fallbackReason: "Traversal controller returned an unsupported action, so collapsed retrieval was used instead.",
+      steps: [...steps, "Collapsed fallback used because traversal controller returned an unsupported action."],
+      trace
     };
   }
-  const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selected, config, settings, userId, allowController) : selected.slice(0, config.maxResults);
+  pushTrace(trace, "fallback", "Step limit reached", `Traversal hit the ${config.traversalStepLimit}-step limit and fell back to collapsed retrieval.`);
   return {
-    selected: finalSelected,
-    fallbackReason: null,
-    steps: [...steps, `Traversal selected ${finalSelected.length} entry candidate(s).`]
+    selected: deterministic.slice(0, config.maxResults),
+    fallbackReason: `Traversal exhausted its ${config.traversalStepLimit}-step limit, so collapsed retrieval was used instead.`,
+    steps: [...steps, "Collapsed fallback used because traversal exceeded the configured step limit."],
+    trace
   };
 }
 function buildPreviewNodes(selected, booksById) {
@@ -1161,42 +1402,55 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length)
     return null;
-  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId, allowController);
+  const controller = {
+    settings,
+    userId,
+    connectionId: resolveControllerConnectionId(settings, options.connectionId),
+    controllerUsed: false,
+    deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS
+  };
+  const chosenBooksResult = await maybeChooseBooks(queryText, readableBooks, config, controller, allowController);
+  const chosenBooks = chosenBooksResult.books;
   const steps = [
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`
   ];
+  const trace = [...chosenBooksResult.trace];
   let selected = [];
   let fallbackReason = null;
   if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId, allowController);
+    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, controller, allowController);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
     steps.push(...traversal.steps);
+    trace.push(...traversal.trace);
   } else {
     let collapsed = scoreEntries(queryText, chosenBooks);
     if (config.rerankEnabled && allowController) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId, allowController);
+      collapsed = await maybeRerankEntries(queryText, collapsed, controller, allowController);
       steps.push("Collapsed retrieval reranked top candidates.");
     }
-    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, settings, userId, allowController) : collapsed.slice(0, config.maxResults);
+    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, controller, allowController) : collapsed.slice(0, config.maxResults);
     steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
+    pushTrace(trace, "retrieve", "Collapsed retrieval", `Collapsed mode resolved ${selected.length} entry candidate(s).`, { entryCount: selected.length });
   }
-  if (!selected.length)
-    return null;
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
-  if (!injection)
-    return null;
+  const included = injection?.included ?? selected;
   return {
     mode: config.searchMode,
     queryText,
-    estimatedTokens: injection.estimatedTokens,
-    injectedText: injection.text,
-    selectedNodes: buildPreviewNodes(injection.included, booksById),
+    estimatedTokens: injection?.estimatedTokens ?? 0,
+    injectedText: injection?.text ?? "",
+    selectedNodes: buildPreviewNodes(included, booksById),
     fallbackReason,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
-    steps
+    steps,
+    trace,
+    capturedAt: options.capturedAt ?? Date.now(),
+    isActual: options.isActual === true,
+    controllerUsed: controller.controllerUsed,
+    resolvedConnectionId: controller.controllerUsed ? controller.connectionId : null
   };
 }
 
@@ -2349,11 +2603,11 @@ async function buildState(userId, chatId) {
     preview: cachedPreview
   };
   if (!activeChat?.character_id) {
-    return { state: baseState, previewContext: null };
+    return { state: baseState };
   }
   const character = await spindle.characters.get(activeChat.character_id, userId);
   if (!character) {
-    return { state: baseState, previewContext: null };
+    return { state: baseState };
   }
   const characterConfig = await loadCharacterConfig(character.id, userId);
   const validBookIds = new Set(allBooks.map((book) => book.id));
@@ -2380,39 +2634,9 @@ async function buildState(userId, chatId) {
     diagnosticsResults,
     suggestedBookIds
   };
-  const previewContext = settings.enabled && characterConfig.enabled && runtimeBooks.length ? {
-    chatId: activeChat.id,
-    settings,
-    characterConfig,
-    runtimeBooks
-  } : null;
-  if (!previewContext) {
-    nextState.preview = null;
-  }
   return {
-    state: nextState,
-    previewContext
+    state: nextState
   };
-}
-async function refreshPreviewState(userId, sequence, envelope) {
-  const previewContext = envelope.previewContext;
-  if (!previewContext)
-    return;
-  const messages = await spindle.chat.getMessages(previewContext.chatId);
-  const preview = await buildRetrievalPreview(messages.map((message) => ({
-    role: message.role,
-    content: message.content
-  })), previewContext.settings, previewContext.characterConfig, previewContext.runtimeBooks, userId, { allowController: false });
-  if (latestStateSequence.get(userId) !== sequence)
-    return;
-  previewCache.set(getPreviewCacheKey(userId, previewContext.chatId), preview);
-  send({
-    type: "state",
-    state: {
-      ...envelope.state,
-      preview
-    }
-  }, userId);
 }
 async function pushState(userId, chatId) {
   const sequence = (latestStateSequence.get(userId) ?? 0) + 1;
@@ -2422,9 +2646,6 @@ async function pushState(userId, chatId) {
     return;
   rememberChatUser(envelope.state.activeChatId, userId);
   send({ type: "state", state: envelope.state }, userId);
-  if (envelope.previewContext) {
-    refreshPreviewState(userId, sequence, envelope);
-  }
 }
 var activeTrackedOperations = new Map;
 function createOperationId(kind) {
@@ -2584,6 +2805,7 @@ async function runTrackedOperation(userId, message, kind, runner, onSuccess) {
 spindle.registerInterceptor(async (messages, context) => {
   try {
     const chatId = context && typeof context === "object" && typeof context.chatId === "string" ? context.chatId : null;
+    const connectionId = context && typeof context === "object" && typeof context.connectionId === "string" ? context.connectionId : null;
     if (!chatId)
       return messages;
     const userId = resolveUserId(chatId);
@@ -2606,7 +2828,12 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length)
       return messages;
-    const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId);
+    const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId, {
+      connectionId,
+      isActual: true,
+      capturedAt: Date.now()
+    });
+    previewCache.set(getPreviewCacheKey(userId, chatId), preview);
     if (!preview?.injectedText.trim())
       return messages;
     return [{ role: "system", content: preview.injectedText }, ...messages];

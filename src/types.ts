@@ -6,6 +6,7 @@ export type DedupMode = "none" | "lexical" | "llm";
 export type TreeBuildSource = "metadata" | "llm" | "migration" | "manual" | null;
 export type TreeNodeKind = "root" | "category";
 export type DiagnosticSeverity = "info" | "warn" | "error";
+export type TraversalTracePhase = "choose_book" | "navigate" | "search" | "retrieve" | "finish" | "fallback";
 
 export interface GlobalLoreRecallSettings {
   enabled: boolean;
@@ -139,6 +140,16 @@ export interface PreviewNode {
   previewText: string;
 }
 
+export interface TraversalTraceStep {
+  step: number;
+  phase: TraversalTracePhase;
+  label: string;
+  summary: string;
+  bookId?: string | null;
+  nodeId?: string | null;
+  entryCount?: number | null;
+}
+
 export interface RetrievalPreview {
   mode: SearchMode;
   queryText: string;
@@ -148,6 +159,11 @@ export interface RetrievalPreview {
   fallbackReason: string | null;
   selectedBookIds: string[];
   steps: string[];
+  trace: TraversalTraceStep[];
+  capturedAt: number;
+  isActual: boolean;
+  controllerUsed: boolean;
+  resolvedConnectionId?: string | null;
 }
 
 export interface ExportSnapshot {

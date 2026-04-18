@@ -747,6 +747,32 @@ export const LORE_RECALL_CSS = `
   line-height: 1.5;
 }
 
+.lore-trace-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.lore-trace-item {
+  padding: 10px 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+}
+
+.lore-trace-step {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-trace-body {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--lr-muted);
+}
+
 /* ---------- Forms ---------------------------------------- */
 
 .lore-form {

@@ -711,6 +711,73 @@ export function setup(ctx: SpindleFrontendContext) {
     return wrap;
   }
 
+  function formatCapturedAt(timestamp: number | null | undefined): string {
+    if (!timestamp || !Number.isFinite(timestamp)) return "Unknown time";
+    return new Date(timestamp).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  function renderRetrievalTrace(): HTMLElement | null {
+    const preview = currentState?.preview;
+    if (!preview?.trace?.length) return null;
+
+    const trace = createElement("div", "lore-trace-list");
+    for (const step of preview.trace) {
+      const item = createElement("div", "lore-trace-item");
+      item.append(
+        createElement("div", "lore-trace-step", `${step.step}. ${step.label}`),
+        createElement("div", "lore-trace-body", step.summary),
+      );
+      trace.appendChild(item);
+    }
+    return trace;
+  }
+
+  function renderLastRetrievalWorkspaceSection(): HTMLElement | null {
+    const preview = currentState?.preview;
+    if (!preview) return null;
+
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Last retrieval", "Most recent captured retrieval for this chat."));
+
+    const meta = createElement("div", "lore-cluster");
+    meta.append(
+      createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"),
+      createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"),
+      createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`),
+    );
+    section.appendChild(meta);
+
+    if (preview.fallbackReason) {
+      section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
+    }
+
+    if (preview.selectedNodes.length) {
+      const list = createElement("div", "lore-stack");
+      list.style.gap = "8px";
+      for (const node of preview.selectedNodes.slice(0, 4)) {
+        const item = createElement("div", "lore-node");
+        item.append(
+          createElement("div", "lore-node-title", node.label),
+          createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`),
+          createElement("div", "lore-node-body", clipText(node.previewText, 220)),
+        );
+        list.appendChild(item);
+      }
+      section.appendChild(list);
+    } else {
+      section.appendChild(createEmpty("Nothing injected", "The most recent turn completed with no retrieved entries."));
+    }
+
+    const trace = renderRetrievalTrace();
+    if (trace) section.appendChild(trace);
+    return section;
+  }
+
   function createBreadcrumb(segments: string[]): HTMLElement {
     const wrap = createElement("div", "lore-breadcrumb");
     if (!segments.length) {
@@ -863,7 +930,7 @@ export function setup(ctx: SpindleFrontendContext) {
       shell.appendChild(operationSection);
     }
 
-    // --- Retrieval preview section ----------------------------------
+    // --- Last retrieval section -------------------------------------
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
@@ -878,10 +945,28 @@ export function setup(ctx: SpindleFrontendContext) {
         }),
       );
     }
-    preview.append(createSectionHead("Retrieval preview", "What gets injected for the active turn."), tabs);
+    preview.append(createSectionHead("Last retrieval", "Captured from the most recent generated turn."), tabs);
 
     if (!state?.preview) {
-      preview.appendChild(createEmpty("No preview yet", "Send a message to see what Lore Recall retrieves."));
+      preview.appendChild(createEmpty("No retrieval captured yet", "Send a message to capture Lore Recall's actual retrieval for this chat."));
+    } else {
+      const meta = createElement("div", "lore-cluster");
+      meta.append(
+        createTag(state.preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"),
+        createTag(state.preview.controllerUsed ? "Controller used" : "Deterministic fallback", state.preview.controllerUsed ? "good" : "warn"),
+        createTag(`Captured ${formatCapturedAt(state.preview.capturedAt)}`),
+      );
+      if (state.preview.resolvedConnectionId) {
+        meta.appendChild(createTag(`Conn ${truncateMiddle(state.preview.resolvedConnectionId, 8, 6)}`));
+      }
+      preview.appendChild(meta);
+      if (state.preview.fallbackReason) {
+        preview.appendChild(createBanner("warn", "Fallback used", state.preview.fallbackReason));
+      }
+    }
+
+    if (!state?.preview) {
+      // already rendered empty state above
     } else if (drawerTabMode === "injected") {
       const text = state.preview.injectedText?.trim() ? state.preview.injectedText : "";
       preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Nothing injected", "This turn ran with no retrieved entries."));
@@ -906,6 +991,8 @@ export function setup(ctx: SpindleFrontendContext) {
         preview.appendChild(list);
       }
     }
+    const trace = renderRetrievalTrace();
+    if (trace) preview.appendChild(trace);
     shell.appendChild(preview);
 
     // --- Sources section --------------------------------------------
@@ -1004,6 +1091,10 @@ export function setup(ctx: SpindleFrontendContext) {
       createTag(`${managedCount} managed`, managedCount ? "good" : "accent"),
     );
     if (selectedBook) actions.appendChild(createTag(`Book: ${clipText(selectedBook.name, 26)}`, "accent"));
+    if (state?.preview) {
+      actions.appendChild(createTag(`Last retrieval ${formatCapturedAt(state.preview.capturedAt)}`));
+      actions.appendChild(createTag(state.preview.controllerUsed ? "Controller path" : "Fallback path", state.preview.controllerUsed ? "good" : "warn"));
+    }
     actions.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-sm", () => openWorkspace()));
     wrap.appendChild(actions);
     return wrap;
@@ -1787,6 +1878,8 @@ export function setup(ctx: SpindleFrontendContext) {
     const detail = createElement("div", "lore-workspace-detail");
     const operationStrip = renderOperationStrip(false);
     if (operationStrip) detail.appendChild(operationStrip);
+    const lastRetrieval = renderLastRetrievalWorkspaceSection();
+    if (lastRetrieval) detail.appendChild(lastRetrieval);
 
     const activePanel = createElement("div", "lore-detail-stack");
     switch (workspaceSection) {
