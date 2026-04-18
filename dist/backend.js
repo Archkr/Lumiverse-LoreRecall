@@ -850,7 +850,7 @@ function scoreEntries(queryText, books) {
     return [];
   return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
-async function runControllerJson(prompt, settings) {
+async function runControllerJson(prompt, settings, userId) {
   try {
     const result = await spindle.generate.quiet({
       type: "quiet",
@@ -859,7 +859,8 @@ async function runControllerJson(prompt, settings) {
         temperature: settings.controllerTemperature,
         max_tokens: settings.controllerMaxTokens
       },
-      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}
+      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
+      userId
     });
     return parseJsonObject(getGenerationContent(result));
   } catch (error) {
@@ -867,7 +868,7 @@ async function runControllerJson(prompt, settings) {
     return null;
   }
 }
-async function maybeChooseBooks(queryText, books, config, settings) {
+async function maybeChooseBooks(queryText, books, config, settings, userId) {
   if (config.multiBookMode !== "per_book" || books.length <= 1)
     return books;
   const prompt = [
@@ -881,14 +882,14 @@ async function maybeChooseBooks(queryText, books, config, settings) {
     ...books.map((book) => `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(book.config.description || book.summary.description, 140)}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.bookIds) ? parsed.bookIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return books;
   const chosen = books.filter((book) => ids.includes(book.summary.id));
   return chosen.length ? chosen : books;
 }
-async function maybeRerankEntries(queryText, scored, settings) {
+async function maybeRerankEntries(queryText, scored, settings, userId) {
   if (scored.length <= 1)
     return scored;
   const prompt = [
@@ -902,7 +903,7 @@ async function maybeRerankEntries(queryText, scored, settings) {
     ...scored.map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 120)}; preview=${truncateText(getEntryBody(item.entry), 160)}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return scored;
@@ -923,7 +924,7 @@ async function maybeRerankEntries(queryText, scored, settings) {
   }
   return ordered;
 }
-async function maybeSelectEntries(queryText, candidates, config, settings) {
+async function maybeSelectEntries(queryText, candidates, config, settings, userId) {
   if (!config.selectiveRetrieval || !candidates.length)
     return candidates.slice(0, config.maxResults);
   const prompt = [
@@ -937,7 +938,7 @@ async function maybeSelectEntries(queryText, candidates, config, settings) {
     ...candidates.slice(0, Math.max(config.maxResults * 3, 12)).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return candidates.slice(0, config.maxResults);
@@ -985,7 +986,7 @@ function getDescendantCategoryIds(tree, nodeId, depthLimit) {
   }
   return result;
 }
-async function selectTraversalEntries(queryText, books, config, settings) {
+async function selectTraversalEntries(queryText, books, config, settings, userId) {
   const deterministic = scoreEntries(queryText, books).slice(0, Math.max(config.maxResults * 4, 16));
   if (!deterministic.length) {
     return {
@@ -1025,7 +1026,7 @@ async function selectTraversalEntries(queryText, books, config, settings) {
     ...deterministic.slice(0, 24).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 120)}`)
   ].join(`
 `);
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const categoryIds = Array.isArray(parsed?.categoryIds) ? parsed.categoryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   const entryIds = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
@@ -1060,7 +1061,7 @@ async function selectTraversalEntries(queryText, books, config, settings) {
       steps: [...steps, "Collapsed fallback used because no traversal branch resolved to entries."]
     };
   }
-  const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selected, config, settings) : selected.slice(0, config.maxResults);
+  const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selected, config, settings, userId) : selected.slice(0, config.maxResults);
   return {
     selected: finalSelected,
     fallbackReason: null,
@@ -1136,14 +1137,14 @@ function buildInjectionText(selected, booksById, tokenBudget, collapsedDepth) {
     estimatedTokens: Math.ceil(text.length / 4)
   };
 }
-async function buildRetrievalPreview(messages, settings, config, books) {
+async function buildRetrievalPreview(messages, settings, config, books, userId) {
   const queryText = buildQueryText(messages, config.contextMessages);
   if (!queryText.trim())
     return null;
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length)
     return null;
-  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings);
+  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId);
   const steps = [
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`
@@ -1151,17 +1152,17 @@ async function buildRetrievalPreview(messages, settings, config, books) {
   let selected = [];
   let fallbackReason = null;
   if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings);
+    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
     steps.push(...traversal.steps);
   } else {
     let collapsed = scoreEntries(queryText, chosenBooks);
     if (config.rerankEnabled) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, settings);
+      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId);
       steps.push("Collapsed retrieval reranked top candidates.");
     }
-    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, settings) : collapsed.slice(0, config.maxResults);
+    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, settings, userId) : collapsed.slice(0, config.maxResults);
     steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
   }
   if (!selected.length)
@@ -1183,7 +1184,7 @@ async function buildRetrievalPreview(messages, settings, config, books) {
 }
 
 // src/backend/operations.ts
-async function runControllerJson2(prompt, settings) {
+async function runControllerJson2(prompt, settings, userId) {
   try {
     const result = await spindle.generate.quiet({
       type: "quiet",
@@ -1192,7 +1193,8 @@ async function runControllerJson2(prompt, settings) {
         temperature: settings.controllerTemperature,
         max_tokens: settings.controllerMaxTokens
       },
-      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}
+      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
+      userId
     });
     const content = (result && typeof result === "object" && typeof result.content === "string" ? result.content : "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
     if (!content)
@@ -1323,7 +1325,7 @@ async function buildTreeWithLlm(bookIds, userId) {
         }))
       ].join(`
 `);
-      const parsed = await runControllerJson2(prompt, settings);
+      const parsed = await runControllerJson2(prompt, settings, userId);
       const assignments = Array.isArray(parsed?.assignments) ? parsed.assignments.filter((value) => !!value && typeof value === "object") : [];
       for (const assignment of assignments) {
         const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
@@ -1530,7 +1532,7 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId) {
       }))
     ].join(`
 `);
-    const parsed = await runControllerJson2(prompt, settings);
+    const parsed = await runControllerJson2(prompt, settings, userId);
     const updates = Array.isArray(parsed?.entries) ? parsed.entries.filter((value) => !!value && typeof value === "object") : [];
     for (const update of updates) {
       const entryId = typeof update.entryId === "string" ? update.entryId : "";
@@ -1572,7 +1574,7 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId) {
       ...sampleEntryIds.map((entryId) => cache.entries.find((entry) => entry.entryId === entryId)).filter((entry) => !!entry).map((entry) => `- ${entry.label}: ${truncateText(entry.summary || entry.content, 180)}`)
     ].join(`
 `);
-    const parsed = await runControllerJson2(prompt, settings);
+    const parsed = await runControllerJson2(prompt, settings, userId);
     if (typeof parsed?.summary === "string")
       node.summary = parsed.summary.trim();
   }
@@ -1798,7 +1800,7 @@ async function buildState(userId, chatId) {
   const preview = settings.enabled && characterConfig.enabled && runtimeBooks.length ? await buildRetrievalPreview((await spindle.chat.getMessages(activeChat.id)).map((message) => ({
     role: message.role,
     content: message.content
-  })), settings, characterConfig, runtimeBooks) : null;
+  })), settings, characterConfig, runtimeBooks, userId) : null;
   return {
     ...baseState,
     activeCharacterId: character.id,
@@ -1844,7 +1846,7 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length)
       return messages;
-    const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks);
+    const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId);
     if (!preview?.injectedText.trim())
       return messages;
     return [{ role: "system", content: preview.injectedText }, ...messages];

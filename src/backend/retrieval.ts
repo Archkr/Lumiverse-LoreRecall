@@ -181,6 +181,7 @@ function scoreEntries(queryText: string, books: RuntimeBook[]): ScoredEntry[] {
 async function runControllerJson(
   prompt: string,
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<Record<string, unknown> | null> {
   try {
     const result = await spindle.generate.quiet({
@@ -191,6 +192,7 @@ async function runControllerJson(
         max_tokens: settings.controllerMaxTokens,
       },
       ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
+      userId,
     });
     return parseJsonObject(getGenerationContent(result));
   } catch (error: unknown) {
@@ -204,6 +206,7 @@ async function maybeChooseBooks(
   books: RuntimeBook[],
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<RuntimeBook[]> {
   if (config.multiBookMode !== "per_book" || books.length <= 1) return books;
 
@@ -223,7 +226,7 @@ async function maybeChooseBooks(
     ),
   ].join("\n");
 
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.bookIds)
     ? parsed.bookIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -236,6 +239,7 @@ async function maybeRerankEntries(
   queryText: string,
   scored: ScoredEntry[],
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<ScoredEntry[]> {
   if (scored.length <= 1) return scored;
   const prompt = [
@@ -254,7 +258,7 @@ async function maybeRerankEntries(
     ),
   ].join("\n");
 
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -281,6 +285,7 @@ async function maybeSelectEntries(
   candidates: ScoredEntry[],
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<ScoredEntry[]> {
   if (!config.selectiveRetrieval || !candidates.length) return candidates.slice(0, config.maxResults);
 
@@ -300,7 +305,7 @@ async function maybeSelectEntries(
     ),
   ].join("\n");
 
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -351,6 +356,7 @@ async function selectTraversalEntries(
   books: RuntimeBook[],
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<{ selected: ScoredEntry[]; fallbackReason: string | null; steps: string[] }> {
   const deterministic = scoreEntries(queryText, books).slice(0, Math.max(config.maxResults * 4, 16));
   if (!deterministic.length) {
@@ -398,7 +404,7 @@ async function selectTraversalEntries(
     ),
   ].join("\n");
 
-  const parsed = await runControllerJson(prompt, settings);
+  const parsed = await runControllerJson(prompt, settings, userId);
   const categoryIds = Array.isArray(parsed?.categoryIds)
     ? parsed.categoryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -440,7 +446,7 @@ async function selectTraversalEntries(
   }
 
   const finalSelected = config.selectiveRetrieval
-    ? await maybeSelectEntries(queryText, selected, config, settings)
+    ? await maybeSelectEntries(queryText, selected, config, settings, userId)
     : selected.slice(0, config.maxResults);
 
   return {
@@ -537,6 +543,7 @@ export async function buildRetrievalPreview(
   settings: GlobalLoreRecallSettings,
   config: CharacterRetrievalConfig,
   books: RuntimeBook[],
+  userId: string,
 ): Promise<RetrievalPreview | null> {
   const queryText = buildQueryText(messages, config.contextMessages);
   if (!queryText.trim()) return null;
@@ -544,7 +551,7 @@ export async function buildRetrievalPreview(
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length) return null;
 
-  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings);
+  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId);
   const steps = [
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`,
@@ -554,18 +561,18 @@ export async function buildRetrievalPreview(
   let fallbackReason: string | null = null;
 
   if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings);
+    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
     steps.push(...traversal.steps);
   } else {
     let collapsed = scoreEntries(queryText, chosenBooks);
     if (config.rerankEnabled) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, settings);
+      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId);
       steps.push("Collapsed retrieval reranked top candidates.");
     }
     selected = config.selectiveRetrieval
-      ? await maybeSelectEntries(queryText, collapsed, config, settings)
+      ? await maybeSelectEntries(queryText, collapsed, config, settings, userId)
       : collapsed.slice(0, config.maxResults);
     steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
   }

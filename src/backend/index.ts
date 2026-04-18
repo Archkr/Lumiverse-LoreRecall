@@ -109,6 +109,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<Front
           settings,
           characterConfig,
           runtimeBooks,
+          userId,
         )
       : null;
 
@@ -168,7 +169,13 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length) return messages;
 
-    const preview = await buildRetrievalPreview(messages as Array<{ role: "system" | "user" | "assistant"; content: string }>, settings, config, runtimeBooks);
+    const preview = await buildRetrievalPreview(
+      messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      settings,
+      config,
+      runtimeBooks,
+      userId,
+    );
     if (!preview?.injectedText.trim()) return messages;
 
     return [{ role: "system", content: preview.injectedText }, ...messages] satisfies LlmMessageDTO[];

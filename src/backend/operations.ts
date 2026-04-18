@@ -56,6 +56,7 @@ import {
 async function runControllerJson(
   prompt: string,
   settings: GlobalLoreRecallSettings,
+  userId: string,
 ): Promise<Record<string, unknown> | null> {
   try {
     const result = await spindle.generate.quiet({
@@ -66,6 +67,7 @@ async function runControllerJson(
         max_tokens: settings.controllerMaxTokens,
       },
       ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
+      userId,
     });
     const content = (result && typeof result === "object" && typeof (result as { content?: unknown }).content === "string"
       ? (result as { content: string }).content
@@ -200,7 +202,7 @@ export async function buildTreeWithLlm(bookIds: string[], userId: string): Promi
         ),
       ].join("\n");
 
-      const parsed = await runControllerJson(prompt, settings);
+      const parsed = await runControllerJson(prompt, settings, userId);
       const assignments = Array.isArray(parsed?.assignments)
         ? parsed.assignments.filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
         : [];
@@ -433,7 +435,7 @@ export async function regenerateSummaries(
       ),
     ].join("\n");
 
-    const parsed = await runControllerJson(prompt, settings);
+    const parsed = await runControllerJson(prompt, settings, userId);
     const updates = Array.isArray(parsed?.entries)
       ? parsed.entries.filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
       : [];
@@ -484,7 +486,7 @@ export async function regenerateSummaries(
         .filter((entry): entry is IndexedEntry => !!entry)
         .map((entry) => `- ${entry.label}: ${truncateText(entry.summary || entry.content, 180)}`),
     ].join("\n");
-    const parsed = await runControllerJson(prompt, settings);
+    const parsed = await runControllerJson(prompt, settings, userId);
     if (typeof parsed?.summary === "string") node.summary = parsed.summary.trim();
   }
 
