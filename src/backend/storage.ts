@@ -45,6 +45,9 @@ import {
   getTreePath,
 } from "./runtime";
 
+const WORLD_BOOK_LIST_TTL_MS = 5000;
+const worldBookListCache = new Map<string, { expiresAt: number; books: WorldBookDTO[] }>();
+
 export async function loadGlobalSettings(userId: string): Promise<GlobalLoreRecallSettings> {
   const stored = await spindle.userStorage.getJson<Partial<GlobalLoreRecallSettings>>(GLOBAL_SETTINGS_PATH, {
     fallback: DEFAULT_GLOBAL_SETTINGS,
@@ -106,6 +109,11 @@ export async function invalidateBookCache(bookId: string, userId: string): Promi
 }
 
 export async function listAllWorldBooks(userId: string): Promise<WorldBookDTO[]> {
+  const cached = worldBookListCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.books;
+  }
+
   const books: WorldBookDTO[] = [];
   let offset = 0;
   while (true) {
@@ -114,6 +122,10 @@ export async function listAllWorldBooks(userId: string): Promise<WorldBookDTO[]>
     if (books.length >= page.total || page.data.length === 0) break;
     offset += page.data.length;
   }
+  worldBookListCache.set(userId, {
+    expiresAt: Date.now() + WORLD_BOOK_LIST_TTL_MS,
+    books,
+  });
   return books;
 }
 
@@ -340,30 +352,32 @@ export async function getRuntimeBooks(
   attachedBookIds: string[],
   userId: string,
 ): Promise<{ runtimeBooks: RuntimeBook[]; staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }> }> {
-  const runtimeBooks: RuntimeBook[] = [];
+  const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }> = {};
+  const runtimeBooks = (
+    await Promise.all(
+      selectedBookIds.map(async (bookId) => {
+        const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
+        if (!cache) return null;
 
-  for (const bookId of selectedBookIds) {
-    const cache = await loadBookCache(bookId, userId);
-    if (!cache) continue;
+        const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
+        staleIssues[bookId] = { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs };
 
-    const config = await loadBookConfig(bookId, userId);
-    const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
-    staleIssues[bookId] = { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs };
-
-    runtimeBooks.push({
-      summary: {
-        id: cache.bookId,
-        name: cache.name,
-        description: cache.description,
-        updatedAt: cache.bookUpdatedAt,
-      },
-      cache,
-      config,
-      tree: loadedTree.tree,
-      status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIds.includes(bookId), true),
-    });
-  }
+        return {
+          summary: {
+            id: cache.bookId,
+            name: cache.name,
+            description: cache.description,
+            updatedAt: cache.bookUpdatedAt,
+          },
+          cache,
+          config,
+          tree: loadedTree.tree,
+          status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true),
+        } satisfies RuntimeBook;
+      }),
+    )
+  ).filter((book): book is RuntimeBook => !!book);
 
   return { runtimeBooks, staleIssues };
 }

@@ -11,6 +11,10 @@ import type {
 import type { ChatLikeMessage, RuntimeBook, ScoredEntry } from "./contracts";
 import { isReadableBook } from "./storage";
 
+interface RetrievalPreviewOptions {
+  allowController?: boolean;
+}
+
 function stripCodeFences(content: string): string {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
@@ -207,8 +211,9 @@ async function maybeChooseBooks(
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
   userId: string,
+  allowController: boolean,
 ): Promise<RuntimeBook[]> {
-  if (config.multiBookMode !== "per_book" || books.length <= 1) return books;
+  if (!allowController || config.multiBookMode !== "per_book" || books.length <= 1) return books;
 
   const prompt = [
     "Choose the most relevant lore books for the query.",
@@ -240,8 +245,9 @@ async function maybeRerankEntries(
   scored: ScoredEntry[],
   settings: GlobalLoreRecallSettings,
   userId: string,
+  allowController: boolean,
 ): Promise<ScoredEntry[]> {
-  if (scored.length <= 1) return scored;
+  if (!allowController || scored.length <= 1) return scored;
   const prompt = [
     "You rank lore nodes for retrieval relevance.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
@@ -286,8 +292,9 @@ async function maybeSelectEntries(
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
   userId: string,
+  allowController: boolean,
 ): Promise<ScoredEntry[]> {
-  if (!config.selectiveRetrieval || !candidates.length) return candidates.slice(0, config.maxResults);
+  if (!allowController || !config.selectiveRetrieval || !candidates.length) return candidates.slice(0, config.maxResults);
 
   const prompt = [
     "Select the exact lore entries that should be injected.",
@@ -357,6 +364,7 @@ async function selectTraversalEntries(
   config: CharacterRetrievalConfig,
   settings: GlobalLoreRecallSettings,
   userId: string,
+  allowController: boolean,
 ): Promise<{ selected: ScoredEntry[]; fallbackReason: string | null; steps: string[] }> {
   const deterministic = scoreEntries(queryText, books).slice(0, Math.max(config.maxResults * 4, 16));
   if (!deterministic.length) {
@@ -364,6 +372,14 @@ async function selectTraversalEntries(
       selected: [],
       fallbackReason: "Traversal found no scored entries, so nothing was injected.",
       steps: ["No traversal candidates scored above zero."],
+    };
+  }
+
+  if (!allowController) {
+    return {
+      selected: deterministic.slice(0, config.maxResults),
+      fallbackReason: "Fast preview skipped traversal controller selection and used deterministic fallback results.",
+      steps: ["Fast preview mode skipped controller-driven traversal."],
     };
   }
 
@@ -446,7 +462,7 @@ async function selectTraversalEntries(
   }
 
   const finalSelected = config.selectiveRetrieval
-    ? await maybeSelectEntries(queryText, selected, config, settings, userId)
+    ? await maybeSelectEntries(queryText, selected, config, settings, userId, allowController)
     : selected.slice(0, config.maxResults);
 
   return {
@@ -544,14 +560,16 @@ export async function buildRetrievalPreview(
   config: CharacterRetrievalConfig,
   books: RuntimeBook[],
   userId: string,
+  options: RetrievalPreviewOptions = {},
 ): Promise<RetrievalPreview | null> {
+  const allowController = options.allowController !== false;
   const queryText = buildQueryText(messages, config.contextMessages);
   if (!queryText.trim()) return null;
 
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length) return null;
 
-  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId);
+  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId, allowController);
   const steps = [
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`,
@@ -561,18 +579,18 @@ export async function buildRetrievalPreview(
   let fallbackReason: string | null = null;
 
   if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId);
+    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId, allowController);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
     steps.push(...traversal.steps);
   } else {
     let collapsed = scoreEntries(queryText, chosenBooks);
-    if (config.rerankEnabled) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId);
+    if (config.rerankEnabled && allowController) {
+      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId, allowController);
       steps.push("Collapsed retrieval reranked top candidates.");
     }
     selected = config.selectiveRetrieval
-      ? await maybeSelectEntries(queryText, collapsed, config, settings, userId)
+      ? await maybeSelectEntries(queryText, collapsed, config, settings, userId, allowController)
       : collapsed.slice(0, config.maxResults);
     steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
   }

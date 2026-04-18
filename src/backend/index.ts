@@ -1,7 +1,14 @@
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
 import type { ConnectionProfileDTO, LlmMessageDTO } from "lumiverse-spindle-types";
-import type { FrontendState, FrontendToBackend, OperationIssue, OperationKind, OperationUpdate } from "../types";
+import type {
+  FrontendState,
+  FrontendToBackend,
+  OperationIssue,
+  OperationKind,
+  OperationUpdate,
+  RetrievalPreview,
+} from "../types";
 import { buildRetrievalPreview } from "./retrieval";
 import {
   type OperationContext,
@@ -41,23 +48,60 @@ import {
   toBookSummary,
 } from "./storage";
 
+const CONNECTION_CACHE_TTL_MS = 5000;
+const connectionCache = new Map<string, { expiresAt: number; connections: ConnectionProfileDTO[] }>();
+const latestStateSequence = new Map<string, number>();
+const previewCache = new Map<string, RetrievalPreview | null>();
+
+interface StateBuildEnvelope {
+  state: FrontendState;
+  previewContext:
+    | {
+        chatId: string;
+        settings: FrontendState["globalSettings"];
+        characterConfig: NonNullable<FrontendState["characterConfig"]>;
+        runtimeBooks: Awaited<ReturnType<typeof getRuntimeBooks>>["runtimeBooks"];
+      }
+    | null;
+}
+
 async function resolveActiveChat(userId: string, chatId?: string | null) {
   if (chatId) return spindle.chats.get(chatId, userId);
   return spindle.chats.getActive(userId);
 }
 
-async function buildState(userId: string, chatId?: string | null): Promise<FrontendState> {
+async function listConnectionsCached(userId: string): Promise<ConnectionProfileDTO[]> {
+  const cached = connectionCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.connections;
+  }
+
+  const connections = await spindle.connections.list(userId).catch(() => [] as ConnectionProfileDTO[]);
+  connectionCache.set(userId, {
+    expiresAt: Date.now() + CONNECTION_CACHE_TTL_MS,
+    connections,
+  });
+  return connections;
+}
+
+function getPreviewCacheKey(userId: string, chatId: string): string {
+  return `${userId}:${chatId}`;
+}
+
+async function buildState(userId: string, chatId?: string | null): Promise<StateBuildEnvelope> {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
     resolveActiveChat(userId, chatId),
     loadGlobalSettings(userId),
-    spindle.connections.list(userId).catch(() => [] as ConnectionProfileDTO[]),
+    listConnectionsCached(userId),
   ]);
 
   const sortedBooks = allBooks
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name))
     .map(toBookSummary);
+
+  const cachedPreview = activeChat?.id ? (previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null) : null;
 
   const baseState: FrontendState = {
     activeChatId: activeChat?.id ?? null,
@@ -74,13 +118,17 @@ async function buildState(userId: string, chatId?: string | null): Promise<Front
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
     diagnosticsResults: [],
     suggestedBookIds: [],
-    preview: null,
+    preview: cachedPreview,
   };
 
-  if (!activeChat?.character_id) return baseState;
+  if (!activeChat?.character_id) {
+    return { state: baseState, previewContext: null };
+  }
 
   const character = await spindle.characters.get(activeChat.character_id, userId);
-  if (!character) return baseState;
+  if (!character) {
+    return { state: baseState, previewContext: null };
+  }
 
   const characterConfig = await loadCharacterConfig(character.id, userId);
   const validBookIds = new Set(allBooks.map((book) => book.id));
@@ -101,21 +149,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<Front
   const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues);
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
 
-  const preview =
-    settings.enabled && characterConfig.enabled && runtimeBooks.length
-      ? await buildRetrievalPreview(
-          (await spindle.chat.getMessages(activeChat.id)).map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-          settings,
-          characterConfig,
-          runtimeBooks,
-          userId,
-        )
-      : null;
-
-  return {
+  const nextState: FrontendState = {
     ...baseState,
     activeCharacterId: character.id,
     activeCharacterName: character.name,
@@ -127,14 +161,77 @@ async function buildState(userId: string, chatId?: string | null): Promise<Front
     unassignedCounts,
     diagnosticsResults,
     suggestedBookIds,
-    preview,
+  };
+
+  const previewContext =
+    settings.enabled && characterConfig.enabled && runtimeBooks.length
+      ? {
+          chatId: activeChat.id,
+          settings,
+          characterConfig,
+          runtimeBooks,
+        }
+      : null;
+
+  if (!previewContext) {
+    nextState.preview = null;
+  }
+
+  return {
+    state: nextState,
+    previewContext,
   };
 }
 
+async function refreshPreviewState(
+  userId: string,
+  sequence: number,
+  envelope: StateBuildEnvelope,
+): Promise<void> {
+  const previewContext = envelope.previewContext;
+  if (!previewContext) return;
+
+  const messages = await spindle.chat.getMessages(previewContext.chatId);
+  const preview = await buildRetrievalPreview(
+    messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+    previewContext.settings,
+    previewContext.characterConfig,
+    previewContext.runtimeBooks,
+    userId,
+    { allowController: false },
+  );
+
+  if (latestStateSequence.get(userId) !== sequence) return;
+
+  previewCache.set(getPreviewCacheKey(userId, previewContext.chatId), preview);
+  send(
+    {
+      type: "state",
+      state: {
+        ...envelope.state,
+        preview,
+      },
+    },
+    userId,
+  );
+}
+
 async function pushState(userId: string, chatId?: string | null): Promise<void> {
-  const state = await buildState(userId, chatId);
-  rememberChatUser(state.activeChatId, userId);
-  send({ type: "state", state }, userId);
+  const sequence = (latestStateSequence.get(userId) ?? 0) + 1;
+  latestStateSequence.set(userId, sequence);
+
+  const envelope = await buildState(userId, chatId);
+  if (latestStateSequence.get(userId) !== sequence) return;
+
+  rememberChatUser(envelope.state.activeChatId, userId);
+  send({ type: "state", state: envelope.state }, userId);
+
+  if (envelope.previewContext) {
+    void refreshPreviewState(userId, sequence, envelope);
+  }
 }
 
 const activeTrackedOperations = new Map<string, string>();

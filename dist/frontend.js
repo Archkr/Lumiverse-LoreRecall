@@ -1629,7 +1629,7 @@ function setup(ctx) {
     refreshTimer = setTimeout(() => {
       sendToBackend(ctx, { type: "refresh", chatId: pendingChatId });
       refreshTimer = null;
-    }, 250);
+    }, 120);
   }
   function saveJsonDownload(filename, payload) {
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });

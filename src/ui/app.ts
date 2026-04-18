@@ -436,7 +436,7 @@ export function setup(ctx: SpindleFrontendContext) {
     refreshTimer = setTimeout(() => {
       sendToBackend(ctx, { type: "refresh", chatId: pendingChatId });
       refreshTimer = null;
-    }, 250);
+    }, 120);
   }
 
   function saveJsonDownload(filename: string, payload: unknown): void {

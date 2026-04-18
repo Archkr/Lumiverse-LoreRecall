@@ -419,6 +419,8 @@ async function ensureStorageFolders(userId) {
 }
 
 // src/backend/storage.ts
+var WORLD_BOOK_LIST_TTL_MS = 5000;
+var worldBookListCache = new Map;
 async function loadGlobalSettings(userId) {
   const stored = await spindle.userStorage.getJson(GLOBAL_SETTINGS_PATH, {
     fallback: DEFAULT_GLOBAL_SETTINGS,
@@ -462,6 +464,10 @@ async function invalidateBookCache(bookId, userId) {
   await spindle.userStorage.delete(getBookCachePath(bookId), userId).catch(() => {});
 }
 async function listAllWorldBooks(userId) {
+  const cached = worldBookListCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.books;
+  }
   const books = [];
   let offset = 0;
   while (true) {
@@ -471,6 +477,10 @@ async function listAllWorldBooks(userId) {
       break;
     offset += page.data.length;
   }
+  worldBookListCache.set(userId, {
+    expiresAt: Date.now() + WORLD_BOOK_LIST_TTL_MS,
+    books
+  });
   return books;
 }
 async function listAllEntries(worldBookId, userId) {
@@ -661,16 +671,15 @@ function buildBookStatus(bookId, config, tree, entries, attachedToCharacter, sel
   };
 }
 async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId) {
-  const runtimeBooks = [];
+  const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues = {};
-  for (const bookId of selectedBookIds) {
-    const cache = await loadBookCache(bookId, userId);
+  const runtimeBooks = (await Promise.all(selectedBookIds.map(async (bookId) => {
+    const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
     if (!cache)
-      continue;
-    const config = await loadBookConfig(bookId, userId);
+      return null;
     const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
     staleIssues[bookId] = { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs };
-    runtimeBooks.push({
+    return {
       summary: {
         id: cache.bookId,
         name: cache.name,
@@ -680,9 +689,9 @@ async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId) {
       cache,
       config,
       tree: loadedTree.tree,
-      status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIds.includes(bookId), true)
-    });
-  }
+      status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true)
+    };
+  }))).filter((book) => !!book);
   return { runtimeBooks, staleIssues };
 }
 function computeSuggestedBookIds(allBooks, selectedBookIds, settings) {
@@ -868,8 +877,8 @@ async function runControllerJson(prompt, settings, userId) {
     return null;
   }
 }
-async function maybeChooseBooks(queryText, books, config, settings, userId) {
-  if (config.multiBookMode !== "per_book" || books.length <= 1)
+async function maybeChooseBooks(queryText, books, config, settings, userId, allowController) {
+  if (!allowController || config.multiBookMode !== "per_book" || books.length <= 1)
     return books;
   const prompt = [
     "Choose the most relevant lore books for the query.",
@@ -889,8 +898,8 @@ async function maybeChooseBooks(queryText, books, config, settings, userId) {
   const chosen = books.filter((book) => ids.includes(book.summary.id));
   return chosen.length ? chosen : books;
 }
-async function maybeRerankEntries(queryText, scored, settings, userId) {
-  if (scored.length <= 1)
+async function maybeRerankEntries(queryText, scored, settings, userId, allowController) {
+  if (!allowController || scored.length <= 1)
     return scored;
   const prompt = [
     "You rank lore nodes for retrieval relevance.",
@@ -924,8 +933,8 @@ async function maybeRerankEntries(queryText, scored, settings, userId) {
   }
   return ordered;
 }
-async function maybeSelectEntries(queryText, candidates, config, settings, userId) {
-  if (!config.selectiveRetrieval || !candidates.length)
+async function maybeSelectEntries(queryText, candidates, config, settings, userId, allowController) {
+  if (!allowController || !config.selectiveRetrieval || !candidates.length)
     return candidates.slice(0, config.maxResults);
   const prompt = [
     "Select the exact lore entries that should be injected.",
@@ -986,13 +995,20 @@ function getDescendantCategoryIds(tree, nodeId, depthLimit) {
   }
   return result;
 }
-async function selectTraversalEntries(queryText, books, config, settings, userId) {
+async function selectTraversalEntries(queryText, books, config, settings, userId, allowController) {
   const deterministic = scoreEntries(queryText, books).slice(0, Math.max(config.maxResults * 4, 16));
   if (!deterministic.length) {
     return {
       selected: [],
       fallbackReason: "Traversal found no scored entries, so nothing was injected.",
       steps: ["No traversal candidates scored above zero."]
+    };
+  }
+  if (!allowController) {
+    return {
+      selected: deterministic.slice(0, config.maxResults),
+      fallbackReason: "Fast preview skipped traversal controller selection and used deterministic fallback results.",
+      steps: ["Fast preview mode skipped controller-driven traversal."]
     };
   }
   const categoryRows = [];
@@ -1061,7 +1077,7 @@ async function selectTraversalEntries(queryText, books, config, settings, userId
       steps: [...steps, "Collapsed fallback used because no traversal branch resolved to entries."]
     };
   }
-  const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selected, config, settings, userId) : selected.slice(0, config.maxResults);
+  const finalSelected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, selected, config, settings, userId, allowController) : selected.slice(0, config.maxResults);
   return {
     selected: finalSelected,
     fallbackReason: null,
@@ -1137,14 +1153,15 @@ function buildInjectionText(selected, booksById, tokenBudget, collapsedDepth) {
     estimatedTokens: Math.ceil(text.length / 4)
   };
 }
-async function buildRetrievalPreview(messages, settings, config, books, userId) {
+async function buildRetrievalPreview(messages, settings, config, books, userId, options = {}) {
+  const allowController = options.allowController !== false;
   const queryText = buildQueryText(messages, config.contextMessages);
   if (!queryText.trim())
     return null;
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length)
     return null;
-  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId);
+  const chosenBooks = await maybeChooseBooks(queryText, readableBooks, config, settings, userId, allowController);
   const steps = [
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`
@@ -1152,17 +1169,17 @@ async function buildRetrievalPreview(messages, settings, config, books, userId) 
   let selected = [];
   let fallbackReason = null;
   if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId);
+    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, settings, userId, allowController);
     selected = traversal.selected;
     fallbackReason = traversal.fallbackReason;
     steps.push(...traversal.steps);
   } else {
     let collapsed = scoreEntries(queryText, chosenBooks);
-    if (config.rerankEnabled) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId);
+    if (config.rerankEnabled && allowController) {
+      collapsed = await maybeRerankEntries(queryText, collapsed, settings, userId, allowController);
       steps.push("Collapsed retrieval reranked top candidates.");
     }
-    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, settings, userId) : collapsed.slice(0, config.maxResults);
+    selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, collapsed, config, settings, userId, allowController) : collapsed.slice(0, config.maxResults);
     steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
   }
   if (!selected.length)
@@ -2168,19 +2185,39 @@ async function applySuggestedBooks(characterId, bookIds, mode, userId) {
 }
 
 // src/backend/index.ts
+var CONNECTION_CACHE_TTL_MS = 5000;
+var connectionCache = new Map;
+var latestStateSequence = new Map;
+var previewCache = new Map;
 async function resolveActiveChat(userId, chatId) {
   if (chatId)
     return spindle.chats.get(chatId, userId);
   return spindle.chats.getActive(userId);
+}
+async function listConnectionsCached(userId) {
+  const cached = connectionCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.connections;
+  }
+  const connections = await spindle.connections.list(userId).catch(() => []);
+  connectionCache.set(userId, {
+    expiresAt: Date.now() + CONNECTION_CACHE_TTL_MS,
+    connections
+  });
+  return connections;
+}
+function getPreviewCacheKey(userId, chatId) {
+  return `${userId}:${chatId}`;
 }
 async function buildState(userId, chatId) {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
     resolveActiveChat(userId, chatId),
     loadGlobalSettings(userId),
-    spindle.connections.list(userId).catch(() => [])
+    listConnectionsCached(userId)
   ]);
   const sortedBooks = allBooks.slice().sort((left, right) => left.name.localeCompare(right.name)).map(toBookSummary);
+  const cachedPreview = activeChat?.id ? previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null : null;
   const baseState = {
     activeChatId: activeChat?.id ?? null,
     activeCharacterId: activeChat?.character_id ?? null,
@@ -2196,13 +2233,15 @@ async function buildState(userId, chatId) {
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
     diagnosticsResults: [],
     suggestedBookIds: [],
-    preview: null
+    preview: cachedPreview
   };
-  if (!activeChat?.character_id)
-    return baseState;
+  if (!activeChat?.character_id) {
+    return { state: baseState, previewContext: null };
+  }
   const character = await spindle.characters.get(activeChat.character_id, userId);
-  if (!character)
-    return baseState;
+  if (!character) {
+    return { state: baseState, previewContext: null };
+  }
   const characterConfig = await loadCharacterConfig(character.id, userId);
   const validBookIds = new Set(allBooks.map((book) => book.id));
   const selectedBookIds = characterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
@@ -2215,11 +2254,7 @@ async function buildState(userId, chatId) {
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
   const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues);
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
-  const preview = settings.enabled && characterConfig.enabled && runtimeBooks.length ? await buildRetrievalPreview((await spindle.chat.getMessages(activeChat.id)).map((message) => ({
-    role: message.role,
-    content: message.content
-  })), settings, characterConfig, runtimeBooks, userId) : null;
-  return {
+  const nextState = {
     ...baseState,
     activeCharacterId: character.id,
     activeCharacterName: character.name,
@@ -2230,14 +2265,53 @@ async function buildState(userId, chatId) {
     treeIndexes,
     unassignedCounts,
     diagnosticsResults,
-    suggestedBookIds,
-    preview
+    suggestedBookIds
+  };
+  const previewContext = settings.enabled && characterConfig.enabled && runtimeBooks.length ? {
+    chatId: activeChat.id,
+    settings,
+    characterConfig,
+    runtimeBooks
+  } : null;
+  if (!previewContext) {
+    nextState.preview = null;
+  }
+  return {
+    state: nextState,
+    previewContext
   };
 }
+async function refreshPreviewState(userId, sequence, envelope) {
+  const previewContext = envelope.previewContext;
+  if (!previewContext)
+    return;
+  const messages = await spindle.chat.getMessages(previewContext.chatId);
+  const preview = await buildRetrievalPreview(messages.map((message) => ({
+    role: message.role,
+    content: message.content
+  })), previewContext.settings, previewContext.characterConfig, previewContext.runtimeBooks, userId, { allowController: false });
+  if (latestStateSequence.get(userId) !== sequence)
+    return;
+  previewCache.set(getPreviewCacheKey(userId, previewContext.chatId), preview);
+  send({
+    type: "state",
+    state: {
+      ...envelope.state,
+      preview
+    }
+  }, userId);
+}
 async function pushState(userId, chatId) {
-  const state = await buildState(userId, chatId);
-  rememberChatUser(state.activeChatId, userId);
-  send({ type: "state", state }, userId);
+  const sequence = (latestStateSequence.get(userId) ?? 0) + 1;
+  latestStateSequence.set(userId, sequence);
+  const envelope = await buildState(userId, chatId);
+  if (latestStateSequence.get(userId) !== sequence)
+    return;
+  rememberChatUser(envelope.state.activeChatId, userId);
+  send({ type: "state", state: envelope.state }, userId);
+  if (envelope.previewContext) {
+    refreshPreviewState(userId, sequence, envelope);
+  }
 }
 var activeTrackedOperations = new Map;
 function createOperationId(kind) {
