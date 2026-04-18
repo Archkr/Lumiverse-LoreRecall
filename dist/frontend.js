@@ -745,6 +745,106 @@ var LORE_RECALL_CSS = `
   line-height: 1.5;
 }
 
+.lore-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 11px 12px;
+  border: 1px solid var(--lr-line);
+  border-left: 3px solid var(--lr-line-2);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+}
+
+.lore-banner.info { border-left-color: var(--lr-acc); }
+.lore-banner.success { border-left-color: var(--lr-good); }
+.lore-banner.warn { border-left-color: var(--lr-warn); }
+.lore-banner.error { border-left-color: var(--lr-warn); }
+
+.lore-banner-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-banner-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-operation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+}
+
+.lore-operation.compact {
+  gap: 8px;
+  padding: 10px 11px;
+}
+
+.lore-operation-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.lore-operation-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-operation-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-operation-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--lr-dim);
+}
+
+.lore-operation-meta .sep {
+  color: var(--lr-dim);
+  user-select: none;
+}
+
+.lore-operation-issues {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.lore-progress {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--lr-text) 10%, transparent);
+}
+
+.lore-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 8%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--lr-acc) 85%, #fff), var(--lr-acc));
+  transition: width 160ms ease;
+}
+
 /* preview nodes */
 .lore-node {
   padding: 10px 12px;
@@ -1177,7 +1277,13 @@ var LORE_RECALL_CSS = `
 // src/ui/app.ts
 var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v0"/><path d="M7 18h6a4 4 0 0 0 4-4v0"/></svg>`;
 function sendToBackend(ctx, message) {
-  ctx.sendToBackend(message);
+  try {
+    ctx.sendToBackend(message);
+    return true;
+  } catch (error) {
+    console.error("[Lore Recall] Failed to send message to backend", error);
+    return false;
+  }
 }
 function setup(ctx) {
   const cleanups = [];
@@ -1214,6 +1320,13 @@ function setup(ctx) {
   let modalDismissUnsub = null;
   let advancedOpen = false;
   let importInput = null;
+  const operations = new Map;
+  const operationRequests = new Map;
+  const dismissedOperationIds = new Set;
+  const notices = new Map;
+  let pendingTrackedRequest = null;
+  let optimisticOperationId = null;
+  let optimisticOperationTimer = null;
   function getManagedBookIds() {
     return currentState?.characterConfig?.managedBookIds ?? [];
   }
@@ -1283,6 +1396,232 @@ function setup(ctx) {
     }
     selectedTreeByBook.set(selectedBookId, { kind: "unassigned", bookId: selectedBookId });
   }
+  function getOperationKind(message) {
+    return message.type;
+  }
+  function getTrackedOperations() {
+    return [...operations.values()].sort((left, right) => {
+      const leftTime = left.finishedAt ?? 0;
+      const rightTime = right.finishedAt ?? 0;
+      if (left.status === "running" || left.status === "started")
+        return -1;
+      if (right.status === "running" || right.status === "started")
+        return 1;
+      return rightTime - leftTime;
+    });
+  }
+  function getActiveOperation() {
+    return getTrackedOperations().find((operation) => operation.status === "started" || operation.status === "running") ?? null;
+  }
+  function getLatestFinishedOperation() {
+    return getTrackedOperations().find((operation) => (operation.status === "completed" || operation.status === "failed") && !dismissedOperationIds.has(operation.id)) ?? null;
+  }
+  function getOperationForKind(kind) {
+    return getTrackedOperations().find((operation) => operation.kind === kind) ?? null;
+  }
+  function clearOptimisticOperation() {
+    if (optimisticOperationTimer) {
+      clearTimeout(optimisticOperationTimer);
+      optimisticOperationTimer = null;
+    }
+    if (optimisticOperationId) {
+      operations.delete(optimisticOperationId);
+      optimisticOperationId = null;
+    }
+  }
+  function isBookLocked(bookId) {
+    if (!bookId)
+      return false;
+    const active = getActiveOperation();
+    if (!active)
+      return false;
+    if (active.scope?.bookId === bookId)
+      return true;
+    return !!active.scope?.bookIds?.includes(bookId);
+  }
+  function pushNotice(notice) {
+    notices.set(notice.id, notice);
+  }
+  function dismissNotice(id) {
+    notices.delete(id);
+    dismissedOperationIds.add(id);
+    render();
+  }
+  function retryOperation(operationId) {
+    const request = operationRequests.get(operationId);
+    if (!request) {
+      pushNotice({
+        id: `retry-missing:${Date.now()}`,
+        tone: "error",
+        title: "Retry unavailable",
+        message: "Lore Recall no longer has the original request payload for that operation."
+      });
+      render();
+      return;
+    }
+    if (getActiveOperation()) {
+      pushNotice({
+        id: `retry-blocked:${Date.now()}`,
+        tone: "warn",
+        title: "Operation already running",
+        message: "Wait for the active Lore Recall operation to finish before retrying this one."
+      });
+      render();
+      return;
+    }
+    dismissedOperationIds.delete(operationId);
+    pendingTrackedRequest = request;
+    sendToBackend(ctx, request);
+  }
+  function getPreflightWarnings(message) {
+    const state = currentState;
+    const warnings = [];
+    if (!state) {
+      warnings.push("Lore Recall is still loading. Try again in a moment.");
+      return warnings;
+    }
+    const active = getActiveOperation();
+    if (active) {
+      warnings.push(`"${active.title}" is still running. Wait for it to finish first.`);
+    }
+    switch (message.type) {
+      case "build_tree_from_metadata":
+      case "build_tree_with_llm": {
+        if (!state.activeCharacterId)
+          warnings.push("Open a character chat before building a tree.");
+        if (!message.bookIds.length)
+          warnings.push("Manage at least one lorebook before building a tree.");
+        const editableBookIds = message.bookIds.filter((bookId) => (state.bookConfigs[bookId]?.permission ?? "read_write") !== "read_only");
+        if (message.bookIds.length > 0 && !editableBookIds.length) {
+          warnings.push("All selected managed books are read-only, so Lore Recall cannot rebuild their trees.");
+        }
+        if (message.type === "build_tree_with_llm") {
+          const selectedConnectionMissing = !!state.globalSettings.controllerConnectionId && !state.availableConnections.some((connection) => connection.id === state.globalSettings.controllerConnectionId);
+          if (selectedConnectionMissing) {
+            warnings.push("The selected controller connection is no longer available.");
+          } else if (!state.availableConnections.length && !state.globalSettings.controllerConnectionId) {
+            warnings.push("No controller connection is available for the LLM build right now.");
+          }
+        }
+        break;
+      }
+      case "regenerate_summaries": {
+        if (!state.activeCharacterId)
+          warnings.push("Open a character chat before regenerating summaries.");
+        const bookId = message.bookId;
+        if (!bookId)
+          warnings.push("Pick a managed book before regenerating summaries.");
+        if (bookId && (state.bookConfigs[bookId]?.permission ?? "read_write") === "read_only") {
+          warnings.push("This managed book is read-only, so Lore Recall cannot rewrite summaries for it.");
+        }
+        const selectedConnectionMissing = !!state.globalSettings.controllerConnectionId && !state.availableConnections.some((connection) => connection.id === state.globalSettings.controllerConnectionId);
+        if (selectedConnectionMissing) {
+          warnings.push("The selected controller connection is no longer available.");
+        } else if (!state.availableConnections.length && !state.globalSettings.controllerConnectionId) {
+          warnings.push("No controller connection is available for summary regeneration right now.");
+        }
+        break;
+      }
+      case "import_snapshot":
+      case "export_snapshot":
+        break;
+    }
+    return warnings;
+  }
+  function dispatchTracked(message) {
+    const warnings = getPreflightWarnings(message);
+    if (warnings.length) {
+      pushNotice({
+        id: `blocked:${message.type}:${Date.now()}`,
+        tone: "warn",
+        title: "Action blocked",
+        message: warnings[0]
+      });
+      render();
+      return;
+    }
+    pendingTrackedRequest = message;
+    clearOptimisticOperation();
+    const operationId = `local:${message.type}:${Date.now()}`;
+    optimisticOperationId = operationId;
+    operations.set(operationId, {
+      id: operationId,
+      kind: getOperationKind(message),
+      status: "started",
+      title: message.type === "build_tree_with_llm" ? "Build Tree With LLM" : message.type === "build_tree_from_metadata" ? "Build Tree From Metadata" : message.type === "regenerate_summaries" ? "Regenerate Summaries" : message.type === "export_snapshot" ? "Export Snapshot" : "Import Snapshot",
+      message: "Sending request to Lore Recall backend...",
+      percent: 2,
+      current: null,
+      total: null,
+      phase: "starting",
+      retryable: false,
+      finishedAt: null,
+      scope: {
+        chatId: "chatId" in message ? message.chatId ?? null : null,
+        bookIds: "bookIds" in message ? message.bookIds : undefined,
+        bookId: "bookId" in message ? message.bookId : null,
+        entryIds: "entryIds" in message ? message.entryIds : undefined,
+        nodeIds: "nodeIds" in message ? message.nodeIds : undefined
+      },
+      issues: []
+    });
+    optimisticOperationTimer = setTimeout(() => {
+      if (!optimisticOperationId)
+        return;
+      const current = operations.get(optimisticOperationId);
+      if (!current)
+        return;
+      operations.set(optimisticOperationId, {
+        ...current,
+        status: "failed",
+        message: "Lore Recall did not confirm the build started. The backend may not have received the request.",
+        retryable: false,
+        finishedAt: Date.now(),
+        issues: [
+          {
+            severity: "error",
+            message: "No backend acknowledgement arrived for this action.",
+            phase: "starting"
+          }
+        ]
+      });
+      pendingTrackedRequest = null;
+      optimisticOperationTimer = null;
+      render();
+    }, 2000);
+    render();
+    if (!sendToBackend(ctx, message)) {
+      clearOptimisticOperation();
+      pendingTrackedRequest = null;
+      pushNotice({
+        id: `send-failed:${message.type}:${Date.now()}`,
+        tone: "error",
+        title: "Action failed to send",
+        message: "Lore Recall could not send this request to the backend."
+      });
+      render();
+    }
+  }
+  function disableInteractive(root) {
+    root.querySelectorAll("button, input, textarea, select").forEach((element) => {
+      const control = element;
+      control.disabled = true;
+    });
+  }
+  function validateCategoryDraft(draft) {
+    if (!draft.label.trim())
+      return "Category label cannot be empty.";
+    return null;
+  }
+  function validateEntryDraft(draft) {
+    if (!draft.label.trim())
+      return "Entry label cannot be empty.";
+    if (!draft.summary.trim())
+      return "Entry summary cannot be empty.";
+    if (!draft.collapsedText.trim())
+      return "Collapsed text cannot be empty.";
+    return null;
+  }
   function scheduleRefresh(chatId) {
     pendingChatId = typeof chatId === "undefined" ? currentState?.activeChatId ?? null : chatId;
     if (refreshTimer)
@@ -1317,9 +1656,15 @@ function setup(ctx) {
       const text = await file.text();
       try {
         const parsed = JSON.parse(text);
-        sendToBackend(ctx, { type: "import_snapshot", chatId: currentState?.activeChatId ?? null, snapshot: parsed });
+        dispatchTracked({ type: "import_snapshot", chatId: currentState?.activeChatId ?? null, snapshot: parsed });
       } catch (error) {
-        console.warn("[Lore Recall] Snapshot import failed", error);
+        pushNotice({
+          id: `import-parse:${Date.now()}`,
+          tone: "error",
+          title: "Import failed",
+          message: error instanceof Error ? error.message : "Snapshot import failed before Lore Recall could send it."
+        });
+        render();
       } finally {
         if (importInput)
           importInput.value = "";
@@ -1433,6 +1778,63 @@ function setup(ctx) {
       head.appendChild(extra);
     return head;
   }
+  function createBanner(tone, title, body, extra) {
+    const wrap = createElement("div", `lore-banner ${tone}`);
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.append(createElement("div", "lore-banner-title", title), createElement("div", "lore-banner-body", body));
+    wrap.appendChild(copy);
+    if (extra)
+      wrap.appendChild(extra);
+    return wrap;
+  }
+  function createProgressBar(percent) {
+    const bar = createElement("div", "lore-progress");
+    const fill = createElement("div", "lore-progress-fill");
+    fill.style.width = `${percent ?? 8}%`;
+    bar.appendChild(fill);
+    return bar;
+  }
+  function createOperationSummary(operation, compact = false) {
+    const wrap = createElement("div", compact ? "lore-operation compact" : "lore-operation");
+    const head = createElement("div", "lore-operation-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.append(createElement("div", "lore-operation-title", operation.title), createElement("div", "lore-operation-body", operation.message));
+    head.appendChild(copy);
+    const statusTone = operation.status === "failed" ? "error" : operation.issues?.length ? "warn" : operation.status === "completed" ? "success" : "info";
+    head.appendChild(createStatus(operation.status === "running" ? "Running" : operation.status, statusTone === "success" ? "on" : statusTone === "warn" ? "warn" : statusTone === "error" ? "warn" : "accent"));
+    wrap.appendChild(head);
+    wrap.appendChild(createProgressBar(operation.percent));
+    const meta = createElement("div", "lore-operation-meta");
+    if (operation.bookName)
+      meta.appendChild(createElement("span", "", operation.bookName));
+    if (typeof operation.current === "number" && typeof operation.total === "number") {
+      if (meta.childElementCount)
+        meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "", `${operation.current}/${operation.total}`));
+    }
+    if (typeof operation.chunkCurrent === "number" && typeof operation.chunkTotal === "number") {
+      if (meta.childElementCount)
+        meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "", `chunk ${operation.chunkCurrent}/${operation.chunkTotal}`));
+    }
+    if (operation.phase) {
+      if (meta.childElementCount)
+        meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "", operation.phase.replace(/_/g, " ")));
+    }
+    if (meta.childElementCount)
+      wrap.appendChild(meta);
+    if (!compact && operation.issues?.length) {
+      const issueList = createElement("div", "lore-operation-issues");
+      for (const issue of operation.issues.slice(0, 3)) {
+        issueList.appendChild(createTag(issue.message, issue.severity === "error" ? "warn" : "accent"));
+      }
+      wrap.appendChild(issueList);
+    }
+    return wrap;
+  }
   function createEmpty(title, body, action) {
     const wrap = createElement("div", "lore-empty");
     wrap.appendChild(createElement("div", "lore-empty-title", title));
@@ -1470,6 +1872,48 @@ function setup(ctx) {
     }
     renderWorkspaceModal();
   }
+  function renderOperationNotices() {
+    const cards = createElement("div", "lore-stack");
+    cards.style.gap = "8px";
+    for (const notice of notices.values()) {
+      const actions = createElement("div", "lore-cluster");
+      if (notice.retryOperationId) {
+        actions.appendChild(createButton("Retry", "lore-btn lore-btn-sm", () => retryOperation(notice.retryOperationId)));
+      }
+      actions.appendChild(createButton("Dismiss", "lore-btn-link", () => dismissNotice(notice.id)));
+      cards.appendChild(createBanner(notice.tone, notice.title, notice.message, actions));
+    }
+    for (const operation of getTrackedOperations()) {
+      if (operation.status !== "completed" && operation.status !== "failed" || dismissedOperationIds.has(operation.id)) {
+        continue;
+      }
+      const actions = createElement("div", "lore-cluster");
+      if (operation.status === "failed" && operation.retryable) {
+        actions.appendChild(createButton("Retry", "lore-btn lore-btn-sm", () => retryOperation(operation.id)));
+      }
+      actions.appendChild(createButton("Dismiss", "lore-btn-link", () => dismissNotice(operation.id)));
+      cards.appendChild(createBanner(operation.status === "failed" ? "error" : operation.issues?.length ? "warn" : "success", operation.title, operation.message, actions));
+    }
+    return cards.childElementCount ? cards : null;
+  }
+  function renderOperationStrip() {
+    const active = getActiveOperation();
+    const latest = getLatestFinishedOperation();
+    const wrap = createElement("section", "lore-section");
+    wrap.appendChild(createSectionHead("Operations", "Live progress, completion, and failure state."));
+    const noticesBlock = renderOperationNotices();
+    if (active) {
+      wrap.appendChild(createOperationSummary(active));
+    } else if (latest && !noticesBlock) {
+      wrap.appendChild(createOperationSummary(latest));
+    }
+    if (noticesBlock)
+      wrap.appendChild(noticesBlock);
+    if (!active && !latest && !noticesBlock) {
+      wrap.appendChild(createEmpty("No operations yet", "Long-running Lore Recall actions will show their progress here."));
+    }
+    return wrap;
+  }
   function renderDrawer() {
     drawerRoot.replaceChildren();
     const shell = createElement("div", "lore-root lore-drawer");
@@ -1504,6 +1948,13 @@ function setup(ctx) {
     };
     metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(mode, "mode"), metric(tokenBudget, "token budget"));
     shell.appendChild(metrics);
+    const activeOperation = getActiveOperation();
+    if (activeOperation) {
+      const operationSection = createElement("section", "lore-section");
+      operationSection.appendChild(createSectionHead("Active operation", "Lore Recall is working in the background."));
+      operationSection.appendChild(createOperationSummary(activeOperation, true));
+      shell.appendChild(operationSection);
+    }
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
@@ -1666,18 +2117,53 @@ function setup(ctx) {
   function renderBuildTools(state) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."));
-    const hasManaged = getManagedBookIds().length > 0;
+    const managedBookIds = getManagedBookIds();
+    const hasManaged = managedBookIds.length > 0;
+    const metadataMessage = {
+      type: "build_tree_from_metadata",
+      bookIds: managedBookIds,
+      chatId: state.activeChatId
+    };
+    const llmMessage = {
+      type: "build_tree_with_llm",
+      bookIds: managedBookIds,
+      chatId: state.activeChatId
+    };
+    const metadataWarnings = getPreflightWarnings(metadataMessage).filter((warning) => !warning.includes("still running"));
+    const llmWarnings = getPreflightWarnings(llmMessage).filter((warning) => !warning.includes("still running"));
+    const activeOperation = getActiveOperation();
+    const lastBuildOperation = getTrackedOperations().find((operation) => operation.kind === "build_tree_with_llm" || operation.kind === "build_tree_from_metadata");
     const actions = createElement("div", "lore-cluster");
-    const metaBtn = createButton("Build from metadata", "lore-btn", () => sendToBackend(ctx, { type: "build_tree_from_metadata", bookIds: getManagedBookIds(), chatId: state.activeChatId }));
-    const llmBtn = createButton("Build with LLM", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_with_llm", bookIds: getManagedBookIds(), chatId: state.activeChatId }));
-    if (!hasManaged) {
+    const metaBtn = createButton(activeOperation?.kind === "build_tree_from_metadata" ? "Building..." : "Build from metadata", "lore-btn", () => dispatchTracked(metadataMessage));
+    const llmBtn = createButton(activeOperation?.kind === "build_tree_with_llm" ? "Building..." : "Build with LLM", "lore-btn lore-btn-primary", () => dispatchTracked(llmMessage));
+    if (!hasManaged || !!activeOperation || metadataWarnings.length) {
       metaBtn.disabled = true;
+    }
+    if (!hasManaged || !!activeOperation || llmWarnings.length) {
       llmBtn.disabled = true;
     }
     actions.append(metaBtn, llmBtn, createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()));
     section.appendChild(actions);
     if (!hasManaged) {
       section.appendChild(createElement("div", "lore-hint", "Manage at least one lorebook before building a tree."));
+    }
+    const warnings = [...metadataWarnings, ...llmWarnings].filter((value, index, all) => all.indexOf(value) === index);
+    if (warnings.length) {
+      const warningList = createElement("div", "lore-stack");
+      warningList.style.gap = "8px";
+      for (const warning of warnings) {
+        warningList.appendChild(createBanner("warn", "Build blocked", warning));
+      }
+      section.appendChild(warningList);
+    }
+    const buildOperation = activeOperation && (activeOperation.kind === "build_tree_from_metadata" || activeOperation.kind === "build_tree_with_llm") ? activeOperation : lastBuildOperation;
+    if (buildOperation) {
+      section.appendChild(createOperationSummary(buildOperation));
+    }
+    if (lastBuildOperation && lastBuildOperation.status !== "started" && lastBuildOperation.status !== "running") {
+      const summary = createElement("div", "lore-note");
+      summary.append(createElement("div", "lore-note-title", "Last build result"), createElement("div", "lore-note-body", lastBuildOperation.message));
+      section.appendChild(summary);
     }
     return section;
   }
@@ -1714,9 +2200,17 @@ function setup(ctx) {
   function renderBackup(state) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Backup & restore", "Export or import Lore Recall settings, trees and metadata."));
+    const activeOperation = getActiveOperation();
     const actions = createElement("div", "lore-cluster");
-    actions.append(createButton("Export snapshot", "lore-btn", () => sendToBackend(ctx, { type: "export_snapshot", chatId: state.activeChatId })), createButton("Import snapshot", "lore-btn-link", () => ensureImportInput().click()));
+    const exportButton = createButton(activeOperation?.kind === "export_snapshot" ? "Exporting..." : "Export snapshot", "lore-btn", () => dispatchTracked({ type: "export_snapshot", chatId: state.activeChatId }));
+    exportButton.disabled = !!activeOperation;
+    const importButton = createButton(activeOperation?.kind === "import_snapshot" ? "Importing..." : "Import snapshot", "lore-btn-link", () => ensureImportInput().click());
+    importButton.disabled = !!activeOperation;
+    actions.append(exportButton, importButton);
     section.appendChild(actions);
+    const backupOperation = getTrackedOperations().find((operation) => operation.kind === "export_snapshot" || operation.kind === "import_snapshot");
+    if (backupOperation)
+      section.appendChild(createOperationSummary(backupOperation));
     return section;
   }
   function renderDiagnostics(state) {
@@ -1904,7 +2398,7 @@ function setup(ctx) {
     }
     const cols = createElement("div", "lore-columns");
     const left = createElement("div", "lore-stack");
-    left.append(renderSourcePicker(currentState), renderBuildTools(currentState), renderOverview(currentState), renderBackup(currentState), renderDiagnostics(currentState));
+    left.append(renderOperationStrip(), renderSourcePicker(currentState), renderBuildTools(currentState), renderOverview(currentState), renderBackup(currentState), renderDiagnostics(currentState));
     const right = createElement("div", "lore-stack");
     right.append(renderCharacterSettings(currentState), renderBookSettings(currentState), renderAdvancedSettings(currentState));
     cols.append(left, right);
@@ -1972,6 +2466,9 @@ function setup(ctx) {
     const tree = getBookTree(bookId);
     const entries = getBookEntries(bookId);
     const selected = getSelectedTree(bookId);
+    const activeOperation = getActiveOperation();
+    const locked = isBookLocked(bookId);
+    const lockMessage = locked && activeOperation ? `${activeOperation.title} is rebuilding this book right now. Editing is temporarily locked.` : null;
     if (!tree) {
       panel.appendChild(createEmpty("No tree for this book", "Build one with metadata or the LLM builder in the settings workspace."));
       return panel;
@@ -1989,6 +2486,9 @@ function setup(ctx) {
       const head2 = createElement("div", "lore-editor-head");
       head2.append(createElement("div", "lore-editor-kind", "Category"), createElement("div", "lore-editor-title", draft2.label || "Untitled category"), createBreadcrumb(getCategoryBreadcrumb(tree, selected.nodeId)?.split(" > ").filter(Boolean) ?? []));
       panel.appendChild(head2);
+      if (lockMessage) {
+        panel.appendChild(createBanner("warn", "Editing locked", lockMessage));
+      }
       const form2 = createElement("div", "lore-form");
       form2.appendChild(createField("Label", createTextInput(draft2.label, "Category label", (next) => {
         draft2.label = next;
@@ -2018,7 +2518,7 @@ function setup(ctx) {
         parentId: selected.nodeId,
         label: "New category",
         chatId: currentState?.activeChatId
-      })), createButton("Regenerate summary", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+      })), createButton("Regenerate summary", "lore-btn lore-btn-sm", () => dispatchTracked({
         type: "regenerate_summaries",
         bookId,
         nodeIds: [selected.nodeId],
@@ -2030,6 +2530,17 @@ function setup(ctx) {
         chatId: currentState?.activeChatId,
         target: "unassigned"
       })), createElement("span", "lore-actions-spacer"), createButton("Save category", "lore-btn lore-btn-primary lore-btn-sm", () => {
+        const validationError = validateCategoryDraft(draft2);
+        if (validationError) {
+          pushNotice({
+            id: `category-validation:${Date.now()}`,
+            tone: "error",
+            title: "Save blocked",
+            message: validationError
+          });
+          render();
+          return;
+        }
         sendToBackend(ctx, {
           type: "save_category",
           bookId,
@@ -2046,6 +2557,8 @@ function setup(ctx) {
         });
       }));
       panel.appendChild(actions2);
+      if (locked)
+        disableInteractive(panel);
       return panel;
     }
     const entry = entries.find((item) => item.entryId === selected.entryId);
@@ -2057,6 +2570,9 @@ function setup(ctx) {
     const head = createElement("div", "lore-editor-head");
     head.append(createElement("div", "lore-editor-kind", "Entry"), createElement("div", "lore-editor-title", draft.label || entry.label || "Untitled entry"), createBreadcrumb(getEntryBreadcrumb(tree, entry).split(" > ").filter(Boolean)));
     panel.appendChild(head);
+    if (lockMessage) {
+      panel.appendChild(createBanner("warn", "Editing locked", lockMessage));
+    }
     const form = createElement("div", "lore-form");
     form.appendChild(createField("Label", createTextInput(draft.label, "Entry label", (next) => {
       draft.label = next;
@@ -2084,12 +2600,23 @@ function setup(ctx) {
     }, true), true));
     panel.appendChild(form);
     const actions = createElement("div", "lore-actions");
-    actions.append(createButton("Regenerate summary", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+    actions.append(createButton("Regenerate summary", "lore-btn lore-btn-sm", () => dispatchTracked({
       type: "regenerate_summaries",
       bookId,
       entryIds: [entry.entryId],
       chatId: currentState?.activeChatId
     })), createElement("span", "lore-actions-spacer"), createButton("Save entry", "lore-btn lore-btn-primary lore-btn-sm", () => {
+      const validationError = validateEntryDraft(draft);
+      if (validationError) {
+        pushNotice({
+          id: `entry-validation:${Date.now()}`,
+          tone: "error",
+          title: "Save blocked",
+          message: validationError
+        });
+        render();
+        return;
+      }
       sendToBackend(ctx, {
         type: "save_entry_meta",
         entryId: entry.entryId,
@@ -2112,6 +2639,8 @@ function setup(ctx) {
       });
     }));
     panel.appendChild(actions);
+    if (locked)
+      disableInteractive(panel);
     return panel;
   }
   function renderWorkspaceModal() {
@@ -2187,12 +2716,42 @@ function setup(ctx) {
       render();
       return;
     }
+    if (message.type === "operation") {
+      if (message.operation.status === "started" || message.operation.status === "running") {
+        clearOptimisticOperation();
+      }
+      operations.set(message.operation.id, message.operation);
+      if (message.operation.status === "started" && pendingTrackedRequest && getOperationKind(pendingTrackedRequest) === message.operation.kind) {
+        operationRequests.set(message.operation.id, pendingTrackedRequest);
+        pendingTrackedRequest = null;
+      }
+      render();
+      return;
+    }
     if (message.type === "export_snapshot_ready") {
       saveJsonDownload(message.filename, message.snapshot);
       return;
     }
     if (message.type === "error") {
-      console.warn("[Lore Recall]", message.message);
+      clearOptimisticOperation();
+      pendingTrackedRequest = null;
+      pushNotice({
+        id: `backend-error:${Date.now()}`,
+        tone: "error",
+        title: "Lore Recall error",
+        message: message.message
+      });
+      render();
+      return;
+    }
+    if (message.type === "notice") {
+      pushNotice({
+        id: `notice:${Date.now()}`,
+        tone: "info",
+        title: "Lore Recall",
+        message: message.message
+      });
+      render();
     }
   });
   cleanups.push(onBackendMessage);
@@ -2217,6 +2776,7 @@ function setup(ctx) {
   return () => {
     if (refreshTimer)
       clearTimeout(refreshTimer);
+    clearOptimisticOperation();
     if (modalDismissUnsub)
       modalDismissUnsub();
     if (workspaceModal)

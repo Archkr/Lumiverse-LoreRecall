@@ -525,6 +525,106 @@ export const LORE_RECALL_CSS = `
   line-height: 1.5;
 }
 
+.lore-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 11px 12px;
+  border: 1px solid var(--lr-line);
+  border-left: 3px solid var(--lr-line-2);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+}
+
+.lore-banner.info { border-left-color: var(--lr-acc); }
+.lore-banner.success { border-left-color: var(--lr-good); }
+.lore-banner.warn { border-left-color: var(--lr-warn); }
+.lore-banner.error { border-left-color: var(--lr-warn); }
+
+.lore-banner-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-banner-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-operation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+}
+
+.lore-operation.compact {
+  gap: 8px;
+  padding: 10px 11px;
+}
+
+.lore-operation-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.lore-operation-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-operation-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-operation-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--lr-dim);
+}
+
+.lore-operation-meta .sep {
+  color: var(--lr-dim);
+  user-select: none;
+}
+
+.lore-operation-issues {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.lore-progress {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--lr-text) 10%, transparent);
+}
+
+.lore-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 8%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--lr-acc) 85%, #fff), var(--lr-acc));
+  transition: width 160ms ease;
+}
+
 /* preview nodes */
 .lore-node {
   padding: 10px 12px;

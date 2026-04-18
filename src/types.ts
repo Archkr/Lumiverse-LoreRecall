@@ -160,6 +160,51 @@ export interface ExportSnapshot {
   entryMeta: Record<string, Record<string, EntryRecallMeta>>;
 }
 
+export type OperationKind =
+  | "build_tree_from_metadata"
+  | "build_tree_with_llm"
+  | "regenerate_summaries"
+  | "export_snapshot"
+  | "import_snapshot";
+
+export type OperationStatus = "started" | "running" | "completed" | "failed";
+
+export interface OperationScope {
+  chatId?: string | null;
+  bookIds?: string[];
+  bookId?: string | null;
+  entryIds?: string[];
+  nodeIds?: string[];
+}
+
+export interface OperationIssue {
+  severity: "warn" | "error";
+  message: string;
+  bookId?: string | null;
+  bookName?: string | null;
+  phase?: string | null;
+}
+
+export interface OperationUpdate {
+  id: string;
+  kind: OperationKind;
+  status: OperationStatus;
+  title: string;
+  message: string;
+  percent: number | null;
+  current: number | null;
+  total: number | null;
+  phase?: string | null;
+  bookId?: string | null;
+  bookName?: string | null;
+  chunkCurrent?: number | null;
+  chunkTotal?: number | null;
+  retryable: boolean;
+  finishedAt?: number | null;
+  scope?: OperationScope;
+  issues?: OperationIssue[];
+}
+
 export interface FrontendState {
   activeChatId: string | null;
   activeCharacterId: string | null;
@@ -279,6 +324,7 @@ export type FrontendToBackend =
 
 export type BackendToFrontend =
   | { type: "state"; state: FrontendState }
+  | { type: "operation"; operation: OperationUpdate }
   | { type: "error"; message: string }
   | { type: "export_snapshot_ready"; filename: string; snapshot: ExportSnapshot }
   | { type: "notice"; message: string };

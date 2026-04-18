@@ -1184,42 +1184,40 @@ async function buildRetrievalPreview(messages, settings, config, books, userId) 
 }
 
 // src/backend/operations.ts
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 async function runControllerJson2(prompt, settings, userId) {
+  const result = await spindle.generate.quiet({
+    type: "quiet",
+    messages: [{ role: "user", content: prompt }],
+    parameters: {
+      temperature: settings.controllerTemperature,
+      max_tokens: settings.controllerMaxTokens
+    },
+    ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
+    userId
+  });
+  const content = (result && typeof result === "object" && typeof result.content === "string" ? result.content : "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  if (!content)
+    return null;
   try {
-    const result = await spindle.generate.quiet({
-      type: "quiet",
-      messages: [{ role: "user", content: prompt }],
-      parameters: {
-        temperature: settings.controllerTemperature,
-        max_tokens: settings.controllerMaxTokens
-      },
-      ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
-      userId
-    });
-    const content = (result && typeof result === "object" && typeof result.content === "string" ? result.content : "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    if (!content)
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed;
+  } catch {
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match)
       return null;
     try {
-      const parsed = JSON.parse(content);
+      const parsed = JSON.parse(match[0]);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
         return parsed;
     } catch {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (!match)
-        return null;
-      try {
-        const parsed = JSON.parse(match[0]);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-          return parsed;
-      } catch {
-        return null;
-      }
+      return null;
     }
-    return null;
-  } catch (error) {
-    spindle.log.warn(`Lore Recall controller call failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
   }
+  return null;
 }
 async function updateEntryMeta(entryId, meta, userId) {
   const entry = await spindle.world_books.entries.get(entryId, userId);
@@ -1252,28 +1250,118 @@ function getMetadataCategoryPath(entry) {
     return ["Keywords", titleCase(firstKey.split(/\s+/).slice(0, 2).join(" "))];
   return [];
 }
-async function buildTreeFromMetadata(bookIds, userId) {
-  for (const bookId of uniqueStrings(bookIds)) {
-    const config = await loadBookConfig(bookId, userId);
-    if (!canEditBook(config))
-      continue;
-    const cache = await loadBookCache(bookId, userId);
-    if (!cache)
-      continue;
-    const tree = createEmptyTreeIndex(bookId);
-    for (const entry of cache.entries) {
-      const path = getMetadataCategoryPath(entry);
-      if (path.length) {
-        const categoryId = ensureCategoryPath(tree, path, "metadata");
-        assignEntryToTarget(tree, entry.entryId, { categoryId });
-      } else {
-        assignEntryToTarget(tree, entry.entryId, "unassigned");
-      }
-    }
-    tree.lastBuiltAt = Date.now();
-    tree.buildSource = "metadata";
-    await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
+async function buildTreeFromMetadata(bookIds, userId, operation) {
+  const issues = [];
+  const ids = uniqueStrings(bookIds);
+  if (!ids.length) {
+    return { issues, completed: 0, total: 0 };
   }
+  let completed = 0;
+  for (const [index, bookId] of ids.entries()) {
+    let bookName = bookId;
+    operation?.progress({
+      phase: "loading",
+      message: `Loading ${bookName}...`,
+      current: index + 1,
+      total: ids.length,
+      percent: Math.round(index / ids.length * 100),
+      bookId,
+      bookName,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
+    try {
+      const config = await loadBookConfig(bookId, userId);
+      if (!canEditBook(config)) {
+        const issue = {
+          severity: "warn",
+          message: "Skipped because this book is read-only inside Lore Recall.",
+          bookId,
+          bookName,
+          phase: "loading"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+        continue;
+      }
+      const cache = await loadBookCache(bookId, userId);
+      if (!cache) {
+        const issue = {
+          severity: "warn",
+          message: "Skipped because this world book no longer exists.",
+          bookId,
+          bookName,
+          phase: "loading"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+        continue;
+      }
+      bookName = cache.name || bookId;
+      operation?.progress({
+        phase: "classifying",
+        message: `Seeding metadata tree for ${bookName}.`,
+        current: index + 1,
+        total: ids.length,
+        percent: Math.round(index / ids.length * 100),
+        bookId,
+        bookName,
+        chunkCurrent: null,
+        chunkTotal: null
+      });
+      const tree = createEmptyTreeIndex(bookId);
+      for (const entry of cache.entries) {
+        const path = getMetadataCategoryPath(entry);
+        if (path.length) {
+          const categoryId = ensureCategoryPath(tree, path, "metadata");
+          assignEntryToTarget(tree, entry.entryId, { categoryId });
+        } else {
+          assignEntryToTarget(tree, entry.entryId, "unassigned");
+        }
+      }
+      operation?.progress({
+        phase: "saving",
+        message: `Saving metadata tree for ${bookName}.`,
+        current: index + 1,
+        total: ids.length,
+        percent: Math.round((index + 0.75) / ids.length * 100),
+        bookId,
+        bookName,
+        chunkCurrent: null,
+        chunkTotal: null
+      });
+      tree.lastBuiltAt = Date.now();
+      tree.buildSource = "metadata";
+      await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
+      completed += 1;
+      operation?.progress({
+        phase: "complete",
+        message: `Built metadata tree for ${bookName}.`,
+        current: index + 1,
+        total: ids.length,
+        percent: Math.round((index + 1) / ids.length * 100),
+        bookId,
+        bookName,
+        chunkCurrent: null,
+        chunkTotal: null
+      });
+    } catch (error) {
+      const issue = {
+        severity: "error",
+        message: `Metadata build failed: ${describeError(error)}`,
+        bookId,
+        bookName,
+        phase: "saving"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+    }
+  }
+  return {
+    issues,
+    completed,
+    total: ids.length
+  };
 }
 function chunkEntries(items, chunkTokens) {
   const maxChars = Math.max(2000, chunkTokens * 4);
@@ -1294,88 +1382,233 @@ function chunkEntries(items, chunkTokens) {
     chunks.push(current);
   return chunks;
 }
-async function buildTreeWithLlm(bookIds, userId) {
+async function buildTreeWithLlm(bookIds, userId, operation) {
   const settings = await loadGlobalSettings(userId);
-  for (const bookId of uniqueStrings(bookIds)) {
-    const config = await loadBookConfig(bookId, userId);
-    if (!canEditBook(config))
-      continue;
-    const cache = await loadBookCache(bookId, userId);
-    if (!cache?.entries.length)
-      continue;
-    const tree = createEmptyTreeIndex(bookId);
-    const updates = [];
-    for (const chunk of chunkEntries(cache.entries, settings.chunkTokens)) {
-      const prompt = [
-        "Organize these lore entries into a compact retrieval tree.",
-        'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"],"summary":"...","collapsedText":"..."}]}',
-        `Build detail: ${settings.buildDetail}.`,
-        `Tree granularity: ${settings.treeGranularity}.`,
-        "Use empty path [] when an entry should stay unassigned.",
-        "",
-        "Entries:",
-        ...chunk.map((entry) => JSON.stringify({
-          entryId: entry.entryId,
-          comment: entry.comment,
-          keys: [...entry.key, ...entry.keysecondary],
-          groupName: entry.groupName,
-          constant: entry.constant,
-          selective: entry.selective,
-          preview: truncateText(entry.content, 420)
-        }))
-      ].join(`
-`);
-      const parsed = await runControllerJson2(prompt, settings, userId);
-      const assignments = Array.isArray(parsed?.assignments) ? parsed.assignments.filter((value) => !!value && typeof value === "object") : [];
-      for (const assignment of assignments) {
-        const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
-        if (!entryId)
-          continue;
-        const path = Array.isArray(assignment.path) ? assignment.path.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-        if (path.length) {
-          const categoryId = ensureCategoryPath(tree, path, "llm");
-          assignEntryToTarget(tree, entryId, { categoryId });
-        } else {
-          assignEntryToTarget(tree, entryId, "unassigned");
-        }
-        updates.push({
-          entryId,
-          summary: typeof assignment.summary === "string" ? assignment.summary.trim() : undefined,
-          collapsedText: typeof assignment.collapsedText === "string" ? assignment.collapsedText.trim() : undefined
-        });
-      }
-    }
-    for (const entry of cache.entries) {
-      const assigned = tree.unassignedEntryIds.includes(entry.entryId) || Object.values(tree.nodes).some((node) => node.entryIds.includes(entry.entryId));
-      if (!assigned)
-        assignEntryToTarget(tree, entry.entryId, "unassigned");
-    }
-    tree.lastBuiltAt = Date.now();
-    tree.buildSource = "llm";
-    await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
-    for (const update of updates) {
-      const entry = await spindle.world_books.entries.get(update.entryId, userId);
-      if (!entry)
-        continue;
-      const current = normalizeEntryRecallMeta((entry.extensions || {})[EXTENSION_KEY], {
-        entryId: entry.id,
-        comment: entry.comment,
-        key: entry.key
-      });
-      await spindle.world_books.entries.update(entry.id, {
-        extensions: {
-          ...entry.extensions || {},
-          [EXTENSION_KEY]: {
-            ...(entry.extensions || {})[EXTENSION_KEY],
-            ...current,
-            summary: update.summary || current.summary,
-            collapsedText: update.collapsedText || current.collapsedText
-          }
-        }
-      }, userId);
-    }
-    await invalidateBookCache(bookId, userId);
+  const ids = uniqueStrings(bookIds);
+  const issues = [];
+  if (!ids.length) {
+    return { issues, completed: 0, total: 0 };
   }
+  const preparedBooks = [];
+  for (const [index, bookId] of ids.entries()) {
+    let bookName = bookId;
+    operation?.progress({
+      phase: "loading",
+      message: `Loading ${bookName}...`,
+      current: index + 1,
+      total: ids.length,
+      percent: null,
+      bookId,
+      bookName,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
+    try {
+      const config = await loadBookConfig(bookId, userId);
+      if (!canEditBook(config)) {
+        const issue = {
+          severity: "warn",
+          message: "Skipped because this book is read-only inside Lore Recall.",
+          bookId,
+          bookName,
+          phase: "loading"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+        continue;
+      }
+      const cache = await loadBookCache(bookId, userId);
+      if (!cache) {
+        const issue = {
+          severity: "warn",
+          message: "Skipped because this world book no longer exists.",
+          bookId,
+          bookName,
+          phase: "loading"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+        continue;
+      }
+      bookName = cache.name || bookId;
+      if (!cache.entries.length) {
+        const issue = {
+          severity: "warn",
+          message: "Skipped because this book has no entries to build from.",
+          bookId,
+          bookName,
+          phase: "loading"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+        continue;
+      }
+      preparedBooks.push({
+        bookId,
+        bookName,
+        cache,
+        chunkCount: Math.max(1, chunkEntries(cache.entries, settings.chunkTokens).length),
+        originalIndex: index
+      });
+    } catch (error) {
+      const issue = {
+        severity: "error",
+        message: `Failed to prepare this book: ${describeError(error)}`,
+        bookId,
+        bookName,
+        phase: "loading"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+    }
+  }
+  const totalUnits = preparedBooks.reduce((sum, book) => sum + book.chunkCount + 2, 0);
+  let completedUnits = 0;
+  let completedBooks = 0;
+  for (const book of preparedBooks) {
+    const { bookId, bookName, cache, chunkCount, originalIndex } = book;
+    try {
+      const tree = createEmptyTreeIndex(bookId);
+      const updates = [];
+      const chunks = chunkEntries(cache.entries, settings.chunkTokens);
+      for (const [chunkIndex, chunk] of chunks.entries()) {
+        operation?.progress({
+          phase: "controller",
+          message: `Analyzing ${bookName} chunk ${chunkIndex + 1} of ${chunkCount}.`,
+          current: originalIndex + 1,
+          total: ids.length,
+          percent: totalUnits ? Math.round(completedUnits / totalUnits * 100) : null,
+          bookId,
+          bookName,
+          chunkCurrent: chunkIndex + 1,
+          chunkTotal: chunkCount
+        });
+        const prompt = [
+          "Organize these lore entries into a compact retrieval tree.",
+          'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"],"summary":"...","collapsedText":"..."}]}',
+          `Build detail: ${settings.buildDetail}.`,
+          `Tree granularity: ${settings.treeGranularity}.`,
+          "Use empty path [] when an entry should stay unassigned.",
+          "",
+          "Entries:",
+          ...chunk.map((entry) => JSON.stringify({
+            entryId: entry.entryId,
+            comment: entry.comment,
+            keys: [...entry.key, ...entry.keysecondary],
+            groupName: entry.groupName,
+            constant: entry.constant,
+            selective: entry.selective,
+            preview: truncateText(entry.content, 420)
+          }))
+        ].join(`
+`);
+        const parsed = await runControllerJson2(prompt, settings, userId);
+        if (!parsed || !Array.isArray(parsed.assignments)) {
+          throw new Error(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`);
+        }
+        const assignments = parsed.assignments.filter((value) => !!value && typeof value === "object");
+        for (const assignment of assignments) {
+          const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
+          if (!entryId)
+            continue;
+          const path = Array.isArray(assignment.path) ? assignment.path.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+          if (path.length) {
+            const categoryId = ensureCategoryPath(tree, path, "llm");
+            assignEntryToTarget(tree, entryId, { categoryId });
+          } else {
+            assignEntryToTarget(tree, entryId, "unassigned");
+          }
+          updates.push({
+            entryId,
+            summary: typeof assignment.summary === "string" ? assignment.summary.trim() : undefined,
+            collapsedText: typeof assignment.collapsedText === "string" ? assignment.collapsedText.trim() : undefined
+          });
+        }
+        completedUnits += 1;
+      }
+      operation?.progress({
+        phase: "saving_tree",
+        message: `Saving tree for ${bookName}.`,
+        current: originalIndex + 1,
+        total: ids.length,
+        percent: totalUnits ? Math.round(completedUnits / totalUnits * 100) : null,
+        bookId,
+        bookName,
+        chunkCurrent: chunkCount,
+        chunkTotal: chunkCount
+      });
+      for (const entry of cache.entries) {
+        const assigned = tree.unassignedEntryIds.includes(entry.entryId) || Object.values(tree.nodes).some((node) => node.entryIds.includes(entry.entryId));
+        if (!assigned)
+          assignEntryToTarget(tree, entry.entryId, "unassigned");
+      }
+      tree.lastBuiltAt = Date.now();
+      tree.buildSource = "llm";
+      await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
+      completedUnits += 1;
+      operation?.progress({
+        phase: "writing_summaries",
+        message: `Writing summaries for ${bookName}.`,
+        current: originalIndex + 1,
+        total: ids.length,
+        percent: totalUnits ? Math.round(completedUnits / totalUnits * 100) : null,
+        bookId,
+        bookName,
+        chunkCurrent: chunkCount,
+        chunkTotal: chunkCount
+      });
+      for (const update of updates) {
+        const entry = await spindle.world_books.entries.get(update.entryId, userId);
+        if (!entry)
+          continue;
+        const current = normalizeEntryRecallMeta((entry.extensions || {})[EXTENSION_KEY], {
+          entryId: entry.id,
+          comment: entry.comment,
+          key: entry.key
+        });
+        await spindle.world_books.entries.update(entry.id, {
+          extensions: {
+            ...entry.extensions || {},
+            [EXTENSION_KEY]: {
+              ...(entry.extensions || {})[EXTENSION_KEY],
+              ...current,
+              summary: update.summary || current.summary,
+              collapsedText: update.collapsedText || current.collapsedText
+            }
+          }
+        }, userId);
+      }
+      await invalidateBookCache(bookId, userId);
+      completedUnits += 1;
+      completedBooks += 1;
+      operation?.progress({
+        phase: "complete",
+        message: `Finished LLM tree build for ${bookName}.`,
+        current: originalIndex + 1,
+        total: ids.length,
+        percent: totalUnits ? Math.round(completedUnits / totalUnits * 100) : 100,
+        bookId,
+        bookName,
+        chunkCurrent: chunkCount,
+        chunkTotal: chunkCount
+      });
+    } catch (error) {
+      const issue = {
+        severity: "error",
+        message: `LLM tree build failed: ${describeError(error)}`,
+        bookId,
+        bookName,
+        phase: "controller"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+    }
+  }
+  return {
+    issues,
+    completed: completedBooks,
+    total: ids.length
+  };
 }
 async function updateCategory(bookId, nodeId, patch, userId) {
   const config = await loadBookConfig(bookId, userId);
@@ -1510,14 +1743,33 @@ function getDescendantCategoryIds2(tree, nodeId, depthLimit) {
   }
   return result;
 }
-async function regenerateSummaries(bookId, entryIds, nodeIds, userId) {
+async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation) {
   const settings = await loadGlobalSettings(userId);
   const cache = await loadBookCache(bookId, userId);
   if (!cache)
     throw new Error("That world book no longer exists.");
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
+  const bookName = cache.name || bookId;
   const targetEntries = ((entryIds?.length) ? cache.entries.filter((entry) => entryIds.includes(entry.entryId)) : cache.entries.filter((entry) => !entry.summary.trim() || !entry.collapsedText.trim())).slice(0, 24);
+  const targetNodeIds = uniqueStrings(nodeIds ?? []).filter((id) => loaded.tree.nodes[id] && id !== loaded.tree.rootId).slice(0, 16);
+  const totalTargets = targetEntries.length + targetNodeIds.length;
+  let completed = 0;
+  const issues = [];
+  if (!totalTargets) {
+    return { issues, completed: 0, total: 0 };
+  }
   if (targetEntries.length) {
+    operation?.progress({
+      phase: "controller",
+      message: `Generating entry summaries for ${bookName}.`,
+      current: 0,
+      total: totalTargets,
+      percent: 0,
+      bookId,
+      bookName,
+      chunkCurrent: 1,
+      chunkTotal: 1
+    });
     const prompt = [
       "Write short retrieval summaries for these lore entries.",
       'Return ONLY JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
@@ -1532,57 +1784,127 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId) {
       }))
     ].join(`
 `);
-    const parsed = await runControllerJson2(prompt, settings, userId);
-    const updates = Array.isArray(parsed?.entries) ? parsed.entries.filter((value) => !!value && typeof value === "object") : [];
-    for (const update of updates) {
-      const entryId = typeof update.entryId === "string" ? update.entryId : "";
-      if (!entryId)
-        continue;
-      const entry = await spindle.world_books.entries.get(entryId, userId);
-      if (!entry)
-        continue;
-      const current = normalizeEntryRecallMeta((entry.extensions || {})[EXTENSION_KEY], {
-        entryId: entry.id,
-        comment: entry.comment,
-        key: entry.key
-      });
-      await spindle.world_books.entries.update(entry.id, {
-        extensions: {
-          ...entry.extensions || {},
-          [EXTENSION_KEY]: {
-            ...(entry.extensions || {})[EXTENSION_KEY],
-            ...current,
-            summary: typeof update.summary === "string" ? update.summary.trim() : current.summary,
-            collapsedText: typeof update.collapsedText === "string" ? update.collapsedText.trim() : current.collapsedText
+    try {
+      const parsed = await runControllerJson2(prompt, settings, userId);
+      if (!parsed || !Array.isArray(parsed.entries)) {
+        throw new Error("The controller did not return usable entry summary JSON.");
+      }
+      const updates = parsed.entries.filter((value) => !!value && typeof value === "object");
+      for (const update of updates) {
+        const entryId = typeof update.entryId === "string" ? update.entryId : "";
+        if (!entryId)
+          continue;
+        const entry = await spindle.world_books.entries.get(entryId, userId);
+        if (!entry)
+          continue;
+        const current = normalizeEntryRecallMeta((entry.extensions || {})[EXTENSION_KEY], {
+          entryId: entry.id,
+          comment: entry.comment,
+          key: entry.key
+        });
+        await spindle.world_books.entries.update(entry.id, {
+          extensions: {
+            ...entry.extensions || {},
+            [EXTENSION_KEY]: {
+              ...(entry.extensions || {})[EXTENSION_KEY],
+              ...current,
+              summary: typeof update.summary === "string" ? update.summary.trim() : current.summary,
+              collapsedText: typeof update.collapsedText === "string" ? update.collapsedText.trim() : current.collapsedText
+            }
           }
-        }
-      }, userId);
+        }, userId);
+      }
+      await invalidateBookCache(bookId, userId);
+      completed += targetEntries.length;
+      operation?.progress({
+        phase: "entries_complete",
+        message: `Updated ${targetEntries.length} entry summary${targetEntries.length === 1 ? "" : "ies"} for ${bookName}.`,
+        current: completed,
+        total: totalTargets,
+        percent: Math.round(completed / totalTargets * 100),
+        bookId,
+        bookName,
+        chunkCurrent: 1,
+        chunkTotal: 1
+      });
+    } catch (error) {
+      const issue = {
+        severity: "error",
+        message: `Entry summary regeneration failed: ${describeError(error)}`,
+        bookId,
+        bookName,
+        phase: "controller"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
     }
-    await invalidateBookCache(bookId, userId);
   }
-  const targetNodeIds = uniqueStrings(nodeIds ?? []).filter((id) => loaded.tree.nodes[id] && id !== loaded.tree.rootId).slice(0, 16);
   for (const nodeId of targetNodeIds) {
     const node = loaded.tree.nodes[nodeId];
-    const descendantIds = getDescendantCategoryIds2(loaded.tree, nodeId, 2);
-    const sampleEntryIds = uniqueStrings(descendantIds.flatMap((id) => loaded.tree.nodes[id]?.entryIds ?? [])).slice(0, 8);
-    const prompt = [
-      "Write a short category summary for this lore branch.",
-      'Return ONLY JSON in this exact shape: {"summary":"..."}',
-      "",
-      `Category: ${node.label}`,
-      "Entries:",
-      ...sampleEntryIds.map((entryId) => cache.entries.find((entry) => entry.entryId === entryId)).filter((entry) => !!entry).map((entry) => `- ${entry.label}: ${truncateText(entry.summary || entry.content, 180)}`)
-    ].join(`
+    if (!node)
+      continue;
+    operation?.progress({
+      phase: "category_controller",
+      message: `Generating a category summary for ${node.label} in ${bookName}.`,
+      current: completed,
+      total: totalTargets,
+      percent: Math.round(completed / totalTargets * 100),
+      bookId,
+      bookName,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
+    try {
+      const descendantIds = getDescendantCategoryIds2(loaded.tree, nodeId, 2);
+      const sampleEntryIds = uniqueStrings(descendantIds.flatMap((id) => loaded.tree.nodes[id]?.entryIds ?? [])).slice(0, 8);
+      const prompt = [
+        "Write a short category summary for this lore branch.",
+        'Return ONLY JSON in this exact shape: {"summary":"..."}',
+        "",
+        `Category: ${node.label}`,
+        "Entries:",
+        ...sampleEntryIds.map((entryId) => cache.entries.find((entry) => entry.entryId === entryId)).filter((entry) => !!entry).map((entry) => `- ${entry.label}: ${truncateText(entry.summary || entry.content, 180)}`)
+      ].join(`
 `);
-    const parsed = await runControllerJson2(prompt, settings, userId);
-    if (typeof parsed?.summary === "string")
+      const parsed = await runControllerJson2(prompt, settings, userId);
+      if (typeof parsed?.summary !== "string" || !parsed.summary.trim()) {
+        throw new Error("The controller did not return a usable category summary.");
+      }
       node.summary = parsed.summary.trim();
+      completed += 1;
+      operation?.progress({
+        phase: "category_complete",
+        message: `Updated category summary for ${node.label}.`,
+        current: completed,
+        total: totalTargets,
+        percent: Math.round(completed / totalTargets * 100),
+        bookId,
+        bookName,
+        chunkCurrent: null,
+        chunkTotal: null
+      });
+    } catch (error) {
+      const issue = {
+        severity: "error",
+        message: `Category summary regeneration failed for ${node.label}: ${describeError(error)}`,
+        bookId,
+        bookName,
+        phase: "category_controller"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+    }
   }
   if (targetNodeIds.length) {
     loaded.tree.lastBuiltAt = Date.now();
     loaded.tree.buildSource = "manual";
     await saveTreeIndex(bookId, loaded.tree, cache.entries.map((entry) => entry.entryId), userId);
   }
+  return {
+    issues,
+    completed,
+    total: totalTargets
+  };
 }
 function buildDiagnostics(runtimeBooks, staleIssues) {
   const diagnostics = [];
@@ -1647,7 +1969,16 @@ function buildDiagnostics(runtimeBooks, staleIssues) {
   }
   return diagnostics;
 }
-async function exportSnapshot(userId) {
+async function exportSnapshot(userId, operation) {
+  operation?.progress({
+    phase: "loading",
+    message: "Collecting Lore Recall settings, trees, and metadata for export.",
+    current: 0,
+    total: 1,
+    percent: 0,
+    chunkCurrent: null,
+    chunkTotal: null
+  });
   const [globalSettings, characterFiles, bookFiles, treeFiles, books] = await Promise.all([
     loadGlobalSettings(userId),
     spindle.userStorage.list(`${CHARACTER_CONFIG_DIR}/`, userId).catch(() => []),
@@ -1697,7 +2028,7 @@ async function exportSnapshot(userId) {
     if (Object.keys(perBook).length)
       entryMeta[book.id] = perBook;
   }
-  return {
+  const snapshot = {
     version: 2,
     exportedAt: Date.now(),
     globalSettings,
@@ -1706,23 +2037,95 @@ async function exportSnapshot(userId) {
     treeIndexes,
     entryMeta
   };
+  operation?.progress({
+    phase: "complete",
+    message: "Lore Recall snapshot is ready to download.",
+    current: 1,
+    total: 1,
+    percent: 100,
+    chunkCurrent: null,
+    chunkTotal: null
+  });
+  return {
+    value: snapshot,
+    issues: [],
+    completed: 1,
+    total: 1
+  };
 }
-async function importSnapshot(snapshot, userId) {
+async function importSnapshot(snapshot, userId, operation) {
+  const totalSteps = 1 + Object.keys(snapshot.characterConfigs ?? {}).length + Object.keys(snapshot.bookConfigs ?? {}).length + Object.keys(snapshot.treeIndexes ?? {}).length + Object.keys(snapshot.entryMeta ?? {}).reduce((sum, bookId) => sum + Object.keys(snapshot.entryMeta?.[bookId] ?? {}).length, 0);
+  let completed = 0;
+  operation?.progress({
+    phase: "global_settings",
+    message: "Importing Lore Recall global settings.",
+    current: completed,
+    total: totalSteps,
+    percent: totalSteps ? 0 : 100,
+    chunkCurrent: null,
+    chunkTotal: null
+  });
   await saveGlobalSettings(snapshot.globalSettings, userId);
+  completed += 1;
   for (const [characterId, config] of Object.entries(snapshot.characterConfigs ?? {})) {
+    operation?.progress({
+      phase: "character_configs",
+      message: `Importing character settings for ${characterId}.`,
+      current: completed,
+      total: totalSteps,
+      percent: totalSteps ? Math.round(completed / totalSteps * 100) : 100,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
     await spindle.userStorage.setJson(getCharacterConfigPath(characterId), config, { indent: 2, userId });
+    completed += 1;
   }
   for (const [bookId, config] of Object.entries(snapshot.bookConfigs ?? {})) {
+    operation?.progress({
+      phase: "book_configs",
+      message: `Importing settings for ${bookId}.`,
+      current: completed,
+      total: totalSteps,
+      percent: totalSteps ? Math.round(completed / totalSteps * 100) : 100,
+      bookId,
+      bookName: bookId,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
     await spindle.userStorage.setJson(getBookConfigPath(bookId), config, { indent: 2, userId });
+    completed += 1;
   }
   for (const [bookId, tree] of Object.entries(snapshot.treeIndexes ?? {})) {
+    operation?.progress({
+      phase: "trees",
+      message: `Importing tree index for ${bookId}.`,
+      current: completed,
+      total: totalSteps,
+      percent: totalSteps ? Math.round(completed / totalSteps * 100) : 100,
+      bookId,
+      bookName: bookId,
+      chunkCurrent: null,
+      chunkTotal: null
+    });
     const cache = await loadBookCache(bookId, userId);
     if (!cache)
       continue;
     await spindle.userStorage.setJson(getTreePath(bookId), ensureTreeIndexShape(tree, bookId, cache.entries.map((entry) => entry.entryId)), { indent: 2, userId });
+    completed += 1;
   }
   for (const [bookId, perBook] of Object.entries(snapshot.entryMeta ?? {})) {
     for (const [entryId, meta] of Object.entries(perBook)) {
+      operation?.progress({
+        phase: "entry_metadata",
+        message: `Importing entry metadata for ${bookId}.`,
+        current: completed,
+        total: totalSteps,
+        percent: totalSteps ? Math.round(completed / totalSteps * 100) : 100,
+        bookId,
+        bookName: bookId,
+        chunkCurrent: null,
+        chunkTotal: null
+      });
       const entry = await spindle.world_books.entries.get(entryId, userId);
       if (!entry || entry.world_book_id !== bookId)
         continue;
@@ -1739,9 +2142,24 @@ async function importSnapshot(snapshot, userId) {
           }
         }
       }, userId);
+      completed += 1;
     }
     await invalidateBookCache(bookId, userId);
   }
+  operation?.progress({
+    phase: "complete",
+    message: "Lore Recall snapshot import finished.",
+    current: completed,
+    total: totalSteps,
+    percent: 100,
+    chunkCurrent: null,
+    chunkTotal: null
+  });
+  return {
+    issues: [],
+    completed,
+    total: totalSteps
+  };
 }
 async function applySuggestedBooks(characterId, bookIds, mode, userId) {
   const current = await loadCharacterConfig(characterId, userId);
@@ -1820,6 +2238,161 @@ async function pushState(userId, chatId) {
   const state = await buildState(userId, chatId);
   rememberChatUser(state.activeChatId, userId);
   send({ type: "state", state }, userId);
+}
+var activeTrackedOperations = new Map;
+function createOperationId(kind) {
+  return `${kind}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+}
+function sendOperation(userId, operation) {
+  send({ type: "operation", operation }, userId);
+}
+function getOperationTitle(kind) {
+  switch (kind) {
+    case "build_tree_from_metadata":
+      return "Build Tree From Metadata";
+    case "build_tree_with_llm":
+      return "Build Tree With LLM";
+    case "regenerate_summaries":
+      return "Regenerate Summaries";
+    case "export_snapshot":
+      return "Export Snapshot";
+    case "import_snapshot":
+      return "Import Snapshot";
+  }
+}
+function summarizeOutcome(kind, outcome, issues) {
+  const issueCount = issues.length;
+  switch (kind) {
+    case "build_tree_with_llm":
+      if (issueCount)
+        return `Built ${outcome.completed} of ${outcome.total} book(s) with ${issueCount} issue(s).`;
+      return `Built ${outcome.completed} book(s) with the LLM.`;
+    case "build_tree_from_metadata":
+      if (issueCount)
+        return `Built ${outcome.completed} of ${outcome.total} metadata tree(s) with ${issueCount} issue(s).`;
+      return `Built ${outcome.completed} metadata tree(s).`;
+    case "regenerate_summaries":
+      if (issueCount)
+        return `Updated ${outcome.completed} of ${outcome.total} summary target(s) with ${issueCount} issue(s).`;
+      return `Updated ${outcome.completed} summary target(s).`;
+    case "export_snapshot":
+      return "Lore Recall snapshot is ready to download.";
+    case "import_snapshot":
+      if (issueCount)
+        return `Imported Lore Recall snapshot with ${issueCount} issue(s).`;
+      return "Imported Lore Recall snapshot.";
+  }
+}
+function createInitialOperation(id, kind, message) {
+  return {
+    id,
+    kind,
+    status: "started",
+    title: getOperationTitle(kind),
+    message: "Starting operation...",
+    percent: 0,
+    current: null,
+    total: null,
+    phase: "starting",
+    bookId: null,
+    bookName: null,
+    chunkCurrent: null,
+    chunkTotal: null,
+    retryable: false,
+    finishedAt: null,
+    scope: {
+      chatId: "chatId" in message ? message.chatId ?? null : null,
+      bookIds: "bookIds" in message && Array.isArray(message.bookIds) ? message.bookIds : undefined,
+      bookId: "bookId" in message && typeof message.bookId === "string" ? message.bookId : null,
+      entryIds: "entryIds" in message && Array.isArray(message.entryIds) ? message.entryIds : undefined,
+      nodeIds: "nodeIds" in message && Array.isArray(message.nodeIds) ? message.nodeIds : undefined
+    },
+    issues: []
+  };
+}
+async function runTrackedOperation(userId, message, kind, runner, onSuccess) {
+  if (activeTrackedOperations.has(userId)) {
+    send({
+      type: "error",
+      message: "Another Lore Recall operation is already running. Wait for it to finish before starting a new one."
+    }, userId);
+    return;
+  }
+  const id = createOperationId(kind);
+  const issues = [];
+  let operation = createInitialOperation(id, kind, message);
+  activeTrackedOperations.set(userId, id);
+  sendOperation(userId, operation);
+  const context = {
+    progress(update) {
+      operation = {
+        ...operation,
+        status: operation.status === "started" ? "running" : operation.status,
+        ...update,
+        percent: typeof update.percent === "number" ? Math.max(0, Math.min(100, update.percent)) : operation.percent,
+        current: typeof update.current === "number" ? update.current : operation.current,
+        total: typeof update.total === "number" ? update.total : operation.total,
+        phase: typeof update.phase === "undefined" ? operation.phase : update.phase ?? null,
+        bookId: typeof update.bookId === "undefined" ? operation.bookId : update.bookId ?? null,
+        bookName: typeof update.bookName === "undefined" ? operation.bookName : update.bookName ?? null,
+        chunkCurrent: typeof update.chunkCurrent === "undefined" ? operation.chunkCurrent : update.chunkCurrent ?? null,
+        chunkTotal: typeof update.chunkTotal === "undefined" ? operation.chunkTotal : update.chunkTotal ?? null,
+        message: update.message ?? operation.message,
+        issues: [...issues]
+      };
+      sendOperation(userId, operation);
+    },
+    addIssue(issue) {
+      issues.push(issue);
+      operation = {
+        ...operation,
+        issues: [...issues]
+      };
+      sendOperation(userId, operation);
+    }
+  };
+  try {
+    const outcome = await runner(context);
+    const allIssues = outcome.issues.length ? outcome.issues : issues;
+    const failed = outcome.completed === 0 && outcome.total > 0 && allIssues.length > 0;
+    if (onSuccess && typeof outcome.value !== "undefined" && !failed) {
+      await onSuccess(outcome.value);
+    }
+    operation = {
+      ...operation,
+      status: failed ? "failed" : "completed",
+      message: summarizeOutcome(kind, outcome, allIssues),
+      percent: failed ? operation.percent : 100,
+      current: outcome.total > 0 ? outcome.completed : operation.current,
+      total: outcome.total > 0 ? outcome.total : operation.total,
+      retryable: failed,
+      finishedAt: Date.now(),
+      issues: allIssues
+    };
+    sendOperation(userId, operation);
+    await pushState(userId, "chatId" in message ? message.chatId : null);
+  } catch (error) {
+    const issue = {
+      severity: "error",
+      message: error instanceof Error ? error.message : "Unknown Lore Recall operation error",
+      phase: operation.phase ?? null,
+      bookId: operation.bookId ?? null,
+      bookName: operation.bookName ?? null
+    };
+    issues.push(issue);
+    operation = {
+      ...operation,
+      status: "failed",
+      message: issue.message,
+      retryable: true,
+      finishedAt: Date.now(),
+      issues: [...issues]
+    };
+    spindle.log.error(`Lore Recall ${kind} failed: ${issue.message}`);
+    sendOperation(userId, operation);
+  } finally {
+    activeTrackedOperations.delete(userId);
+  }
 }
 spindle.registerInterceptor(async (messages, context) => {
   try {
@@ -1904,30 +2477,25 @@ spindle.onFrontendMessage(async (payload, userId) => {
         await pushState(userId, message.chatId);
         break;
       case "build_tree_from_metadata":
-        await buildTreeFromMetadata(message.bookIds, userId);
-        await pushState(userId, message.chatId);
+        await runTrackedOperation(userId, message, "build_tree_from_metadata", (operation) => buildTreeFromMetadata(message.bookIds, userId, operation));
         break;
       case "build_tree_with_llm":
-        await buildTreeWithLlm(message.bookIds, userId);
-        await pushState(userId, message.chatId);
+        await runTrackedOperation(userId, message, "build_tree_with_llm", (operation) => buildTreeWithLlm(message.bookIds, userId, operation));
         break;
       case "regenerate_summaries":
-        await regenerateSummaries(message.bookId, message.entryIds, message.nodeIds, userId);
-        await pushState(userId, message.chatId);
+        await runTrackedOperation(userId, message, "regenerate_summaries", (operation) => regenerateSummaries(message.bookId, message.entryIds, message.nodeIds, userId, operation));
         break;
-      case "export_snapshot": {
-        const snapshot = await exportSnapshot(userId);
-        send({
-          type: "export_snapshot_ready",
-          filename: `lore-recall-${new Date(snapshot.exportedAt).toISOString().slice(0, 10)}.json`,
-          snapshot
-        }, userId);
-        await pushState(userId, message.chatId);
+      case "export_snapshot":
+        await runTrackedOperation(userId, message, "export_snapshot", (operation) => exportSnapshot(userId, operation), async (snapshot) => {
+          send({
+            type: "export_snapshot_ready",
+            filename: `lore-recall-${new Date(snapshot.exportedAt).toISOString().slice(0, 10)}.json`,
+            snapshot
+          }, userId);
+        });
         break;
-      }
       case "import_snapshot":
-        await importSnapshot(message.snapshot, userId);
-        await pushState(userId, message.chatId);
+        await runTrackedOperation(userId, message, "import_snapshot", (operation) => importSnapshot(message.snapshot, userId, operation));
         break;
       case "apply_suggested_books":
         await applySuggestedBooks(message.characterId, message.bookIds, message.mode, userId);
