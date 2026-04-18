@@ -219,423 +219,963 @@ function filterTreeEntries(entries, filterText) {
 
 // src/ui/styles.ts
 var LORE_RECALL_CSS = `
+/* ===========================================================
+   Lore Recall — visual system
+   Flat, quiet, typography-first. Accent appears only on
+   active elements (primary button, active tab, focus ring,
+   selected row indicator). No decorative gradients.
+   =========================================================== */
+
 .lore-root {
-  --lore-bg: #0f1115;
-  --lore-shell: #171a21;
-  --lore-shell-2: #1c2028;
-  --lore-shell-3: #232833;
-  --lore-panel: #1a1e26;
-  --lore-panel-2: #11141a;
-  --lore-line: #343c4a;
-  --lore-line-strong: #5b4d3a;
-  --lore-ink: #f4efe5;
-  --lore-muted: #b0b8c6;
-  --lore-amber: #e4a052;
-  --lore-red: #c96c55;
-  --lore-green: #87c08a;
-  color: var(--lore-ink);
-  font: 13px/1.5 "IBM Plex Sans", "Aptos", "Segoe UI", sans-serif;
+  --lr-text: var(--lumiverse-text, #dde2ea);
+  --lr-muted: var(--lumiverse-text-muted, #9aa0ae);
+  --lr-dim: var(--lumiverse-text-dim, #686d7b);
+
+  --lr-bg-0: var(--lumiverse-fill, #12151c);
+  --lr-panel: var(--lumiverse-fill-subtle, #191c24);
+
+  --lr-line: var(--lumiverse-border, #262a34);
+  --lr-line-2: var(--lumiverse-border-hover, #363a46);
+
+  --lr-acc: var(--lumiverse-accent, #6b8ff0);
+  --lr-acc-fg: var(--lumiverse-accent-fg, #ffffff);
+
+  --lr-warn: #e07856;
+  --lr-good: #5fb380;
+
+  --lr-r-sm: 5px;
+  --lr-r: 7px;
+  --lr-r-lg: 10px;
+
+  --lr-t: 120ms ease;
+
+  color: var(--lr-text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.003em;
 }
 
-.lore-drawer,
-.lore-workspace,
-.lore-stack,
-.lore-columns,
-.lore-list,
-.lore-form-grid,
-.lore-grid,
-.lore-modal,
-.lore-modal-body {
-  display: grid;
-  gap: 12px;
-}
+.lore-root *,
+.lore-root *::before,
+.lore-root *::after { box-sizing: border-box; }
+
+.lore-root p,
+.lore-root h1,
+.lore-root h2,
+.lore-root h3,
+.lore-root h4,
+.lore-root h5 { margin: 0; }
+
+/* ---------- Layout shells --------------------------------- */
 
 .lore-drawer {
-  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px 14px 20px;
 }
 
 .lore-workspace {
-  padding: 10px 0 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0 24px;
+}
+
+.lore-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 520px;
 }
 
 .lore-columns {
-  grid-template-columns: minmax(320px, 0.92fr) minmax(320px, 1.08fr);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
 }
 
-.lore-card {
-  border: 1px solid var(--lore-line);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 72px),
-    linear-gradient(135deg, rgba(228,160,82,0.08), transparent 45%),
-    var(--lore-shell);
-  padding: 14px;
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.24);
-}
-
-.lore-hero,
-.lore-workspace-header {
-  border-color: var(--lore-line-strong);
-  background:
-    linear-gradient(180deg, rgba(255,255,255,0.03), transparent 80px),
-    radial-gradient(circle at top right, rgba(201,108,85,0.15), transparent 40%),
-    linear-gradient(135deg, rgba(228,160,82,0.1), transparent 45%),
-    var(--lore-shell-2);
-}
-
-.lore-cta {
-  background:
-    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 72px),
-    linear-gradient(135deg, rgba(201,108,85,0.14), transparent 60%),
-    var(--lore-shell-2);
-}
-
-.lore-title {
-  margin: 0;
-  font: 700 26px/1.05 "Sora", "Aptos Display", "Segoe UI", sans-serif;
-  letter-spacing: -0.04em;
-}
-
-.lore-section-title,
-.lore-list-title,
-.lore-stat-label {
-  margin: 0;
-  font-weight: 700;
-  color: var(--lore-ink);
-}
-
-.lore-eyebrow,
-.lore-label,
-.lore-node-section {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--lore-muted);
-}
-
-.lore-copy,
-.lore-list-copy,
-.lore-list-meta,
-.lore-stat-copy,
-.lore-toggle-copy {
-  color: var(--lore-muted);
-}
-
-.lore-row,
-.lore-inline,
-.lore-hero-head,
-.lore-modal-toolbar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-}
-
 .lore-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   min-width: 0;
 }
 
-.lore-segments {
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--lore-line);
-  border-radius: 12px;
-  background: var(--lore-panel-2);
+.lore-cluster {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-.lore-segment,
-.lore-btn,
-.lore-chip,
-.lore-tree-row {
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+/* ---------- Page header (no card chrome) ------------------ */
+
+.lore-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid var(--lr-line);
 }
 
-.lore-segment {
-  min-height: 34px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--lore-muted);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
+.lore-page-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+  color: var(--lr-text);
 }
 
-.lore-segment.active {
-  color: #120f0a;
-  background: linear-gradient(135deg, rgba(228,160,82,0.85), rgba(250,232,208,0.92));
+.lore-page-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--lr-muted);
+  margin-top: 4px;
 }
 
-.lore-btn,
-.lore-chip,
-.lore-source,
-.lore-tree-row,
-.lore-pill,
-.lore-toggle,
-.lore-input,
-.lore-select,
-.lore-textarea {
-  border: 1px solid var(--lore-line);
-  border-radius: 11px;
-  font: inherit;
+.lore-page-meta .sep {
+  color: var(--lr-dim);
+  user-select: none;
 }
 
-.lore-btn,
-.lore-chip,
-.lore-tree-row {
-  cursor: pointer;
+/* Drawer-specific, slightly smaller header */
+.lore-drawer .lore-page-title { font-size: 17px; }
+
+/* ---------- Section (quiet panel) ------------------------- */
+
+.lore-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 14px;
+  background: var(--lr-panel);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r-lg);
 }
 
-.lore-btn {
-  min-height: 38px;
-  padding: 0 12px;
-  background: var(--lore-shell-3);
-  color: var(--lore-ink);
-  font-weight: 700;
+.lore-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
-.lore-btn:hover,
-.lore-chip:hover,
-.lore-source:hover,
-.lore-tree-row:hover {
-  transform: translateY(-1px);
-  border-color: var(--lore-amber);
-  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.24);
+.lore-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lr-text);
+  letter-spacing: -0.005em;
 }
 
-.lore-btn-primary {
-  background: linear-gradient(135deg, rgba(228,160,82,0.92), rgba(250,236,216,0.92));
-  color: #1a130d;
-  border-color: rgba(228,160,82,0.65);
+.lore-section-sub {
+  font-size: 11.5px;
+  color: var(--lr-muted);
 }
 
-.lore-btn-ghost,
-.lore-chip {
-  background: var(--lore-panel-2);
+.lore-hint {
+  font-size: 11.5px;
+  color: var(--lr-dim);
+  line-height: 1.5;
 }
 
-.lore-chip.active {
-  background: linear-gradient(135deg, rgba(228,160,82,0.18), rgba(201,108,85,0.12));
-  border-color: var(--lore-amber);
-}
+/* ---------- Status + tags -------------------------------- */
 
-.lore-pill {
+.lore-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 28px;
-  padding: 0 10px;
-  background: var(--lore-panel-2);
-  color: var(--lore-ink);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11.5px;
+  color: var(--lr-muted);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-.lore-pill-accent { border-color: rgba(228,160,82,0.65); }
-.lore-pill-good { border-color: rgba(135,192,138,0.6); }
-.lore-pill-warn { border-color: rgba(201,108,85,0.72); }
+.lore-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lr-dim);
+  flex-shrink: 0;
+}
 
-.lore-source {
+.lore-status.on::before {
+  background: var(--lr-good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-good) 20%, transparent);
+}
+
+.lore-status.warn::before {
+  background: var(--lr-warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-warn) 20%, transparent);
+}
+
+.lore-status.accent::before {
+  background: var(--lr-acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-acc) 20%, transparent);
+}
+
+.lore-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--lr-muted);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lr-text) 5%, transparent);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  letter-spacing: 0;
+}
+
+.lore-tag.accent {
+  color: color-mix(in srgb, var(--lr-acc) 80%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-acc) 12%, transparent);
+}
+
+.lore-tag.good {
+  color: color-mix(in srgb, var(--lr-good) 80%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-good) 12%, transparent);
+}
+
+.lore-tag.warn {
+  color: color-mix(in srgb, var(--lr-warn) 82%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-warn) 12%, transparent);
+}
+
+/* ---------- Metric row (inline numbers) ------------------- */
+
+.lore-metrics {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  padding: 2px 0;
+}
+
+.lore-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lore-metric-value {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--lr-text);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.lore-metric-label {
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+/* ---------- Buttons --------------------------------------- */
+
+.lore-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--lr-text);
+  background: transparent;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  cursor: pointer;
+  white-space: nowrap;
+  letter-spacing: 0;
+  transition: background var(--lr-t), border-color var(--lr-t), color var(--lr-t);
+}
+
+.lore-btn:hover {
+  background: color-mix(in srgb, var(--lr-text) 4%, transparent);
+  border-color: var(--lr-line-2);
+}
+
+.lore-btn:active { transform: translateY(0.5px); }
+
+.lore-btn:focus-visible {
+  outline: none;
+  border-color: var(--lr-acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-acc) 25%, transparent);
+}
+
+.lore-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.lore-btn-primary {
+  color: var(--lr-acc-fg);
+  background: var(--lr-acc);
+  border-color: var(--lr-acc);
+}
+
+.lore-btn-primary:hover {
+  background: color-mix(in srgb, var(--lr-acc) 88%, #000);
+  border-color: color-mix(in srgb, var(--lr-acc) 88%, #000);
+}
+
+.lore-btn-danger {
+  color: var(--lr-warn);
+  border-color: color-mix(in srgb, var(--lr-warn) 35%, var(--lr-line));
+}
+
+.lore-btn-danger:hover {
+  background: color-mix(in srgb, var(--lr-warn) 10%, transparent);
+  border-color: color-mix(in srgb, var(--lr-warn) 50%, var(--lr-line));
+}
+
+.lore-btn-sm {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.lore-btn-link {
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--lr-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.lore-btn-link:hover {
+  color: var(--lr-text);
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+.lore-btn-icon-only {
+  width: 30px;
+  padding: 0;
+}
+
+/* ---------- Tabs (underline) ------------------------------ */
+
+.lore-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--lr-line);
+  margin: 0 -2px;
+}
+
+.lore-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--lr-muted);
+  cursor: pointer;
+  border-radius: 0;
+  position: relative;
+  transition: color var(--lr-t);
+  letter-spacing: 0;
+}
+
+.lore-tab:hover { color: var(--lr-text); }
+
+.lore-tab.active {
+  color: var(--lr-text);
+  box-shadow: inset 0 -2px 0 var(--lr-acc);
+}
+
+/* ---------- Chips (filter toggles, book tabs) ------------- */
+
+.lore-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--lr-muted);
+  background: transparent;
+  border: 1px solid var(--lr-line);
+  border-radius: 6px;
+  cursor: pointer;
+  letter-spacing: 0;
+  transition: background var(--lr-t), border-color var(--lr-t), color var(--lr-t);
+}
+
+.lore-chip:hover {
+  color: var(--lr-text);
+  border-color: var(--lr-line-2);
+}
+
+.lore-chip.active {
+  color: var(--lr-text);
+  background: color-mix(in srgb, var(--lr-acc) 10%, transparent);
+  border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
+}
+
+/* ---------- Lists (dense row lists) ----------------------- */
+
+.lore-rows {
+  display: flex;
+  flex-direction: column;
+  background: var(--lr-bg-0);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  overflow: hidden;
+}
+
+.lore-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  row-gap: 4px;
   align-items: center;
   padding: 10px 12px;
-  border: 1px solid var(--lore-line);
-  border-radius: 12px;
-  background: var(--lore-shell-3);
+  border-bottom: 1px solid var(--lr-line);
+  cursor: pointer;
+  transition: background var(--lr-t);
+  position: relative;
 }
 
-.lore-source.active {
-  border-color: var(--lore-amber);
-  background: linear-gradient(135deg, rgba(228,160,82,0.12), rgba(201,108,85,0.08));
+.lore-row:last-child { border-bottom: 0; }
+.lore-row:hover { background: color-mix(in srgb, var(--lr-text) 3%, transparent); }
+
+.lore-row.active {
+  background: color-mix(in srgb, var(--lr-acc) 7%, transparent);
 }
 
-.lore-list-item {
-  display: grid;
+.lore-row.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--lr-acc);
+}
+
+.lore-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lore-row-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--lr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-row-meta {
+  font-size: 11.5px;
+  color: var(--lr-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-row-tags {
+  grid-column: 1;
+  display: flex;
   gap: 4px;
+  flex-wrap: wrap;
+}
+
+.lore-row-tags:empty { display: none; }
+
+.lore-row-action {
+  grid-row: 1 / span 2;
+  align-self: start;
+}
+
+/* diagnostic-style list items */
+.lore-note {
   padding: 10px 12px;
-  border: 1px solid var(--lore-line);
-  border-radius: 12px;
-  background: var(--lore-shell-3);
-}
-
-.tone-warn { border-color: rgba(201,108,85,0.6); }
-.tone-info { border-color: rgba(228,160,82,0.45); }
-
-.lore-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.lore-grid-compact {
-  grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
-}
-
-.lore-stat {
-  display: grid;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+  display: flex;
+  flex-direction: column;
   gap: 4px;
-  padding: 12px;
-  border: 1px solid var(--lore-line);
-  border-radius: 12px;
-  background: var(--lore-shell-3);
+  border-left: 3px solid var(--lr-dim);
 }
 
-.lore-stat-value {
-  font: 700 24px/1 "Sora", "Aptos Display", sans-serif;
-  color: var(--lore-amber);
+.lore-note.warn { border-left-color: var(--lr-warn); }
+.lore-note.info { border-left-color: var(--lr-acc); }
+.lore-note.error { border-left-color: var(--lr-warn); }
+
+.lore-note-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--lr-text);
 }
 
-.lore-form-grid {
+.lore-note-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+/* preview nodes */
+.lore-node {
+  padding: 10px 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lore-node-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--lr-text);
+}
+
+.lore-node-meta {
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-node-body {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+/* ---------- Forms ---------------------------------------- */
+
+.lore-form {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .lore-field,
 .lore-field-span {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
 }
 
-.lore-field-span {
-  grid-column: 1 / -1;
+.lore-field-span { grid-column: 1 / -1; }
+
+.lore-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--lr-muted);
 }
 
 .lore-input,
 .lore-select,
 .lore-textarea {
   width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  background: var(--lore-panel-2);
-  color: var(--lore-ink);
+  min-width: 0;
+  padding: 7px 10px;
+  background: var(--lr-bg-0);
+  color: var(--lr-text);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  font: inherit;
+  font-size: 12.5px;
+  transition: border-color var(--lr-t), box-shadow var(--lr-t);
 }
+
+.lore-input::placeholder,
+.lore-textarea::placeholder { color: var(--lr-dim); }
+
+.lore-input:hover,
+.lore-select:hover,
+.lore-textarea:hover { border-color: var(--lr-line-2); }
 
 .lore-input:focus,
 .lore-select:focus,
 .lore-textarea:focus {
   outline: none;
-  border-color: var(--lore-amber);
-  box-shadow: 0 0 0 3px rgba(228,160,82,0.16);
+  border-color: var(--lr-acc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-acc) 22%, transparent);
 }
 
 .lore-textarea {
-  min-height: 108px;
+  min-height: 78px;
   resize: vertical;
+  line-height: 1.55;
+  font-family: inherit;
 }
 
-.lore-textarea-tall {
-  min-height: 170px;
+.lore-textarea-tall { min-height: 150px; }
+
+.lore-select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--lr-muted) 50%),
+    linear-gradient(135deg, var(--lr-muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) center, calc(100% - 9px) center;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 26px;
+  cursor: pointer;
 }
 
-.lore-toggle {
-  display: flex;
+.lore-search {
+  width: 100%;
+}
+
+/* Custom switch */
+.lore-switch {
+  display: inline-flex;
   align-items: center;
   gap: 10px;
-  min-height: 42px;
-  padding: 0 12px;
-  background: var(--lore-shell-3);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12.5px;
+  color: var(--lr-text);
+  position: relative;
+  padding: 2px 0;
 }
 
-.lore-toggle input {
-  accent-color: var(--lore-amber);
+.lore-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
+
+.lore-switch-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-text) 18%, transparent);
+  transition: background var(--lr-t);
+}
+
+.lore-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--lr-text);
+  transition: transform var(--lr-t), background var(--lr-t);
+}
+
+.lore-switch input:checked ~ .lore-switch-track {
+  background: var(--lr-acc);
+}
+
+.lore-switch input:checked ~ .lore-switch-track::after {
+  transform: translateX(12px);
+  background: var(--lr-acc-fg);
+}
+
+.lore-switch input:focus-visible ~ .lore-switch-track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-acc) 25%, transparent);
+}
+
+/* ---------- Empty state ----------------------------------- */
 
 .lore-empty {
-  padding: 14px;
-  border: 1px dashed var(--lore-line);
-  border-radius: 12px;
-  color: var(--lore-muted);
-  background: rgba(0,0,0,0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  color: var(--lr-muted);
+  text-align: center;
+  font-size: 12px;
+  border: 1px dashed var(--lr-line);
+  border-radius: var(--lr-r);
+  background: color-mix(in srgb, var(--lr-text) 1.5%, transparent);
+  min-height: 80px;
 }
+
+.lore-empty-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--lr-text);
+}
+
+.lore-empty-body {
+  font-size: 11.5px;
+  color: var(--lr-muted);
+  max-width: 40ch;
+  line-height: 1.5;
+}
+
+/* ---------- Pre / code ------------------------------------ */
 
 .lore-pre {
   margin: 0;
-  padding: 12px;
-  border: 1px solid var(--lore-line);
-  border-radius: 12px;
-  background: #0d0f14;
-  color: #efe5d5;
-  font: 12.5px/1.6 "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+  padding: 12px 14px;
+  background: var(--lr-bg-0);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  color: var(--lr-text);
+  font: 11.5px/1.65 ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Consolas, "Liberation Mono", monospace;
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
 }
 
-.lore-modal {
-  min-height: 560px;
+/* ---------- Actions footer -------------------------------- */
+
+.lore-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--lr-line);
+  flex-wrap: wrap;
 }
+
+.lore-actions-spacer { flex: 1 1 auto; }
+
+/* ---------- Modal workspace ------------------------------- */
 
 .lore-modal-toolbar {
-  padding-bottom: 2px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
+.lore-modal-toolbar .lore-search { flex: 1 1 260px; min-width: 0; }
+
 .lore-modal-body {
-  grid-template-columns: minmax(340px, 0.92fr) minmax(0, 1.08fr);
-  align-items: start;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  min-height: 440px;
+}
+
+.lore-modal-body.empty {
+  grid-template-columns: 1fr;
 }
 
 .lore-modal-rail,
 .lore-modal-editor {
-  max-height: min(68vh, 680px);
+  background: var(--lr-panel);
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r-lg);
+  max-height: min(72vh, 680px);
   overflow: auto;
+  min-width: 0;
 }
 
-.lore-search {
-  min-width: 240px;
-}
-
-.lore-tree-row {
-  width: 100%;
-  text-align: left;
-  min-height: 34px;
-  padding: 0 10px;
-  background: var(--lore-panel-2);
-  color: var(--lore-ink);
-  margin-top: 6px;
-}
-
-.lore-tree-row.active {
-  border-color: var(--lore-amber);
-  background: linear-gradient(135deg, rgba(228,160,82,0.18), rgba(201,108,85,0.08));
-}
-
-.lore-tree-entry {
-  color: #e6e0d3;
-}
-
-.lore-node-section {
-  margin-top: 12px;
+.lore-modal-rail {
+  padding: 10px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .lore-book-tabs {
-  margin-bottom: 4px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid var(--lr-line);
+  margin-bottom: 6px;
 }
 
-@media (max-width: 1080px) {
-  .lore-columns,
-  .lore-modal-body,
-  .lore-form-grid,
-  .lore-grid {
-    grid-template-columns: 1fr;
-  }
+.lore-modal-editor {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-@media (max-width: 760px) {
-  .lore-drawer {
-    padding: 12px;
-  }
+.lore-editor-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--lr-line);
+}
 
-  .lore-source {
-    grid-template-columns: 1fr;
-  }
+.lore-editor-kind {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--lr-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.lore-editor-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--lr-text);
+}
+
+.lore-breadcrumb {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--lr-muted);
+}
+
+.lore-breadcrumb .sep { color: var(--lr-dim); user-select: none; }
+
+/* ---------- Tree rail ------------------------------------- */
+
+.lore-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.lore-tree-group {
+  padding: 12px 8px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--lr-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lore-tree-row {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lr-text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--lr-t), color var(--lr-t);
+  letter-spacing: 0;
+}
+
+.lore-tree-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.lore-tree-row:hover { background: color-mix(in srgb, var(--lr-text) 5%, transparent); }
+
+.lore-tree-row.active {
+  background: color-mix(in srgb, var(--lr-acc) 13%, transparent);
+  color: var(--lr-text);
+}
+
+.lore-tree-row::before {
+  content: "";
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  background: currentColor;
+  opacity: 0.4;
+  border-radius: 1px;
+}
+
+.lore-tree-row.entry {
+  color: var(--lr-muted);
+}
+
+.lore-tree-row.entry::before {
+  border-radius: 50%;
+}
+
+.lore-tree-row.active::before,
+.lore-tree-row.entry.active::before {
+  background: var(--lr-acc);
+  opacity: 1;
+}
+
+.lore-tree-row.active { color: var(--lr-text); }
+
+/* ---------- Scrollbars (quiet themed) --------------------- */
+
+.lore-root *::-webkit-scrollbar { width: 8px; height: 8px; }
+.lore-root *::-webkit-scrollbar-track { background: transparent; }
+.lore-root *::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--lr-text) 14%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.lore-root *::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--lr-text) 22%, transparent);
+  background-clip: padding-box;
+}
+
+/* ---------- Responsive ------------------------------------ */
+
+@media (max-width: 1060px) {
+  .lore-columns { grid-template-columns: 1fr; }
+  .lore-modal-body { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  .lore-form { grid-template-columns: 1fr; }
+  .lore-drawer { padding: 14px 10px 18px; }
+}
+
+/* ---------- Number input polish --------------------------- */
+
+.lore-root input[type="number"]::-webkit-inner-spin-button,
+.lore-root input[type="number"]::-webkit-outer-spin-button {
+  opacity: 0.45;
 }
 `;
 
 // src/ui/app.ts
-var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 3a3 3 0 0 1 3 3v1h4a3 3 0 0 1 3 3v1h1a3 3 0 1 1 0 2h-1v1a3 3 0 0 1-3 3h-1v1a3 3 0 1 1-2 0v-1H8a3 3 0 0 1-3-3v-1H4a3 3 0 1 1 0-2h1v-1a3 3 0 0 1 3-3h4V6a3 3 0 0 1-2.18-2.87L10 3A3 3 0 1 1 7 3Zm0 2a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm11 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM4 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm6 6a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm-3-7v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2H7Zm1-3a1 1 0 0 0-1 1v0h8v0a1 1 0 0 0-1-1H8Z"/></svg>`;
+var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v0"/><path d="M7 18h6a4 4 0 0 0 4-4v0"/></svg>`;
 function sendToBackend(ctx, message) {
   ctx.sendToBackend(message);
 }
@@ -672,7 +1212,7 @@ function setup(ctx) {
   const categoryDrafts = new Map;
   let workspaceModal = null;
   let modalDismissUnsub = null;
-  let advancedOpen = true;
+  let advancedOpen = false;
   let importInput = null;
   function getManagedBookIds() {
     return currentState?.characterConfig?.managedBookIds ?? [];
@@ -824,14 +1364,96 @@ function setup(ctx) {
     categoryDrafts.set(key, next);
     return next;
   }
-  function createBadge(label, tone = "neutral") {
-    return createElement("span", `lore-pill lore-pill-${tone}`, label);
+  function createStatus(label, tone = "off") {
+    return createElement("span", `lore-status ${tone}`, label);
+  }
+  function createTag(label, tone = "neutral") {
+    return createElement("span", `lore-tag ${tone === "neutral" ? "" : tone}`.trim(), label);
   }
   function createButton(label, className, onClick) {
     const button = createElement("button", className, label);
     button.type = "button";
     button.addEventListener("click", onClick);
     return button;
+  }
+  function createSwitch(label, checked, onChange) {
+    const root = createElement("label", "lore-switch");
+    const input = createElement("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    const track = createElement("span", "lore-switch-track");
+    const copy = createElement("span", "lore-switch-label", label);
+    root.append(input, track, copy);
+    return root;
+  }
+  function createField(label, control, span = false) {
+    const wrap = createElement("label", span ? "lore-field-span" : "lore-field");
+    wrap.append(createElement("span", "lore-label", label), control);
+    return wrap;
+  }
+  function createSelect(value, options, onChange) {
+    const select = createElement("select", "lore-select");
+    for (const [v, label] of options)
+      select.appendChild(new Option(label, v));
+    select.value = value;
+    select.addEventListener("change", () => onChange(select.value));
+    return select;
+  }
+  function createNumberInput(value, onChange) {
+    const input = createElement("input", "lore-input");
+    input.type = "number";
+    input.value = String(value);
+    input.addEventListener("input", () => onChange(Number.parseFloat(input.value) || 0));
+    return input;
+  }
+  function createTextInput(value, placeholder, onChange) {
+    const input = createElement("input", "lore-input");
+    input.value = value;
+    input.placeholder = placeholder;
+    input.addEventListener("input", () => onChange(input.value));
+    return input;
+  }
+  function createTextarea(value, placeholder, onChange, tall = false) {
+    const ta = createElement("textarea", `lore-textarea${tall ? " lore-textarea-tall" : ""}`);
+    ta.value = value;
+    ta.placeholder = placeholder;
+    ta.addEventListener("input", () => onChange(ta.value));
+    return ta;
+  }
+  function createSectionHead(title, subtitle, extra) {
+    const head = createElement("div", "lore-section-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.appendChild(createElement("div", "lore-section-title", title));
+    if (subtitle)
+      copy.appendChild(createElement("div", "lore-section-sub", subtitle));
+    head.appendChild(copy);
+    if (extra)
+      head.appendChild(extra);
+    return head;
+  }
+  function createEmpty(title, body, action) {
+    const wrap = createElement("div", "lore-empty");
+    wrap.appendChild(createElement("div", "lore-empty-title", title));
+    if (body)
+      wrap.appendChild(createElement("div", "lore-empty-body", body));
+    if (action)
+      wrap.appendChild(action);
+    return wrap;
+  }
+  function createBreadcrumb(segments) {
+    const wrap = createElement("div", "lore-breadcrumb");
+    if (!segments.length) {
+      wrap.appendChild(createElement("span", "", "Root"));
+      return wrap;
+    }
+    segments.forEach((seg, i) => {
+      if (i > 0)
+        wrap.appendChild(createElement("span", "sep", "›"));
+      wrap.appendChild(createElement("span", "", seg));
+    });
+    return wrap;
   }
   function openWorkspace() {
     if (!workspaceModal) {
@@ -853,95 +1475,138 @@ function setup(ctx) {
     const shell = createElement("div", "lore-root lore-drawer");
     drawerRoot.appendChild(shell);
     const state = currentState;
-    const hero = createElement("section", "lore-card lore-hero");
-    const heroHead = createElement("div", "lore-row lore-hero-head");
-    const heroCopy = createElement("div", "lore-stack");
-    heroCopy.append(createElement("div", "lore-eyebrow", "Live Retrieval"), createElement("h2", "lore-title", state?.activeCharacterName || "Lore Recall"), createElement("p", "lore-copy", state?.activeChatId ? `Chat ${truncateMiddle(state.activeChatId)}` : "Open a character chat to inspect retrieval."));
-    const heroActions = createElement("div", "lore-inline");
-    heroActions.append(createBadge(state?.characterConfig?.enabled ? "Enabled" : "Disabled", state?.characterConfig?.enabled ? "good" : "warn"), createButton("Refresh", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })));
-    heroHead.append(heroCopy, heroActions);
-    hero.append(heroHead, createElement("div", "lore-inline", ""));
-    hero.lastElementChild?.append(createBadge(`${state?.characterConfig?.searchMode ?? "collapsed"} mode`, "accent"), createBadge(`${state?.characterConfig?.tokenBudget ?? 0} token budget`), createBadge(`${getManagedBookIds().length} managed book${getManagedBookIds().length === 1 ? "" : "s"}`));
-    const previewCard = createElement("section", "lore-card");
-    previewCard.append(createElement("div", "lore-section-title", "Current Retrieval"), createElement("p", "lore-copy", "Live preview for the active chat."));
-    const segments = createElement("div", "lore-segments");
+    const managed = getManagedBookIds();
+    const enabled = !!state?.characterConfig?.enabled;
+    const tokenBudget = state?.characterConfig?.tokenBudget ?? 0;
+    const mode = state?.characterConfig?.searchMode ?? "collapsed";
+    const head = createElement("div", "lore-page-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    const title = createElement("div", "lore-page-title", state?.activeCharacterName || "Lore Recall");
+    copy.appendChild(title);
+    const meta = createElement("div", "lore-page-meta");
+    meta.appendChild(createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"));
+    if (state?.activeChatId) {
+      meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "", truncateMiddle(state.activeChatId)));
+    }
+    copy.appendChild(meta);
+    head.appendChild(copy);
+    const headActions = createElement("div", "lore-cluster");
+    headActions.appendChild(createButton("Refresh", "lore-btn lore-btn-sm", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })));
+    head.appendChild(headActions);
+    shell.appendChild(head);
+    const metrics = createElement("div", "lore-metrics");
+    const metric = (value, label) => {
+      const m = createElement("div", "lore-metric");
+      m.append(createElement("div", "lore-metric-value", String(value)), createElement("div", "lore-metric-label", label));
+      return m;
+    };
+    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(mode, "mode"), metric(tokenBudget, "token budget"));
+    shell.appendChild(metrics);
+    const preview = createElement("section", "lore-section");
+    const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
       ["injected", "Injected"],
       ["nodes", "Nodes"],
       ["query", "Query"]
     ]) {
-      segments.appendChild(createButton(label, `lore-segment${drawerTabMode === value ? " active" : ""}`, () => {
+      tabs.appendChild(createButton(label, `lore-tab${drawerTabMode === value ? " active" : ""}`, () => {
         drawerTabMode = value;
         render();
       }));
     }
-    previewCard.appendChild(segments);
+    preview.append(createSectionHead("Retrieval preview", "What gets injected for the active turn."), tabs);
     if (!state?.preview) {
-      previewCard.appendChild(createElement("div", "lore-empty", "No preview is available for the current chat yet."));
+      preview.appendChild(createEmpty("No preview yet", "Send a message to see what Lore Recall retrieves."));
     } else if (drawerTabMode === "injected") {
-      previewCard.appendChild(createElement("pre", "lore-pre", state.preview.injectedText));
+      const text = state.preview.injectedText?.trim() ? state.preview.injectedText : "";
+      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Nothing injected", "This turn ran with no retrieved entries."));
     } else if (drawerTabMode === "query") {
-      previewCard.appendChild(createElement("pre", "lore-pre", state.preview.queryText));
+      const text = state.preview.queryText?.trim() ? state.preview.queryText : "";
+      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Empty query", "The retrieval query was blank for this turn."));
     } else {
-      const list = createElement("div", "lore-list");
-      for (const node of state.preview.selectedNodes) {
-        const item = createElement("div", "lore-list-item");
-        item.append(createElement("div", "lore-list-title", node.label), createElement("div", "lore-list-meta", `${node.worldBookName} · ${node.breadcrumb}`), createElement("div", "lore-list-copy", node.previewText));
-        list.appendChild(item);
+      if (!state.preview.selectedNodes.length) {
+        preview.appendChild(createEmpty("No nodes selected", "No candidate entries matched this turn."));
+      } else {
+        const list = createElement("div", "lore-stack");
+        list.style.gap = "8px";
+        for (const node of state.preview.selectedNodes) {
+          const item = createElement("div", "lore-node");
+          item.append(createElement("div", "lore-node-title", node.label), createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`), createElement("div", "lore-node-body", clipText(node.previewText, 220)));
+          list.appendChild(item);
+        }
+        preview.appendChild(list);
       }
-      previewCard.appendChild(list);
     }
-    const sourcesCard = createElement("section", "lore-card");
-    sourcesCard.append(createElement("div", "lore-section-title", "Managed Sources"));
-    const sourcesList = createElement("div", "lore-list");
-    for (const bookId of getManagedBookIds()) {
-      const book = state?.allWorldBooks.find((item2) => item2.id === bookId);
-      const status = state?.bookStatuses[bookId];
-      const item = createElement("div", "lore-list-item");
-      const badges = createElement("div", "lore-inline");
-      if (status?.attachedToCharacter)
-        badges.appendChild(createBadge("Attached", "warn"));
-      if (status?.treeMissing)
-        badges.appendChild(createBadge("No tree", "warn"));
-      if (state?.bookConfigs[bookId]?.permission === "write_only")
-        badges.appendChild(createBadge("Write only", "warn"));
-      item.append(createElement("div", "lore-list-title", book?.name || bookId), createElement("div", "lore-list-copy", `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`), badges);
-      sourcesList.appendChild(item);
+    shell.appendChild(preview);
+    const sources = createElement("section", "lore-section");
+    sources.appendChild(createSectionHead("Managed sources", managed.length ? `${managed.length} book${managed.length === 1 ? "" : "s"} · retrieval drives only these` : "No sources managed yet."));
+    if (!managed.length) {
+      sources.appendChild(createEmpty("No managed books", "Open the workspace to pick lorebooks this character should pull from.", createButton("Open workspace", "lore-btn lore-btn-sm", () => openWorkspace())));
+    } else {
+      const list = createElement("div", "lore-rows");
+      for (const bookId of managed) {
+        const book = state?.allWorldBooks.find((item) => item.id === bookId);
+        const status = state?.bookStatuses[bookId];
+        const row = createElement("div", "lore-row");
+        const body = createElement("div", "lore-row-body");
+        body.append(createElement("div", "lore-row-title", book?.name || bookId), createElement("div", "lore-row-meta", `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`));
+        row.appendChild(body);
+        const rowTags = createElement("div", "lore-row-tags");
+        if (status?.treeMissing)
+          rowTags.appendChild(createTag("No tree", "warn"));
+        if (status?.attachedToCharacter)
+          rowTags.appendChild(createTag("Attached", "warn"));
+        if (state?.bookConfigs[bookId]?.permission === "write_only")
+          rowTags.appendChild(createTag("Write only", "warn"));
+        if (!rowTags.childElementCount)
+          rowTags.appendChild(createTag("Ready", "good"));
+        row.appendChild(rowTags);
+        list.appendChild(row);
+      }
+      sources.appendChild(list);
     }
-    if (!sourcesList.childElementCount)
-      sourcesList.appendChild(createElement("div", "lore-empty", "No managed sources selected."));
-    sourcesCard.appendChild(sourcesList);
-    const snapshotCard = createElement("section", "lore-card");
-    snapshotCard.append(createElement("div", "lore-section-title", "Tree Snapshot"));
-    const stats = createElement("div", "lore-grid lore-grid-compact");
-    for (const bookId of getManagedBookIds().slice(0, 4)) {
-      const book = state?.allWorldBooks.find((item) => item.id === bookId);
-      const status = state?.bookStatuses[bookId];
-      const stat = createElement("div", "lore-stat");
-      stat.append(createElement("div", "lore-stat-value", String(status?.categoryCount ?? 0)), createElement("div", "lore-stat-label", book?.name || "Book"), createElement("div", "lore-stat-copy", `${status?.rootEntryCount ?? 0} root · ${status?.unassignedCount ?? 0} unassigned`));
-      stats.appendChild(stat);
+    shell.appendChild(sources);
+    const workspace = createElement("section", "lore-section");
+    workspace.appendChild(createSectionHead("Workspace", "Full tree editor, build tools and diagnostics."));
+    const ws = createElement("div", "lore-cluster");
+    ws.append(createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace()), createButton("Extension settings", "lore-btn-link", () => openSettingsWorkspace()));
+    workspace.appendChild(ws);
+    shell.appendChild(workspace);
+  }
+  function renderWorkspaceHeader() {
+    const wrap = createElement("div", "lore-page-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.appendChild(createElement("div", "lore-page-title", "Lore Recall"));
+    const sub = createElement("div", "lore-page-meta");
+    if (currentState?.activeCharacterName) {
+      sub.appendChild(createElement("span", "", currentState.activeCharacterName));
+      sub.appendChild(createElement("span", "sep", "·"));
     }
-    if (!stats.childElementCount)
-      stats.appendChild(createElement("div", "lore-empty", "No source trees loaded yet."));
-    snapshotCard.appendChild(stats);
-    const cta = createElement("section", "lore-card lore-cta");
-    cta.append(createElement("div", "lore-section-title", "Open Workspace"), createElement("p", "lore-copy", "Use the full workspace for source setup, build tools, diagnostics, and the split tree editor."), createButton("Open Tree Workspace", "lore-btn lore-btn-primary", () => openWorkspace()), createButton("Open Extension Settings", "lore-btn lore-btn-ghost", () => openSettingsWorkspace()));
-    shell.append(hero, previewCard, sourcesCard, snapshotCard, cta);
+    sub.appendChild(createElement("span", "", currentState?.activeChatId ? "Dense retrieval + tree workspace" : "Open a character chat to configure retrieval."));
+    copy.appendChild(sub);
+    wrap.appendChild(copy);
+    const actions = createElement("div", "lore-cluster");
+    actions.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-sm", () => openWorkspace()));
+    wrap.appendChild(actions);
+    return wrap;
   }
   function renderSourcePicker(state) {
-    const section = createElement("section", "lore-card");
-    section.append(createElement("div", "lore-section-title", "Lorebook Selection"), createElement("p", "lore-copy", "Detached managed books drive retrieval. Native attachments only generate warnings."));
-    const filterInput = createElement("input", "lore-input");
-    filterInput.type = "search";
-    filterInput.placeholder = "Filter books";
-    filterInput.value = sourceFilter;
-    filterInput.addEventListener("input", () => {
-      sourceFilter = filterInput.value;
+    const section = createElement("section", "lore-section");
+    const head = createSectionHead("Lorebooks", "Managed books drive retrieval. Natively-attached books only generate warnings.");
+    section.appendChild(head);
+    const tools = createElement("div", "lore-cluster");
+    const filterInput = createTextInput(sourceFilter, "Filter lorebooks…", (v) => {
+      sourceFilter = v;
       render();
     });
-    section.appendChild(filterInput);
+    filterInput.type = "search";
+    filterInput.className = "lore-input lore-search";
+    tools.appendChild(filterInput);
     if (state.suggestedBookIds.length && state.activeCharacterId) {
-      section.appendChild(createButton(`Add ${state.suggestedBookIds.length} suggested`, "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+      tools.appendChild(createButton(`Add ${state.suggestedBookIds.length} suggested`, "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
         type: "apply_suggested_books",
         characterId: state.activeCharacterId,
         chatId: state.activeChatId,
@@ -949,33 +1614,42 @@ function setup(ctx) {
         mode: "append"
       })));
     }
-    const list = createElement("div", "lore-list");
-    for (const bookId of filterBooks(state, sourceFilter)) {
+    section.appendChild(tools);
+    const bookIds = filterBooks(state, sourceFilter);
+    if (!bookIds.length) {
+      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      return section;
+    }
+    const list = createElement("div", "lore-rows");
+    for (const bookId of bookIds) {
       const book = state.allWorldBooks.find((item) => item.id === bookId);
       if (!book)
         continue;
       const status = state.bookStatuses[bookId];
-      const isSelected = getManagedBookIds().includes(bookId);
-      const row = createElement("div", `lore-source${selectedBookId === bookId ? " active" : ""}`);
+      const isManaged = getManagedBookIds().includes(bookId);
+      const row = createElement("div", `lore-row${selectedBookId === bookId ? " active" : ""}`);
       row.addEventListener("click", () => {
         selectedBookId = bookId;
         render();
       });
-      const copy = createElement("div", "lore-stack");
-      copy.append(createElement("div", "lore-list-title", book.name), createElement("div", "lore-list-copy", clipText(state.bookConfigs[bookId]?.description || book.description, 110)));
-      const meta = createElement("div", "lore-inline");
-      if (isSelected)
-        meta.appendChild(createBadge("Managed", "good"));
+      const body = createElement("div", "lore-row-body");
+      body.append(createElement("div", "lore-row-title", book.name), createElement("div", "lore-row-meta", clipText(state.bookConfigs[bookId]?.description || book.description || "No description.", 110)));
+      row.appendChild(body);
+      const tags = createElement("div", "lore-row-tags");
+      if (isManaged)
+        tags.appendChild(createTag("Managed", "good"));
       if (state.suggestedBookIds.includes(bookId))
-        meta.appendChild(createBadge("Suggested", "accent"));
+        tags.appendChild(createTag("Suggested", "accent"));
       if (status?.attachedToCharacter)
-        meta.appendChild(createBadge("Attached", "warn"));
+        tags.appendChild(createTag("Attached", "warn"));
       if (status?.treeMissing)
-        meta.appendChild(createBadge("No tree", "warn"));
-      const toggle = createButton(isSelected ? "Remove" : "Manage", "lore-btn lore-btn-ghost", () => {
+        tags.appendChild(createTag("No tree", "warn"));
+      row.appendChild(tags);
+      const toggle = createButton(isManaged ? "Remove" : "Manage", `lore-btn lore-btn-sm lore-row-action${isManaged ? "" : " lore-btn-primary"}`, (event) => {
+        event.stopPropagation();
         if (!state.activeCharacterId || !state.characterConfig)
           return;
-        const nextIds = isSelected ? state.characterConfig.managedBookIds.filter((id) => id !== bookId) : [...state.characterConfig.managedBookIds, bookId];
+        const nextIds = isManaged ? state.characterConfig.managedBookIds.filter((id) => id !== bookId) : [...state.characterConfig.managedBookIds, bookId];
         sendToBackend(ctx, {
           type: "save_character_config",
           characterId: state.activeCharacterId,
@@ -983,212 +1657,202 @@ function setup(ctx) {
           patch: { managedBookIds: nextIds }
         });
       });
-      row.append(copy, meta, toggle);
+      row.appendChild(toggle);
       list.appendChild(row);
     }
     section.appendChild(list);
     return section;
   }
   function renderBuildTools(state) {
-    const section = createElement("section", "lore-card");
-    section.append(createElement("div", "lore-section-title", "Build Tree"), createElement("p", "lore-copy", "Seed categories from metadata or rebuild with the selected controller connection."));
-    const actions = createElement("div", "lore-inline");
-    actions.append(createButton("Build From Metadata", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_from_metadata", bookIds: getManagedBookIds(), chatId: state.activeChatId })), createButton("Build With LLM", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_with_llm", bookIds: getManagedBookIds(), chatId: state.activeChatId })), createButton("Open Tree Workspace", "lore-btn lore-btn-ghost", () => openWorkspace()));
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."));
+    const hasManaged = getManagedBookIds().length > 0;
+    const actions = createElement("div", "lore-cluster");
+    const metaBtn = createButton("Build from metadata", "lore-btn", () => sendToBackend(ctx, { type: "build_tree_from_metadata", bookIds: getManagedBookIds(), chatId: state.activeChatId }));
+    const llmBtn = createButton("Build with LLM", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "build_tree_with_llm", bookIds: getManagedBookIds(), chatId: state.activeChatId }));
+    if (!hasManaged) {
+      metaBtn.disabled = true;
+      llmBtn.disabled = true;
+    }
+    actions.append(metaBtn, llmBtn, createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()));
+    section.appendChild(actions);
+    if (!hasManaged) {
+      section.appendChild(createElement("div", "lore-hint", "Manage at least one lorebook before building a tree."));
+    }
+    return section;
+  }
+  function renderOverview(state) {
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Overview", "Quick health view across managed sources."));
+    const managed = getManagedBookIds();
+    if (!managed.length) {
+      section.appendChild(createEmpty("No managed books", "Pick sources above to see overview stats."));
+      return section;
+    }
+    const totals = managed.reduce((acc, id) => {
+      const s = state.bookStatuses[id];
+      acc.entries += s?.entryCount ?? 0;
+      acc.categories += s?.categoryCount ?? 0;
+      acc.unassigned += s?.unassignedCount ?? 0;
+      if (s?.treeMissing)
+        acc.missingTrees += 1;
+      return acc;
+    }, { entries: 0, categories: 0, unassigned: 0, missingTrees: 0 });
+    const metrics = createElement("div", "lore-metrics");
+    const metric = (value, label) => {
+      const m = createElement("div", "lore-metric");
+      m.append(createElement("div", "lore-metric-value", String(value)), createElement("div", "lore-metric-label", label));
+      return m;
+    };
+    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(totals.categories, "categories"), metric(totals.entries, "entries"), metric(totals.unassigned, "unassigned"));
+    section.appendChild(metrics);
+    if (totals.missingTrees) {
+      section.appendChild(createElement("div", "lore-hint", `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree — build one to enable retrieval.`));
+    }
+    return section;
+  }
+  function renderBackup(state) {
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Backup & restore", "Export or import Lore Recall settings, trees and metadata."));
+    const actions = createElement("div", "lore-cluster");
+    actions.append(createButton("Export snapshot", "lore-btn", () => sendToBackend(ctx, { type: "export_snapshot", chatId: state.activeChatId })), createButton("Import snapshot", "lore-btn-link", () => ensureImportInput().click()));
     section.appendChild(actions);
     return section;
   }
-  function renderOverviewAndDiagnostics(state) {
-    const wrapper = createElement("div", "lore-stack");
-    const overview = createElement("section", "lore-card");
-    overview.append(createElement("div", "lore-section-title", "Tree Overview"), createElement("p", "lore-copy", "Quick health view across the managed source set."));
-    const stats = createElement("div", "lore-grid lore-grid-compact");
-    for (const bookId of getManagedBookIds()) {
-      const book = state.allWorldBooks.find((item) => item.id === bookId);
-      const status = state.bookStatuses[bookId];
-      const stat = createElement("div", "lore-stat");
-      stat.append(createElement("div", "lore-stat-value", String(status?.categoryCount ?? 0)), createElement("div", "lore-stat-label", book?.name || bookId), createElement("div", "lore-stat-copy", `${status?.entryCount ?? 0} entries · ${status?.unassignedCount ?? 0} unassigned`));
-      stats.appendChild(stat);
-    }
-    if (!stats.childElementCount)
-      stats.appendChild(createElement("div", "lore-empty", "No managed books selected."));
-    overview.appendChild(stats);
-    const backup = createElement("section", "lore-card");
-    backup.append(createElement("div", "lore-section-title", "Backup & Restore"), createElement("p", "lore-copy", "Export or import Lore Recall-owned settings, tree indexes, and recall metadata."), createButton("Export Snapshot", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "export_snapshot", chatId: state.activeChatId })), createButton("Import Snapshot", "lore-btn lore-btn-ghost", () => ensureImportInput().click()));
-    const diagnostics = createElement("section", "lore-card");
-    diagnostics.append(createElement("div", "lore-section-title", "Diagnostics"), createElement("p", "lore-copy", "Warnings for attached books, missing trees, write-only sources, and metadata gaps."));
-    const list = createElement("div", "lore-list");
-    for (const item of state.diagnosticsResults) {
-      const row = createElement("div", `lore-list-item tone-${item.severity}`);
-      row.append(createElement("div", "lore-list-title", item.title), createElement("div", "lore-list-copy", item.detail));
-      list.appendChild(row);
-    }
-    if (!list.childElementCount)
-      list.appendChild(createElement("div", "lore-empty", "No diagnostics are currently raised."));
-    diagnostics.appendChild(list);
-    wrapper.append(overview, backup, diagnostics);
-    return wrapper;
-  }
-  function renderCharacterSettings(state) {
-    const section = createElement("section", "lore-card");
-    section.append(createElement("div", "lore-section-title", "Character Settings"), createElement("p", "lore-copy", "Retrieval behavior for the active character."));
-    if (!characterDraft || !state.activeCharacterId) {
-      section.appendChild(createElement("div", "lore-empty", "Open a character chat to edit per-character retrieval settings."));
+  function renderDiagnostics(state) {
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Diagnostics", "Warnings for attached books, missing trees, write-only sources, and metadata gaps."));
+    if (!state.diagnosticsResults.length) {
+      section.appendChild(createEmpty("All clear", "No diagnostics are currently raised."));
       return section;
     }
-    const grid = createElement("div", "lore-form-grid");
-    const enabled = createElement("label", "lore-toggle");
-    const enabledInput = createElement("input");
-    enabledInput.type = "checkbox";
-    enabledInput.checked = characterDraft.enabled;
-    enabledInput.addEventListener("change", () => {
-      characterDraft.enabled = enabledInput.checked;
-    });
-    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Enable retrieval"));
-    grid.appendChild(enabled);
-    const modeField = createElement("label", "lore-field");
-    modeField.appendChild(createElement("span", "lore-label", "Search Mode"));
-    const modeSelect = createElement("select", "lore-select");
-    for (const value of ["collapsed", "traversal"])
-      modeSelect.appendChild(new Option(value, value));
-    modeSelect.value = characterDraft.searchMode;
-    modeSelect.addEventListener("change", () => {
-      characterDraft.searchMode = modeSelect.value;
-    });
-    modeField.appendChild(modeSelect);
-    grid.appendChild(modeField);
-    for (const [key, label] of [
-      ["collapsedDepth", "Collapsed Depth"],
-      ["maxResults", "Max Results"],
-      ["maxTraversalDepth", "Traversal Depth"],
-      ["traversalStepLimit", "Traversal Step Limit"],
-      ["tokenBudget", "Token Budget"],
-      ["contextMessages", "Context Messages"]
-    ]) {
-      const field = createElement("label", "lore-field");
-      field.appendChild(createElement("span", "lore-label", label));
-      const input = createElement("input", "lore-input");
-      input.type = "number";
-      input.value = String(characterDraft[key]);
-      input.addEventListener("input", () => {
-        characterDraft[key] = Number.parseInt(input.value, 10) || 0;
-      });
-      field.appendChild(input);
-      grid.appendChild(field);
+    const list = createElement("div", "lore-stack");
+    list.style.gap = "8px";
+    for (const item of state.diagnosticsResults) {
+      const row = createElement("div", `lore-note ${item.severity}`);
+      row.append(createElement("div", "lore-note-title", item.title), createElement("div", "lore-note-body", item.detail));
+      list.appendChild(row);
     }
-    const rerank = createElement("label", "lore-toggle");
-    const rerankInput = createElement("input");
-    rerankInput.type = "checkbox";
-    rerankInput.checked = characterDraft.rerankEnabled;
-    rerankInput.addEventListener("change", () => {
-      characterDraft.rerankEnabled = rerankInput.checked;
-    });
-    rerank.append(rerankInput, createElement("span", "lore-toggle-copy", "Rerank top candidates"));
-    grid.appendChild(rerank);
-    const selective = createElement("label", "lore-toggle");
-    const selectiveInput = createElement("input");
-    selectiveInput.type = "checkbox";
-    selectiveInput.checked = characterDraft.selectiveRetrieval;
-    selectiveInput.addEventListener("change", () => {
-      characterDraft.selectiveRetrieval = selectiveInput.checked;
-    });
-    selective.append(selectiveInput, createElement("span", "lore-toggle-copy", "Selective retrieval"));
-    grid.appendChild(selective);
-    const multiBookField = createElement("label", "lore-field");
-    multiBookField.appendChild(createElement("span", "lore-label", "Multi-Book Mode"));
-    const multiBookSelect = createElement("select", "lore-select");
-    for (const value of ["unified", "per_book"])
-      multiBookSelect.appendChild(new Option(value, value));
-    multiBookSelect.value = characterDraft.multiBookMode;
-    multiBookSelect.addEventListener("change", () => {
-      characterDraft.multiBookMode = multiBookSelect.value;
-    });
-    multiBookField.appendChild(multiBookSelect);
-    grid.appendChild(multiBookField);
-    section.append(grid, createButton("Save Character Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+    section.appendChild(list);
+    return section;
+  }
+  function renderCharacterSettings(state) {
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Character settings", "Retrieval behavior for the active character."));
+    if (!characterDraft || !state.activeCharacterId) {
+      section.appendChild(createEmpty("No active character", "Open a character chat to configure per-character retrieval."));
+      return section;
+    }
+    const topRow = createElement("div", "lore-cluster");
+    topRow.style.gap = "16px";
+    topRow.appendChild(createSwitch("Enable retrieval for this character", characterDraft.enabled, (next) => {
+      characterDraft.enabled = next;
+    }));
+    section.appendChild(topRow);
+    const form = createElement("div", "lore-form");
+    form.appendChild(createField("Search mode", createSelect(characterDraft.searchMode, [
+      ["collapsed", "Collapsed"],
+      ["traversal", "Traversal"]
+    ], (next) => {
+      characterDraft.searchMode = next;
+    })));
+    form.appendChild(createField("Multi-book mode", createSelect(characterDraft.multiBookMode, [
+      ["unified", "Unified"],
+      ["per_book", "Per book"]
+    ], (next) => {
+      characterDraft.multiBookMode = next;
+    })));
+    for (const [key, label] of [
+      ["collapsedDepth", "Collapsed depth"],
+      ["maxResults", "Max results"],
+      ["maxTraversalDepth", "Traversal depth"],
+      ["traversalStepLimit", "Traversal step limit"],
+      ["tokenBudget", "Token budget"],
+      ["contextMessages", "Context messages"]
+    ]) {
+      form.appendChild(createField(label, createNumberInput(characterDraft[key], (next) => {
+        characterDraft[key] = Number.parseInt(String(next), 10) || 0;
+      })));
+    }
+    const switches = createElement("div", "lore-field-span");
+    const switchRow = createElement("div", "lore-cluster");
+    switchRow.style.gap = "20px";
+    switchRow.append(createSwitch("Rerank top candidates", characterDraft.rerankEnabled, (next) => {
+      characterDraft.rerankEnabled = next;
+    }), createSwitch("Selective retrieval", characterDraft.selectiveRetrieval, (next) => {
+      characterDraft.selectiveRetrieval = next;
+    }));
+    switches.appendChild(switchRow);
+    form.appendChild(switches);
+    section.appendChild(form);
+    const actions = createElement("div", "lore-actions");
+    actions.appendChild(createElement("span", "lore-actions-spacer"));
+    actions.appendChild(createButton("Save character settings", "lore-btn lore-btn-primary lore-btn-sm", () => sendToBackend(ctx, {
       type: "save_character_config",
       characterId: state.activeCharacterId,
       chatId: state.activeChatId,
       patch: characterDraft
     })));
+    section.appendChild(actions);
     return section;
   }
   function renderBookSettings(state) {
-    const section = createElement("section", "lore-card");
-    section.append(createElement("div", "lore-section-title", "Book Settings"), createElement("p", "lore-copy", "Per-book enable, permission, and description controls."));
+    const section = createElement("section", "lore-section");
+    section.appendChild(createSectionHead("Book settings", "Per-book enable, permission and description."));
     if (!selectedBookId) {
-      section.appendChild(createElement("div", "lore-empty", "Select a book on the left to edit its settings."));
+      section.appendChild(createEmpty("No book selected", "Pick a lorebook on the left to edit its settings."));
       return section;
     }
     const book = state.allWorldBooks.find((item) => item.id === selectedBookId);
     const draft = getBookDraft(selectedBookId);
-    const grid = createElement("div", "lore-form-grid");
-    const enabled = createElement("label", "lore-toggle");
-    const enabledInput = createElement("input");
-    enabledInput.type = "checkbox";
-    enabledInput.checked = draft.enabled;
-    enabledInput.addEventListener("change", () => {
-      draft.enabled = enabledInput.checked;
-    });
-    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Enable this managed source"));
-    grid.appendChild(enabled);
-    const permissionField = createElement("label", "lore-field");
-    permissionField.appendChild(createElement("span", "lore-label", "Permission"));
-    const permissionSelect = createElement("select", "lore-select");
-    for (const value of ["read_write", "read_only", "write_only"])
-      permissionSelect.appendChild(new Option(value, value));
-    permissionSelect.value = draft.permission;
-    permissionSelect.addEventListener("change", () => {
-      draft.permission = permissionSelect.value;
-    });
-    permissionField.appendChild(permissionSelect);
-    grid.appendChild(permissionField);
-    const descriptionField = createElement("label", "lore-field lore-field-span");
-    descriptionField.appendChild(createElement("span", "lore-label", "Description"));
-    const descriptionInput = createElement("textarea", "lore-textarea");
-    descriptionInput.value = draft.description || book?.description || "";
-    descriptionInput.addEventListener("input", () => {
-      draft.description = descriptionInput.value;
-    });
-    descriptionField.appendChild(descriptionInput);
-    grid.appendChild(descriptionField);
-    section.append(grid, createButton("Save Book Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, {
+    section.appendChild(createSwitch("Enable this managed source", draft.enabled, (next) => {
+      draft.enabled = next;
+    }));
+    const form = createElement("div", "lore-form");
+    form.appendChild(createField("Permission", createSelect(draft.permission, [
+      ["read_write", "Read + write"],
+      ["read_only", "Read only"],
+      ["write_only", "Write only"]
+    ], (next) => {
+      draft.permission = next;
+    })));
+    form.appendChild(createField("Book", (() => {
+      const disabled = createElement("input", "lore-input");
+      disabled.value = book?.name || selectedBookId;
+      disabled.disabled = true;
+      return disabled;
+    })()));
+    form.appendChild(createField("Description", createTextarea(draft.description || book?.description || "", "What kind of content lives in this book?", (next) => {
+      draft.description = next;
+    }), true));
+    section.appendChild(form);
+    const actions = createElement("div", "lore-actions");
+    actions.appendChild(createElement("span", "lore-actions-spacer"));
+    actions.appendChild(createButton("Save book settings", "lore-btn lore-btn-primary lore-btn-sm", () => sendToBackend(ctx, {
       type: "save_book_config",
       bookId: selectedBookId,
       chatId: state.activeChatId,
       patch: draft
     })));
+    section.appendChild(actions);
     return section;
   }
   function renderAdvancedSettings(state) {
-    const section = createElement("section", "lore-card");
-    section.append(createElement("div", "lore-section-title", "Advanced Settings"));
-    section.appendChild(createButton(advancedOpen ? "Collapse" : "Expand", "lore-btn lore-btn-ghost", () => {
+    const section = createElement("section", "lore-section");
+    const toggle = createButton(advancedOpen ? "Hide" : "Show", "lore-btn-link", () => {
       advancedOpen = !advancedOpen;
       render();
-    }));
+    });
+    section.appendChild(createSectionHead("Advanced", "Controller and build tuning.", toggle));
     if (!advancedOpen || !globalDraft)
       return section;
-    const grid = createElement("div", "lore-form-grid");
-    const enabled = createElement("label", "lore-toggle");
-    const enabledInput = createElement("input");
-    enabledInput.type = "checkbox";
-    enabledInput.checked = globalDraft.enabled;
-    enabledInput.addEventListener("change", () => {
-      globalDraft.enabled = enabledInput.checked;
-    });
-    enabled.append(enabledInput, createElement("span", "lore-toggle-copy", "Master enable"));
-    grid.appendChild(enabled);
-    const patternField = createElement("label", "lore-field");
-    patternField.appendChild(createElement("span", "lore-label", "Auto-Detect Pattern"));
-    const patternInput = createElement("input", "lore-input");
-    patternInput.value = globalDraft.autoDetectPattern;
-    patternInput.addEventListener("input", () => {
-      globalDraft.autoDetectPattern = patternInput.value;
-    });
-    patternField.appendChild(patternInput);
-    grid.appendChild(patternField);
-    const connectionField = createElement("label", "lore-field");
-    connectionField.appendChild(createElement("span", "lore-label", "Controller Connection"));
+    section.appendChild(createSwitch("Master enable", globalDraft.enabled, (next) => {
+      globalDraft.enabled = next;
+    }));
+    const form = createElement("div", "lore-form");
+    form.appendChild(createField("Auto-detect pattern", createTextInput(globalDraft.autoDetectPattern, "Regex to auto-detect managed books", (next) => {
+      globalDraft.autoDetectPattern = next;
+    })));
     const connectionSelect = createElement("select", "lore-select");
     connectionSelect.appendChild(new Option("Use default connection", ""));
     for (const connection of state.availableConnections) {
@@ -1198,89 +1862,86 @@ function setup(ctx) {
     connectionSelect.addEventListener("change", () => {
       globalDraft.controllerConnectionId = connectionSelect.value || null;
     });
-    connectionField.appendChild(connectionSelect);
-    grid.appendChild(connectionField);
+    form.appendChild(createField("Controller connection", connectionSelect));
     for (const [key, label] of [
-      ["controllerTemperature", "Controller Temperature"],
-      ["controllerMaxTokens", "Controller Max Tokens"],
-      ["treeGranularity", "Tree Granularity"],
-      ["chunkTokens", "Chunk Tokens"]
+      ["controllerTemperature", "Controller temperature"],
+      ["controllerMaxTokens", "Controller max tokens"],
+      ["treeGranularity", "Tree granularity"],
+      ["chunkTokens", "Chunk tokens"]
     ]) {
-      const field = createElement("label", "lore-field");
-      field.appendChild(createElement("span", "lore-label", label));
-      const input = createElement("input", "lore-input");
-      input.type = "number";
-      input.value = String(globalDraft[key] ?? 0);
-      input.addEventListener("input", () => {
-        globalDraft[key] = Number.parseFloat(input.value) || 0;
-      });
-      field.appendChild(input);
-      grid.appendChild(field);
+      form.appendChild(createField(label, createNumberInput(globalDraft[key] ?? 0, (next) => {
+        globalDraft[key] = next;
+      })));
     }
-    const buildDetailField = createElement("label", "lore-field");
-    buildDetailField.appendChild(createElement("span", "lore-label", "Build Detail"));
-    const buildDetailSelect = createElement("select", "lore-select");
-    for (const value of ["lite", "full"])
-      buildDetailSelect.appendChild(new Option(value, value));
-    buildDetailSelect.value = globalDraft.buildDetail;
-    buildDetailSelect.addEventListener("change", () => {
-      globalDraft.buildDetail = buildDetailSelect.value;
-    });
-    buildDetailField.appendChild(buildDetailSelect);
-    grid.appendChild(buildDetailField);
-    const dedupField = createElement("label", "lore-field");
-    dedupField.appendChild(createElement("span", "lore-label", "Dedup Mode"));
-    const dedupSelect = createElement("select", "lore-select");
-    for (const value of ["none", "lexical", "llm"])
-      dedupSelect.appendChild(new Option(value, value));
-    dedupSelect.value = globalDraft.dedupMode;
-    dedupSelect.addEventListener("change", () => {
-      globalDraft.dedupMode = dedupSelect.value;
-    });
-    dedupField.appendChild(dedupSelect);
-    grid.appendChild(dedupField);
-    section.append(createElement("p", "lore-copy", "These settings cover the TunnelVision-like retrieval surface that still makes sense in Lumiverse. SillyTavern-only prompt/tool orchestration controls stay intentionally omitted."), grid, createButton("Save Advanced Settings", "lore-btn lore-btn-primary", () => sendToBackend(ctx, { type: "save_global_settings", chatId: state.activeChatId, patch: globalDraft })));
+    form.appendChild(createField("Build detail", createSelect(globalDraft.buildDetail, [
+      ["lite", "Lite"],
+      ["full", "Full"]
+    ], (next) => {
+      globalDraft.buildDetail = next;
+    })));
+    form.appendChild(createField("Dedup mode", createSelect(globalDraft.dedupMode, [
+      ["none", "None"],
+      ["lexical", "Lexical"],
+      ["llm", "LLM"]
+    ], (next) => {
+      globalDraft.dedupMode = next;
+    })));
+    section.appendChild(form);
+    const actions = createElement("div", "lore-actions");
+    actions.appendChild(createElement("span", "lore-actions-spacer"));
+    actions.appendChild(createButton("Save advanced", "lore-btn lore-btn-primary lore-btn-sm", () => sendToBackend(ctx, { type: "save_global_settings", chatId: state.activeChatId, patch: globalDraft })));
+    section.appendChild(actions);
     return section;
   }
   function renderSettings() {
     settingsRoot.replaceChildren();
     const shell = createElement("div", "lore-root lore-workspace");
     settingsRoot.appendChild(shell);
-    const header = createElement("section", "lore-card lore-workspace-header");
-    header.append(createElement("div", "lore-eyebrow", "Lore Recall"), createElement("h1", "lore-title", currentState?.activeCharacterName || "Retrieval Workspace"), createElement("p", "lore-copy", currentState?.activeChatId ? `Dense retrieval + tree workspace for ${currentState.activeCharacterName || "the active character"}.` : "Open a character chat to configure retrieval, source selection, and tree operations."));
+    shell.appendChild(renderWorkspaceHeader());
     if (!currentState) {
-      shell.append(header, createElement("div", "lore-empty", "Loading Lore Recall state..."));
+      shell.appendChild(createEmpty("Loading", "Lore Recall is loading state…"));
       return;
     }
-    const body = createElement("div", "lore-columns");
+    const cols = createElement("div", "lore-columns");
     const left = createElement("div", "lore-stack");
-    left.append(renderSourcePicker(currentState), renderBuildTools(currentState), renderOverviewAndDiagnostics(currentState));
+    left.append(renderSourcePicker(currentState), renderBuildTools(currentState), renderOverview(currentState), renderBackup(currentState), renderDiagnostics(currentState));
     const right = createElement("div", "lore-stack");
     right.append(renderCharacterSettings(currentState), renderBookSettings(currentState), renderAdvancedSettings(currentState));
-    body.append(left, right);
-    shell.append(header, body);
+    cols.append(left, right);
+    shell.appendChild(cols);
   }
   function renderTreeSidebar(bookId, tree, entries, container) {
     const filteredEntries = filterTreeEntries(entries, workspaceSearch);
     const entryMap = new Map(filteredEntries.map((entry) => [entry.entryId, entry]));
+    const query = workspaceSearch.trim().toLowerCase();
+    const tree_wrap = createElement("div", "lore-tree");
+    container.appendChild(tree_wrap);
     const renderCategory = (nodeId, depth) => {
       const node = tree.nodes[nodeId];
       if (!node)
         return;
-      if (nodeId !== tree.rootId && (!workspaceSearch.trim() || node.label.toLowerCase().includes(workspaceSearch.trim().toLowerCase()))) {
+      if (nodeId !== tree.rootId && (!query || node.label.toLowerCase().includes(query))) {
         const selected = getSelectedTree(bookId);
-        const row = createButton(node.label, `lore-tree-row${selected?.kind === "category" && selected.nodeId === nodeId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "category", bookId, nodeId }));
-        row.style.paddingLeft = `${12 + depth * 14}px`;
-        container.appendChild(row);
+        const active = selected?.kind === "category" && selected.nodeId === nodeId;
+        const row = createElement("button", `lore-tree-row category${active ? " active" : ""}`);
+        row.type = "button";
+        row.addEventListener("click", () => setSelectedTree(bookId, { kind: "category", bookId, nodeId }));
+        row.style.paddingLeft = `${10 + depth * 12}px`;
+        row.appendChild(createElement("span", "", node.label || "Untitled"));
+        tree_wrap.appendChild(row);
       }
       for (const entryId of node.entryIds) {
         const entry = entryMap.get(entryId);
         if (!entry)
           continue;
         const selected = getSelectedTree(bookId);
-        const row = createButton(entry.label, `lore-tree-row lore-tree-entry${selected?.kind === "entry" && selected.entryId === entryId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "entry", bookId, entryId }));
-        row.style.paddingLeft = `${28 + depth * 14}px`;
-        container.appendChild(row);
+        const active = selected?.kind === "entry" && selected.entryId === entryId;
+        const row = createElement("button", `lore-tree-row entry${active ? " active" : ""}`);
+        row.type = "button";
+        row.addEventListener("click", () => setSelectedTree(bookId, { kind: "entry", bookId, entryId }));
+        row.style.paddingLeft = `${22 + depth * 12}px`;
+        row.appendChild(createElement("span", "", entry.label || "Untitled"));
+        tree_wrap.appendChild(row);
       }
       for (const childId of node.childIds)
         renderCategory(childId, depth + (nodeId === tree.rootId ? 0 : 1));
@@ -1288,74 +1949,87 @@ function setup(ctx) {
     renderCategory(tree.rootId, 0);
     const unassignedEntries = filteredEntries.filter((entry) => tree.unassignedEntryIds.includes(entry.entryId));
     if (unassignedEntries.length) {
-      container.appendChild(createElement("div", "lore-node-section", "Unassigned"));
+      container.appendChild(createElement("div", "lore-tree-group", "Unassigned"));
+      const unassignedWrap = createElement("div", "lore-tree");
       for (const entry of unassignedEntries) {
         const selected = getSelectedTree(bookId);
-        const row = createButton(entry.label, `lore-tree-row lore-tree-entry${selected?.kind === "entry" && selected.entryId === entry.entryId ? " active" : ""}`, () => setSelectedTree(bookId, { kind: "entry", bookId, entryId: entry.entryId }));
-        row.style.paddingLeft = "28px";
-        container.appendChild(row);
+        const active = selected?.kind === "entry" && selected.entryId === entry.entryId;
+        const row = createElement("button", `lore-tree-row entry${active ? " active" : ""}`);
+        row.type = "button";
+        row.addEventListener("click", () => setSelectedTree(bookId, { kind: "entry", bookId, entryId: entry.entryId }));
+        row.style.paddingLeft = "22px";
+        row.appendChild(createElement("span", "", entry.label || "Untitled"));
+        unassignedWrap.appendChild(row);
       }
+      container.appendChild(unassignedWrap);
+    }
+    if (!tree_wrap.childElementCount && !unassignedEntries.length) {
+      container.appendChild(createEmpty("No matches", query ? "Nothing matches your filter." : "This book has no entries yet."));
     }
   }
   function renderWorkspaceEditor(bookId) {
-    const panel = createElement("div", "lore-card lore-modal-editor");
+    const panel = createElement("div", "lore-modal-editor");
     const tree = getBookTree(bookId);
     const entries = getBookEntries(bookId);
     const selected = getSelectedTree(bookId);
-    if (!tree || !selected || selected.kind === "unassigned") {
-      panel.appendChild(createElement("div", "lore-empty", "Select a category or entry from the tree to edit it."));
+    if (!tree) {
+      panel.appendChild(createEmpty("No tree for this book", "Build one with metadata or the LLM builder in the settings workspace."));
+      return panel;
+    }
+    if (!selected || selected.kind === "unassigned") {
+      panel.appendChild(createEmpty("Pick something to edit", "Select a category or entry from the tree on the left."));
       return panel;
     }
     if (selected.kind === "category") {
       const draft2 = getCategoryDraft(bookId, selected.nodeId);
       if (!draft2) {
-        panel.appendChild(createElement("div", "lore-empty", "That category is no longer available."));
+        panel.appendChild(createEmpty("Gone", "That category is no longer available."));
         return panel;
       }
-      panel.append(createElement("div", "lore-section-title", "Category Editor"), createElement("p", "lore-copy", getCategoryBreadcrumb(tree, selected.nodeId) || "Root category"));
-      const grid2 = createElement("div", "lore-form-grid");
-      const labelField2 = createElement("label", "lore-field");
-      labelField2.appendChild(createElement("span", "lore-label", "Label"));
-      const labelInput2 = createElement("input", "lore-input");
-      labelInput2.value = draft2.label;
-      labelInput2.addEventListener("input", () => {
-        draft2.label = labelInput2.value;
-      });
-      labelField2.appendChild(labelInput2);
-      grid2.appendChild(labelField2);
-      const parentField = createElement("label", "lore-field");
-      parentField.appendChild(createElement("span", "lore-label", "Parent"));
+      const head2 = createElement("div", "lore-editor-head");
+      head2.append(createElement("div", "lore-editor-kind", "Category"), createElement("div", "lore-editor-title", draft2.label || "Untitled category"), createBreadcrumb(getCategoryBreadcrumb(tree, selected.nodeId)?.split(" > ").filter(Boolean) ?? []));
+      panel.appendChild(head2);
+      const form2 = createElement("div", "lore-form");
+      form2.appendChild(createField("Label", createTextInput(draft2.label, "Category label", (next) => {
+        draft2.label = next;
+      })));
+      const parentOptions = getCategoryOptions(tree).filter((option) => option.value !== selected.nodeId && option.value !== "unassigned");
       const parentSelect = createElement("select", "lore-select");
-      for (const option of getCategoryOptions(tree).filter((option2) => option2.value !== selected.nodeId && option2.value !== "unassigned")) {
+      for (const option of parentOptions)
         parentSelect.appendChild(new Option(option.label, option.value));
-      }
       parentSelect.value = draft2.parentId;
       parentSelect.addEventListener("change", () => {
         draft2.parentId = parentSelect.value;
       });
-      parentField.appendChild(parentSelect);
-      grid2.appendChild(parentField);
-      const summaryField2 = createElement("label", "lore-field lore-field-span");
-      summaryField2.appendChild(createElement("span", "lore-label", "Summary"));
-      const summaryInput2 = createElement("textarea", "lore-textarea");
-      summaryInput2.value = draft2.summary;
-      summaryInput2.addEventListener("input", () => {
-        draft2.summary = summaryInput2.value;
-      });
-      summaryField2.appendChild(summaryInput2);
-      grid2.appendChild(summaryField2);
-      const collapsedToggle = createElement("label", "lore-toggle");
-      const collapsedInput2 = createElement("input");
-      collapsedInput2.type = "checkbox";
-      collapsedInput2.checked = draft2.collapsed;
-      collapsedInput2.addEventListener("change", () => {
-        draft2.collapsed = collapsedInput2.checked;
-      });
-      collapsedToggle.append(collapsedInput2, createElement("span", "lore-toggle-copy", "Collapsed branch"));
-      grid2.appendChild(collapsedToggle);
-      panel.appendChild(grid2);
-      const actions2 = createElement("div", "lore-inline");
-      actions2.append(createButton("Save Category", "lore-btn lore-btn-primary", () => {
+      form2.appendChild(createField("Parent", parentSelect));
+      form2.appendChild(createField("Summary", createTextarea(draft2.summary, "A short description of what this category covers.", (next) => {
+        draft2.summary = next;
+      }), true));
+      const collapsedSwitch = createElement("div", "lore-field-span");
+      collapsedSwitch.appendChild(createSwitch("Collapsed branch", draft2.collapsed, (next) => {
+        draft2.collapsed = next;
+      }));
+      form2.appendChild(collapsedSwitch);
+      panel.appendChild(form2);
+      const actions2 = createElement("div", "lore-actions");
+      actions2.append(createButton("Create child", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+        type: "create_category",
+        bookId,
+        parentId: selected.nodeId,
+        label: "New category",
+        chatId: currentState?.activeChatId
+      })), createButton("Regenerate summary", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+        type: "regenerate_summaries",
+        bookId,
+        nodeIds: [selected.nodeId],
+        chatId: currentState?.activeChatId
+      })), createButton("Delete", "lore-btn lore-btn-danger lore-btn-sm", () => sendToBackend(ctx, {
+        type: "delete_category",
+        bookId,
+        nodeId: selected.nodeId,
+        chatId: currentState?.activeChatId,
+        target: "unassigned"
+      })), createElement("span", "lore-actions-spacer"), createButton("Save category", "lore-btn lore-btn-primary lore-btn-sm", () => {
         sendToBackend(ctx, {
           type: "save_category",
           bookId,
@@ -1370,46 +2044,23 @@ function setup(ctx) {
           parentId: draft2.parentId === "root" ? null : draft2.parentId,
           chatId: currentState?.activeChatId
         });
-      }), createButton("Create Child", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
-        type: "create_category",
-        bookId,
-        parentId: selected.nodeId,
-        label: "New Category",
-        chatId: currentState?.activeChatId
-      })), createButton("Delete Category", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
-        type: "delete_category",
-        bookId,
-        nodeId: selected.nodeId,
-        chatId: currentState?.activeChatId,
-        target: "unassigned"
-      })), createButton("Regenerate Summary", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
-        type: "regenerate_summaries",
-        bookId,
-        nodeIds: [selected.nodeId],
-        chatId: currentState?.activeChatId
-      })));
+      }));
       panel.appendChild(actions2);
       return panel;
     }
     const entry = entries.find((item) => item.entryId === selected.entryId);
     if (!entry) {
-      panel.appendChild(createElement("div", "lore-empty", "That entry is no longer available."));
+      panel.appendChild(createEmpty("Gone", "That entry is no longer available."));
       return panel;
     }
     const draft = getEntryDraft(bookId, entry);
-    panel.append(createElement("div", "lore-section-title", "Entry Editor"), createElement("p", "lore-copy", getEntryBreadcrumb(tree, entry)));
-    const grid = createElement("div", "lore-form-grid");
-    const labelField = createElement("label", "lore-field");
-    labelField.appendChild(createElement("span", "lore-label", "Label"));
-    const labelInput = createElement("input", "lore-input");
-    labelInput.value = draft.label;
-    labelInput.addEventListener("input", () => {
-      draft.label = labelInput.value;
-    });
-    labelField.appendChild(labelInput);
-    grid.appendChild(labelField);
-    const locationField = createElement("label", "lore-field");
-    locationField.appendChild(createElement("span", "lore-label", "Location"));
+    const head = createElement("div", "lore-editor-head");
+    head.append(createElement("div", "lore-editor-kind", "Entry"), createElement("div", "lore-editor-title", draft.label || entry.label || "Untitled entry"), createBreadcrumb(getEntryBreadcrumb(tree, entry).split(" > ").filter(Boolean)));
+    panel.appendChild(head);
+    const form = createElement("div", "lore-form");
+    form.appendChild(createField("Label", createTextInput(draft.label, "Entry label", (next) => {
+      draft.label = next;
+    })));
     const locationSelect = createElement("select", "lore-select");
     for (const option of getCategoryOptions(tree)) {
       locationSelect.appendChild(new Option(option.label, option.value));
@@ -1418,47 +2069,27 @@ function setup(ctx) {
     locationSelect.addEventListener("change", () => {
       draft.location = locationSelect.value;
     });
-    locationField.appendChild(locationSelect);
-    grid.appendChild(locationField);
-    const aliasesField = createElement("label", "lore-field lore-field-span");
-    aliasesField.appendChild(createElement("span", "lore-label", "Aliases"));
-    const aliasesInput = createElement("input", "lore-input");
-    aliasesInput.value = joinCommaList(draft.aliases);
-    aliasesInput.addEventListener("input", () => {
-      draft.aliases = splitCommaList(aliasesInput.value);
-    });
-    aliasesField.appendChild(aliasesInput);
-    grid.appendChild(aliasesField);
-    const tagsField = createElement("label", "lore-field lore-field-span");
-    tagsField.appendChild(createElement("span", "lore-label", "Tags"));
-    const tagsInput = createElement("input", "lore-input");
-    tagsInput.value = joinCommaList(draft.tags);
-    tagsInput.addEventListener("input", () => {
-      draft.tags = splitCommaList(tagsInput.value);
-    });
-    tagsField.appendChild(tagsInput);
-    grid.appendChild(tagsField);
-    const summaryField = createElement("label", "lore-field lore-field-span");
-    summaryField.appendChild(createElement("span", "lore-label", "Summary"));
-    const summaryInput = createElement("textarea", "lore-textarea");
-    summaryInput.value = draft.summary;
-    summaryInput.addEventListener("input", () => {
-      draft.summary = summaryInput.value;
-    });
-    summaryField.appendChild(summaryInput);
-    grid.appendChild(summaryField);
-    const collapsedField = createElement("label", "lore-field lore-field-span");
-    collapsedField.appendChild(createElement("span", "lore-label", "Collapsed Text"));
-    const collapsedInput = createElement("textarea", "lore-textarea lore-textarea-tall");
-    collapsedInput.value = draft.collapsedText;
-    collapsedInput.addEventListener("input", () => {
-      draft.collapsedText = collapsedInput.value;
-    });
-    collapsedField.appendChild(collapsedInput);
-    grid.appendChild(collapsedField);
-    panel.appendChild(grid);
-    const actions = createElement("div", "lore-inline");
-    actions.append(createButton("Save Entry", "lore-btn lore-btn-primary", () => {
+    form.appendChild(createField("Location", locationSelect));
+    form.appendChild(createField("Aliases", createTextInput(joinCommaList(draft.aliases), "Comma-separated, e.g. Aria, Commander", (next) => {
+      draft.aliases = splitCommaList(next);
+    }), true));
+    form.appendChild(createField("Tags", createTextInput(joinCommaList(draft.tags), "Comma-separated, e.g. protagonist, noble", (next) => {
+      draft.tags = splitCommaList(next);
+    }), true));
+    form.appendChild(createField("Summary", createTextarea(draft.summary, "A short description used for ranking and traversal.", (next) => {
+      draft.summary = next;
+    }), true));
+    form.appendChild(createField("Collapsed text", createTextarea(draft.collapsedText, "The compact body injected during collapsed retrieval.", (next) => {
+      draft.collapsedText = next;
+    }, true), true));
+    panel.appendChild(form);
+    const actions = createElement("div", "lore-actions");
+    actions.append(createButton("Regenerate summary", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+      type: "regenerate_summaries",
+      bookId,
+      entryIds: [entry.entryId],
+      chatId: currentState?.activeChatId
+    })), createElement("span", "lore-actions-spacer"), createButton("Save entry", "lore-btn lore-btn-primary lore-btn-sm", () => {
       sendToBackend(ctx, {
         type: "save_entry_meta",
         entryId: entry.entryId,
@@ -1479,12 +2110,7 @@ function setup(ctx) {
         chatId: currentState?.activeChatId,
         target
       });
-    }), createButton("Regenerate Summary", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, {
-      type: "regenerate_summaries",
-      bookId,
-      entryIds: [entry.entryId],
-      chatId: currentState?.activeChatId
-    })));
+    }));
     panel.appendChild(actions);
     return panel;
   }
@@ -1492,31 +2118,32 @@ function setup(ctx) {
     if (!workspaceModal)
       return;
     workspaceModal.root.replaceChildren();
-    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree Workspace` : "Lore Recall Workspace");
+    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree workspace` : "Lore Recall workspace");
     const shell = createElement("div", "lore-root lore-modal");
     const toolbar = createElement("div", "lore-modal-toolbar");
-    const search = createElement("input", "lore-input lore-search");
-    search.type = "search";
-    search.placeholder = "Filter tree";
-    search.value = workspaceSearch;
-    search.addEventListener("input", () => {
-      workspaceSearch = search.value;
+    const search = createTextInput(workspaceSearch, "Filter categories and entries…", (v) => {
+      workspaceSearch = v;
       renderWorkspaceModal();
     });
-    toolbar.append(search, createElement("div", "lore-inline"));
-    toolbar.lastElementChild?.append(createButton("Refresh", "lore-btn lore-btn-ghost", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })), createButton("Close", "lore-btn lore-btn-ghost", () => workspaceModal?.dismiss()));
-    const body = createElement("div", "lore-modal-body");
-    const rail = createElement("div", "lore-card lore-modal-rail");
-    rail.append(createElement("div", "lore-section-title", "Source Tree"));
+    search.type = "search";
+    search.className = "lore-input lore-search";
+    const actions = createElement("div", "lore-cluster");
+    actions.append(createButton("Refresh", "lore-btn lore-btn-sm", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null })), createButton("Close", "lore-btn lore-btn-sm", () => workspaceModal?.dismiss()));
+    toolbar.append(search, actions);
+    shell.appendChild(toolbar);
     const books = getManagedBookIds();
     if (!books.length) {
-      rail.appendChild(createElement("div", "lore-empty", "Choose managed books first."));
-      body.appendChild(rail);
-      shell.append(toolbar, body);
+      const body2 = createElement("div", "lore-modal-body empty");
+      const editor2 = createElement("div", "lore-modal-editor");
+      editor2.appendChild(createEmpty("No managed books", "Pick lorebooks in the settings workspace first, then build or edit their trees here.", createButton("Open extension settings", "lore-btn lore-btn-sm lore-btn-primary", () => openSettingsWorkspace())));
+      body2.appendChild(editor2);
+      shell.appendChild(body2);
       workspaceModal.root.appendChild(shell);
       return;
     }
-    const bookTabs = createElement("div", "lore-inline lore-book-tabs");
+    const body = createElement("div", "lore-modal-body");
+    const rail = createElement("div", "lore-modal-rail");
+    const bookTabs = createElement("div", "lore-book-tabs");
     for (const bookId of books) {
       const book = currentState?.allWorldBooks.find((item) => item.id === bookId);
       bookTabs.appendChild(createButton(book?.name || bookId, `lore-chip${selectedBookId === bookId ? " active" : ""}`, () => {
@@ -1528,11 +2155,19 @@ function setup(ctx) {
     if (selectedBookId) {
       const tree = getBookTree(selectedBookId);
       const entries = getBookEntries(selectedBookId);
-      if (tree)
+      if (tree) {
         renderTreeSidebar(selectedBookId, tree, entries, rail);
+      } else {
+        rail.appendChild(createEmpty("No tree", "No tree has been built for this book yet."));
+      }
     }
-    body.append(rail, selectedBookId ? renderWorkspaceEditor(selectedBookId) : createElement("div", "lore-empty", "Choose a managed book."));
-    shell.append(toolbar, body);
+    const editor = selectedBookId ? renderWorkspaceEditor(selectedBookId) : (() => {
+      const wrap = createElement("div", "lore-modal-editor");
+      wrap.appendChild(createEmpty("Pick a book", "Choose a book from the tabs on the left."));
+      return wrap;
+    })();
+    body.append(rail, editor);
+    shell.appendChild(body);
     workspaceModal.root.appendChild(shell);
   }
   function render() {
