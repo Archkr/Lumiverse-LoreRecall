@@ -80,6 +80,14 @@ function getPreviewCacheKey(userId: string, chatId: string): string {
   return `${userId}:${chatId}`;
 }
 
+function summarizeTrace(preview: RetrievalPreview): string {
+  if (!preview.trace.length) return "no traversal trace";
+  return preview.trace
+    .map((step) => `${step.step}:${step.phase}:${step.label}`)
+    .slice(0, 6)
+    .join(" | ");
+}
+
 async function buildState(userId: string, chatId?: string | null): Promise<StateBuildEnvelope> {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
@@ -398,6 +406,21 @@ spindle.registerInterceptor(async (messages, context) => {
       },
     );
     previewCache.set(getPreviewCacheKey(userId, chatId), preview);
+    if (preview) {
+      if (preview.mode === "traversal" && preview.fallbackReason) {
+        spindle.log.info(
+          `Lore Recall traversal fell back for chat ${chatId}: ${preview.fallbackReason} [trace=${summarizeTrace(preview)}]`,
+        );
+      } else if (preview.mode === "traversal" && preview.controllerUsed) {
+        spindle.log.info(
+          `Lore Recall traversal used controller for chat ${chatId}: selected=${preview.selectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`,
+        );
+      } else if (preview.mode === "collapsed" && preview.fallbackReason) {
+        spindle.log.info(
+          `Lore Recall collapsed retrieval used fallback behavior for chat ${chatId}: ${preview.fallbackReason}`,
+        );
+      }
+    }
     if (!preview?.injectedText.trim()) return messages;
 
     return [{ role: "system", content: preview.injectedText }, ...messages] satisfies LlmMessageDTO[];

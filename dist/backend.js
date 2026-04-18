@@ -719,8 +719,9 @@ function canEditBook(config) {
 }
 
 // src/backend/retrieval.ts
-var CONTROLLER_TIMEOUT_MS = 2000;
-var CONTROLLER_TOTAL_BUDGET_MS = 8500;
+var CONTROLLER_TIMEOUT_MS = 1500;
+var CONTROLLER_TOTAL_BUDGET_MS = 6000;
+var CONTROLLER_MAX_CALLS = 4;
 var TRAVERSAL_CATEGORY_LIMIT = 24;
 var TRAVERSAL_ENTRY_LIMIT = 14;
 function stripCodeFences(content) {
@@ -882,14 +883,19 @@ function scoreEntries(queryText, books) {
   return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
 async function runControllerJson(prompt, controller) {
+  if (controller.callCount >= CONTROLLER_MAX_CALLS) {
+    return { parsed: null, error: "Traversal controller hit its call limit." };
+  }
   const remainingMs = controller.deadlineAt - Date.now();
   if (remainingMs <= 250) {
     return { parsed: null, error: "Traversal controller ran out of time." };
   }
+  controller.callCount += 1;
   const abortController = new AbortController;
-  const timer = setTimeout(() => abortController.abort(), Math.min(CONTROLLER_TIMEOUT_MS, remainingMs));
+  const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
+  let timer = null;
   try {
-    const result = await spindle.generate.quiet({
+    const requestPromise = spindle.generate.quiet({
       type: "quiet",
       messages: [{ role: "user", content: prompt }],
       parameters: {
@@ -899,24 +905,42 @@ async function runControllerJson(prompt, controller) {
       ...controller.connectionId ? { connection_id: controller.connectionId } : {},
       userId: controller.userId,
       signal: abortController.signal
+    }).then((result) => {
+      const parsed = parseJsonObject(getGenerationContent(result));
+      if (parsed) {
+        controller.controllerUsed = true;
+        return { parsed, error: null };
+      }
+      spindle.log.warn("Lore Recall controller call returned invalid JSON.");
+      return { parsed: null, error: "Traversal controller returned invalid JSON." };
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
+      return {
+        parsed: null,
+        error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`
+      };
     });
-    const parsed = parseJsonObject(getGenerationContent(result));
-    if (parsed) {
-      controller.controllerUsed = true;
-      return { parsed, error: null };
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        abortController.abort();
+        spindle.log.warn("Lore Recall controller call failed: request timed out");
+        resolve({
+          parsed: null,
+          error: "Traversal controller timed out before the interceptor budget was exhausted."
+        });
+      }, timeoutMs);
+    });
+    const response = await Promise.race([requestPromise, timeoutPromise]);
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
     }
-    spindle.log.warn("Lore Recall controller call returned invalid JSON.");
-    return { parsed: null, error: "Traversal controller returned invalid JSON." };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const isAbort = error instanceof Error && error.name === "AbortError";
-    spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
-    return {
-      parsed: null,
-      error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`
-    };
+    return response;
   } finally {
-    clearTimeout(timer);
+    if (timer)
+      clearTimeout(timer);
   }
 }
 async function maybeChooseBooks(queryText, books, config, controller, allowController) {
@@ -1407,7 +1431,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     userId,
     connectionId: resolveControllerConnectionId(settings, options.connectionId),
     controllerUsed: false,
-    deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS
+    deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
+    callCount: 0
   };
   const chosenBooksResult = await maybeChooseBooks(queryText, readableBooks, config, controller, allowController);
   const chosenBooks = chosenBooksResult.books;
@@ -2576,6 +2601,11 @@ async function listConnectionsCached(userId) {
 function getPreviewCacheKey(userId, chatId) {
   return `${userId}:${chatId}`;
 }
+function summarizeTrace(preview) {
+  if (!preview.trace.length)
+    return "no traversal trace";
+  return preview.trace.map((step) => `${step.step}:${step.phase}:${step.label}`).slice(0, 6).join(" | ");
+}
 async function buildState(userId, chatId) {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
@@ -2834,6 +2864,15 @@ spindle.registerInterceptor(async (messages, context) => {
       capturedAt: Date.now()
     });
     previewCache.set(getPreviewCacheKey(userId, chatId), preview);
+    if (preview) {
+      if (preview.mode === "traversal" && preview.fallbackReason) {
+        spindle.log.info(`Lore Recall traversal fell back for chat ${chatId}: ${preview.fallbackReason} [trace=${summarizeTrace(preview)}]`);
+      } else if (preview.mode === "traversal" && preview.controllerUsed) {
+        spindle.log.info(`Lore Recall traversal used controller for chat ${chatId}: selected=${preview.selectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`);
+      } else if (preview.mode === "collapsed" && preview.fallbackReason) {
+        spindle.log.info(`Lore Recall collapsed retrieval used fallback behavior for chat ${chatId}: ${preview.fallbackReason}`);
+      }
+    }
     if (!preview?.injectedText.trim())
       return messages;
     return [{ role: "system", content: preview.injectedText }, ...messages];

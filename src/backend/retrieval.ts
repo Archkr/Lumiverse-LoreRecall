@@ -25,6 +25,7 @@ interface ControllerSession {
   connectionId: string | null;
   controllerUsed: boolean;
   deadlineAt: number;
+  callCount: number;
 }
 
 interface ControllerResponse {
@@ -54,8 +55,9 @@ interface TraversalFrontier {
   entries: ScoredEntry[];
 }
 
-const CONTROLLER_TIMEOUT_MS = 2000;
-const CONTROLLER_TOTAL_BUDGET_MS = 8500;
+const CONTROLLER_TIMEOUT_MS = 1500;
+const CONTROLLER_TOTAL_BUDGET_MS = 6000;
+const CONTROLLER_MAX_CALLS = 4;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
 const TRAVERSAL_ENTRY_LIMIT = 14;
 
@@ -257,44 +259,70 @@ async function runControllerJson(
   prompt: string,
   controller: ControllerSession,
 ): Promise<ControllerResponse> {
+  if (controller.callCount >= CONTROLLER_MAX_CALLS) {
+    return { parsed: null, error: "Traversal controller hit its call limit." };
+  }
+
   const remainingMs = controller.deadlineAt - Date.now();
   if (remainingMs <= 250) {
     return { parsed: null, error: "Traversal controller ran out of time." };
   }
 
+  controller.callCount += 1;
   const abortController = new AbortController();
-  const timer = setTimeout(() => abortController.abort(), Math.min(CONTROLLER_TIMEOUT_MS, remainingMs));
+  const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
+  let timer: ReturnType<typeof setTimeout> | null = null;
   try {
-    const result = await spindle.generate.quiet({
-      type: "quiet",
-      messages: [{ role: "user", content: prompt }],
-      parameters: {
-        temperature: controller.settings.controllerTemperature,
-        max_tokens: controller.settings.controllerMaxTokens,
-      },
-      ...(controller.connectionId ? { connection_id: controller.connectionId } : {}),
-      userId: controller.userId,
-      signal: abortController.signal,
-    } as unknown as Parameters<typeof spindle.generate.quiet>[0]);
-    const parsed = parseJsonObject(getGenerationContent(result));
-    if (parsed) {
-      controller.controllerUsed = true;
-      return { parsed, error: null };
+    const requestPromise: Promise<ControllerResponse> = spindle.generate
+      .quiet({
+        type: "quiet",
+        messages: [{ role: "user", content: prompt }],
+        parameters: {
+          temperature: controller.settings.controllerTemperature,
+          max_tokens: controller.settings.controllerMaxTokens,
+        },
+        ...(controller.connectionId ? { connection_id: controller.connectionId } : {}),
+        userId: controller.userId,
+        signal: abortController.signal,
+      } as unknown as Parameters<typeof spindle.generate.quiet>[0])
+      .then((result) => {
+        const parsed = parseJsonObject(getGenerationContent(result));
+        if (parsed) {
+          controller.controllerUsed = true;
+          return { parsed, error: null };
+        }
+        spindle.log.warn("Lore Recall controller call returned invalid JSON.");
+        return { parsed: null, error: "Traversal controller returned invalid JSON." };
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const isAbort = error instanceof Error && error.name === "AbortError";
+        spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
+        return {
+          parsed: null,
+          error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
+        };
+      });
+
+    const timeoutPromise = new Promise<ControllerResponse>((resolve) => {
+      timer = setTimeout(() => {
+        abortController.abort();
+        spindle.log.warn("Lore Recall controller call failed: request timed out");
+        resolve({
+          parsed: null,
+          error: "Traversal controller timed out before the interceptor budget was exhausted.",
+        });
+      }, timeoutMs);
+    });
+
+    const response = await Promise.race([requestPromise, timeoutPromise]);
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
     }
-    spindle.log.warn("Lore Recall controller call returned invalid JSON.");
-    return { parsed: null, error: "Traversal controller returned invalid JSON." };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    const isAbort = error instanceof Error && error.name === "AbortError";
-    spindle.log.warn(
-      `Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`,
-    );
-    return {
-      parsed: null,
-      error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
-    };
+    return response;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -947,6 +975,7 @@ export async function buildRetrievalPreview(
     connectionId: resolveControllerConnectionId(settings, options.connectionId),
     controllerUsed: false,
     deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
+    callCount: 0,
   };
   const chosenBooksResult = await maybeChooseBooks(queryText, readableBooks, config, controller, allowController);
   const chosenBooks = chosenBooksResult.books;
