@@ -1494,6 +1494,12 @@ function describeError(error) {
 function extractGenerationContent(result) {
   return result && typeof result === "object" && typeof result.content === "string" ? result.content : "";
 }
+function extractGenerationUsage(result) {
+  if (!result || typeof result !== "object")
+    return null;
+  const usage = result.usage;
+  return usage && typeof usage === "object" ? usage : null;
+}
 function parseJsonValue(content) {
   const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   if (!cleaned)
@@ -1569,6 +1575,9 @@ function buildControllerDebugPayload(input) {
     provider: input.provider ?? null,
     model: input.model ?? null,
     connectionId: input.connectionId ?? null,
+    finishReason: input.finishReason ?? null,
+    toolCallsCount: input.toolCallsCount ?? null,
+    usage: input.usage ?? null,
     controllerSettings: {
       controllerConnectionId: input.settings.controllerConnectionId,
       controllerTemperature: input.settings.controllerTemperature,
@@ -1605,7 +1614,10 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     rawContent: content,
     provider: connection?.provider ?? null,
     model: connection?.model ?? null,
-    connectionId: settings.controllerConnectionId?.trim() || null
+    connectionId: settings.controllerConnectionId?.trim() || null,
+    finishReason: result && typeof result === "object" && typeof result.finish_reason === "string" ? result.finish_reason ?? null : null,
+    toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
+    usage: extractGenerationUsage(result)
   };
   if (!content)
     return { parsed: null, ...base };
@@ -1873,12 +1885,13 @@ async function buildTreeFromMetadata(bookIds, userId, operation) {
 }
 function chunkEntries(items, chunkTokens) {
   const maxChars = Math.max(2000, chunkTokens * 4);
+  const maxItems = 12;
   const chunks = [];
   let current = [];
   let currentChars = 0;
   for (const item of items) {
     const size = Math.max(item.content.length, item.previewText.length);
-    if (current.length && currentChars + size > maxChars) {
+    if (current.length && (currentChars + size > maxChars || current.length >= maxItems)) {
       chunks.push(current);
       current = [];
       currentChars = 0;
@@ -2006,7 +2019,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
             groupName: entry.groupName,
             constant: entry.constant,
             selective: entry.selective,
-            preview: truncateText(entry.content, 420)
+            preview: truncateText(entry.content, 260)
           }))
         ].join(`
 `);
@@ -2024,6 +2037,9 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
             provider: controllerResult.provider,
             model: controllerResult.model,
             connectionId: controllerResult.connectionId,
+            finishReason: controllerResult.finishReason,
+            toolCallsCount: controllerResult.toolCallsCount,
+            usage: controllerResult.usage,
             settings,
             prompt,
             rawContent: controllerResult.rawContent,

@@ -84,6 +84,9 @@ interface ControllerJsonResult {
   provider: string | null;
   model: string | null;
   connectionId: string | null;
+  finishReason: string | null;
+  toolCallsCount: number | null;
+  usage: Record<string, unknown> | null;
 }
 
 class ControllerJsonError extends Error {
@@ -104,6 +107,12 @@ function extractGenerationContent(result: unknown): string {
   return result && typeof result === "object" && typeof (result as { content?: unknown }).content === "string"
     ? (result as { content: string }).content
     : "";
+}
+
+function extractGenerationUsage(result: unknown): Record<string, unknown> | null {
+  if (!result || typeof result !== "object") return null;
+  const usage = (result as { usage?: unknown }).usage;
+  return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
 }
 
 function parseJsonValue(content: string): unknown {
@@ -192,6 +201,9 @@ function buildControllerDebugPayload(input: {
   provider?: string | null;
   model?: string | null;
   connectionId?: string | null;
+  finishReason?: string | null;
+  toolCallsCount?: number | null;
+  usage?: Record<string, unknown> | null;
   settings: GlobalLoreRecallSettings;
   prompt: string;
   rawContent: string;
@@ -209,6 +221,9 @@ function buildControllerDebugPayload(input: {
       provider: input.provider ?? null,
       model: input.model ?? null,
       connectionId: input.connectionId ?? null,
+      finishReason: input.finishReason ?? null,
+      toolCallsCount: input.toolCallsCount ?? null,
+      usage: input.usage ?? null,
       controllerSettings: {
         controllerConnectionId: input.settings.controllerConnectionId,
         controllerTemperature: input.settings.controllerTemperature,
@@ -262,6 +277,15 @@ async function runControllerJson(
     provider: connection?.provider ?? null,
     model: connection?.model ?? null,
     connectionId: settings.controllerConnectionId?.trim() || null,
+    finishReason:
+      result && typeof result === "object" && typeof (result as { finish_reason?: unknown }).finish_reason === "string"
+        ? ((result as { finish_reason: string }).finish_reason ?? null)
+        : null,
+    toolCallsCount:
+      result && typeof result === "object" && Array.isArray((result as { tool_calls?: unknown }).tool_calls)
+        ? ((result as { tool_calls: unknown[] }).tool_calls?.length ?? 0)
+        : null,
+    usage: extractGenerationUsage(result),
   };
   if (!content) return { parsed: null, ...base };
 
@@ -587,12 +611,13 @@ export async function buildTreeFromMetadata(
 
 function chunkEntries<T extends { content: string; previewText: string }>(items: T[], chunkTokens: number): T[][] {
   const maxChars = Math.max(2000, chunkTokens * 4);
+  const maxItems = 12;
   const chunks: T[][] = [];
   let current: T[] = [];
   let currentChars = 0;
   for (const item of items) {
     const size = Math.max(item.content.length, item.previewText.length);
-    if (current.length && currentChars + size > maxChars) {
+    if (current.length && (currentChars + size > maxChars || current.length >= maxItems)) {
       chunks.push(current);
       current = [];
       currentChars = 0;
@@ -743,7 +768,7 @@ export async function buildTreeWithLlm(
               groupName: entry.groupName,
               constant: entry.constant,
               selective: entry.selective,
-              preview: truncateText(entry.content, 420),
+              preview: truncateText(entry.content, 260),
             }),
           ),
         ].join("\n");
@@ -771,6 +796,9 @@ export async function buildTreeWithLlm(
               provider: controllerResult.provider,
               model: controllerResult.model,
               connectionId: controllerResult.connectionId,
+              finishReason: controllerResult.finishReason,
+              toolCallsCount: controllerResult.toolCallsCount,
+              usage: controllerResult.usage,
               settings,
               prompt,
               rawContent: controllerResult.rawContent,
