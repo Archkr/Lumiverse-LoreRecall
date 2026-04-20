@@ -78,6 +78,24 @@ export interface OperationOutcome<T = void> {
   total: number;
 }
 
+interface ControllerJsonResult {
+  parsed: Record<string, unknown> | null;
+  rawContent: string;
+  provider: string | null;
+  model: string | null;
+  connectionId: string | null;
+}
+
+class ControllerJsonError extends Error {
+  debugPayload: string;
+
+  constructor(message: string, debugPayload: string) {
+    super(message);
+    this.name = "ControllerJsonError";
+    this.debugPayload = debugPayload;
+  }
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -163,6 +181,55 @@ function buildStructuredJsonParameters(
   return {};
 }
 
+function buildControllerDebugPayload(input: {
+  phase: string;
+  expectedKey: string;
+  error: string;
+  bookId?: string | null;
+  bookName?: string | null;
+  chunkIndex?: number | null;
+  chunkTotal?: number | null;
+  provider?: string | null;
+  model?: string | null;
+  connectionId?: string | null;
+  settings: GlobalLoreRecallSettings;
+  prompt: string;
+  rawContent: string;
+  entrySample?: Array<{ entryId: string; label: string }>;
+}): string {
+  return JSON.stringify(
+    {
+      error: input.error,
+      phase: input.phase,
+      expectedKey: input.expectedKey,
+      bookId: input.bookId ?? null,
+      bookName: input.bookName ?? null,
+      chunkIndex: input.chunkIndex ?? null,
+      chunkTotal: input.chunkTotal ?? null,
+      provider: input.provider ?? null,
+      model: input.model ?? null,
+      connectionId: input.connectionId ?? null,
+      controllerSettings: {
+        controllerConnectionId: input.settings.controllerConnectionId,
+        controllerTemperature: input.settings.controllerTemperature,
+        controllerMaxTokens: input.settings.controllerMaxTokens,
+        buildDetail: input.settings.buildDetail,
+        treeGranularity: input.settings.treeGranularity,
+        chunkTokens: input.settings.chunkTokens,
+        dedupMode: input.settings.dedupMode,
+      },
+      promptLength: input.prompt.length,
+      responseLength: input.rawContent.length,
+      promptPreview: truncateText(input.prompt, 12000),
+      responsePreview: truncateText(input.rawContent || "<empty response>", 12000),
+      entrySample: input.entrySample ?? [],
+      capturedAt: Date.now(),
+    },
+    null,
+    2,
+  );
+}
+
 async function runControllerJson(
   prompt: string,
   settings: GlobalLoreRecallSettings,
@@ -170,7 +237,7 @@ async function runControllerJson(
   primaryKey?: string,
   schemaName?: string,
   schema?: Record<string, unknown>,
-): Promise<Record<string, unknown> | null> {
+): Promise<ControllerJsonResult> {
   const connection =
     settings.controllerConnectionId?.trim()
       ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null)
@@ -190,20 +257,29 @@ async function runControllerJson(
     userId,
   });
   const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  if (!content) return null;
+  const base = {
+    rawContent: content,
+    provider: connection?.provider ?? null,
+    model: connection?.model ?? null,
+    connectionId: settings.controllerConnectionId?.trim() || null,
+  };
+  if (!content) return { parsed: null, ...base };
 
   const parsed = parseJsonValue(content);
   if (!primaryKey) {
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+    return {
+      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null,
+      ...base,
+    };
   }
 
   const normalized = normalizeArrayPayload(parsed, primaryKey);
-  if (normalized) return normalized;
+  if (normalized) return { parsed: normalized, ...base };
 
   spindle.log.warn(
     `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} content=${content.slice(0, 280)}`,
   );
-  return null;
+  return { parsed: null, ...base };
 }
 
 const ASSIGNMENTS_SCHEMA = {
@@ -326,7 +402,7 @@ async function generateCategorySummary(
     .filter(Boolean)
     .join("\n");
 
-  const parsed = await runControllerJson(
+  const controllerResult = await runControllerJson(
     prompt,
     settings,
     userId,
@@ -334,6 +410,7 @@ async function generateCategorySummary(
     "lore_recall_category_summaries",
     CATEGORY_SUMMARIES_SCHEMA,
   );
+  const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
     throw new Error("The controller did not return usable category summary JSON.");
   }
@@ -671,7 +748,7 @@ export async function buildTreeWithLlm(
           ),
         ].join("\n");
 
-        const parsed = await runControllerJson(
+        const controllerResult = await runControllerJson(
           prompt,
           settings,
           userId,
@@ -679,8 +756,30 @@ export async function buildTreeWithLlm(
           "lore_recall_tree_assignments",
           ASSIGNMENTS_SCHEMA,
         );
+        const parsed = controllerResult.parsed;
         if (!parsed || !Array.isArray(parsed.assignments)) {
-          throw new Error(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`);
+          throw new ControllerJsonError(
+            `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+            buildControllerDebugPayload({
+              phase: "build_tree_with_llm.assignments",
+              expectedKey: "assignments",
+              error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+              bookId,
+              bookName,
+              chunkIndex: chunkIndex + 1,
+              chunkTotal: chunkCount,
+              provider: controllerResult.provider,
+              model: controllerResult.model,
+              connectionId: controllerResult.connectionId,
+              settings,
+              prompt,
+              rawContent: controllerResult.rawContent,
+              entrySample: chunk.slice(0, 12).map((entry) => ({
+                entryId: entry.entryId,
+                label: entry.label,
+              })),
+            }),
+          );
         }
         const assignments = parsed.assignments.filter(
           (value): value is Record<string, unknown> => !!value && typeof value === "object",
@@ -850,6 +949,7 @@ export async function buildTreeWithLlm(
         bookId,
         bookName,
         phase: "controller",
+        debugPayload: error instanceof ControllerJsonError ? error.debugPayload : null,
       };
       issues.push(issue);
       operation?.addIssue(issue);
@@ -1057,7 +1157,7 @@ export async function regenerateSummaries(
     ].join("\n");
 
     try {
-      const parsed = await runControllerJson(
+      const controllerResult = await runControllerJson(
         prompt,
         settings,
         userId,
@@ -1065,6 +1165,7 @@ export async function regenerateSummaries(
         "lore_recall_entry_summaries",
         ENTRY_SUMMARIES_SCHEMA,
       );
+      const parsed = controllerResult.parsed;
       if (!parsed || !Array.isArray(parsed.entries)) {
         throw new Error("The controller did not return usable entry summary JSON.");
       }

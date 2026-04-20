@@ -199,6 +199,7 @@ export interface OperationIssue {
   bookId?: string | null;
   bookName?: string | null;
   phase?: string | null;
+  debugPayload?: string | null;
 }
 
 export interface OperationUpdate {

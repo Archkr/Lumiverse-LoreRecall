@@ -1480,6 +1480,14 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
 }
 
 // src/backend/operations.ts
+class ControllerJsonError extends Error {
+  debugPayload;
+  constructor(message, debugPayload) {
+    super(message);
+    this.name = "ControllerJsonError";
+    this.debugPayload = debugPayload;
+  }
+}
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1549,6 +1557,35 @@ function buildStructuredJsonParameters(provider, schemaName, schema) {
   }
   return {};
 }
+function buildControllerDebugPayload(input) {
+  return JSON.stringify({
+    error: input.error,
+    phase: input.phase,
+    expectedKey: input.expectedKey,
+    bookId: input.bookId ?? null,
+    bookName: input.bookName ?? null,
+    chunkIndex: input.chunkIndex ?? null,
+    chunkTotal: input.chunkTotal ?? null,
+    provider: input.provider ?? null,
+    model: input.model ?? null,
+    connectionId: input.connectionId ?? null,
+    controllerSettings: {
+      controllerConnectionId: input.settings.controllerConnectionId,
+      controllerTemperature: input.settings.controllerTemperature,
+      controllerMaxTokens: input.settings.controllerMaxTokens,
+      buildDetail: input.settings.buildDetail,
+      treeGranularity: input.settings.treeGranularity,
+      chunkTokens: input.settings.chunkTokens,
+      dedupMode: input.settings.dedupMode
+    },
+    promptLength: input.prompt.length,
+    responseLength: input.rawContent.length,
+    promptPreview: truncateText(input.prompt, 12000),
+    responsePreview: truncateText(input.rawContent || "<empty response>", 12000),
+    entrySample: input.entrySample ?? [],
+    capturedAt: Date.now()
+  }, null, 2);
+}
 async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema) {
   const connection = settings.controllerConnectionId?.trim() ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null) : null;
   const structuredParameters = primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
@@ -1564,17 +1601,26 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     userId
   });
   const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const base = {
+    rawContent: content,
+    provider: connection?.provider ?? null,
+    model: connection?.model ?? null,
+    connectionId: settings.controllerConnectionId?.trim() || null
+  };
   if (!content)
-    return null;
+    return { parsed: null, ...base };
   const parsed = parseJsonValue(content);
   if (!primaryKey) {
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    return {
+      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
+      ...base
+    };
   }
   const normalized = normalizeArrayPayload(parsed, primaryKey);
   if (normalized)
-    return normalized;
+    return { parsed: normalized, ...base };
   spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} content=${content.slice(0, 280)}`);
-  return null;
+  return { parsed: null, ...base };
 }
 var ASSIGNMENTS_SCHEMA = {
   type: "object",
@@ -1664,7 +1710,8 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
     }))
   ].filter(Boolean).join(`
 `);
-  const parsed = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA);
+  const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA);
+  const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
     throw new Error("The controller did not return usable category summary JSON.");
   }
@@ -1963,9 +2010,28 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           }))
         ].join(`
 `);
-        const parsed = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA);
+        const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA);
+        const parsed = controllerResult.parsed;
         if (!parsed || !Array.isArray(parsed.assignments)) {
-          throw new Error(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`);
+          throw new ControllerJsonError(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`, buildControllerDebugPayload({
+            phase: "build_tree_with_llm.assignments",
+            expectedKey: "assignments",
+            error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+            bookId,
+            bookName,
+            chunkIndex: chunkIndex + 1,
+            chunkTotal: chunkCount,
+            provider: controllerResult.provider,
+            model: controllerResult.model,
+            connectionId: controllerResult.connectionId,
+            settings,
+            prompt,
+            rawContent: controllerResult.rawContent,
+            entrySample: chunk.slice(0, 12).map((entry) => ({
+              entryId: entry.entryId,
+              label: entry.label
+            }))
+          }));
         }
         const assignments = parsed.assignments.filter((value) => !!value && typeof value === "object");
         for (const assignment of assignments) {
@@ -2115,7 +2181,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
         message: `LLM tree build failed: ${describeError(error)}`,
         bookId,
         bookName,
-        phase: "controller"
+        phase: "controller",
+        debugPayload: error instanceof ControllerJsonError ? error.debugPayload : null
       };
       issues.push(issue);
       operation?.addIssue(issue);
@@ -2302,7 +2369,8 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation)
     ].join(`
 `);
     try {
-      const parsed = await runControllerJson2(prompt, settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA);
+      const controllerResult = await runControllerJson2(prompt, settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA);
+      const parsed = controllerResult.parsed;
       if (!parsed || !Array.isArray(parsed.entries)) {
         throw new Error("The controller did not return usable entry summary JSON.");
       }

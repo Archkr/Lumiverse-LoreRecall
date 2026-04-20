@@ -1897,6 +1897,37 @@ function setup(ctx) {
     button.addEventListener("click", onClick);
     return button;
   }
+  async function copyTextToClipboard(value, successTitle, successMessage) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const textarea = createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "true");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      pushNotice({
+        id: `copy-success:${Date.now()}`,
+        tone: "success",
+        title: successTitle,
+        message: successMessage
+      });
+    } catch (error) {
+      pushNotice({
+        id: `copy-failed:${Date.now()}`,
+        tone: "error",
+        title: "Copy failed",
+        message: error instanceof Error ? error.message : "Lore Recall could not copy the debug payload."
+      });
+    }
+    render();
+  }
   function createSwitch(label, checked, onChange) {
     const root = createElement("label", "lore-switch");
     const input = createElement("input");
@@ -1971,6 +2002,48 @@ function setup(ctx) {
     bar.appendChild(fill);
     return bar;
   }
+  function getOperationDebugPayload(operation) {
+    const debugIssues = (operation.issues ?? []).filter((issue) => typeof issue.debugPayload === "string" && issue.debugPayload.trim());
+    if (!debugIssues.length)
+      return null;
+    if (debugIssues.length === 1)
+      return debugIssues[0].debugPayload ?? null;
+    return JSON.stringify({
+      operation: {
+        id: operation.id,
+        kind: operation.kind,
+        status: operation.status,
+        title: operation.title,
+        message: operation.message,
+        phase: operation.phase ?? null,
+        bookId: operation.bookId ?? null,
+        bookName: operation.bookName ?? null
+      },
+      issues: debugIssues.map((issue, index) => ({
+        index: index + 1,
+        severity: issue.severity,
+        message: issue.message,
+        phase: issue.phase ?? null,
+        bookId: issue.bookId ?? null,
+        bookName: issue.bookName ?? null,
+        debugPayload: issue.debugPayload ?? null
+      }))
+    }, null, 2);
+  }
+  function copyOperationDebugPayload(operation) {
+    const payload = getOperationDebugPayload(operation);
+    if (!payload) {
+      pushNotice({
+        id: `debug-missing:${Date.now()}`,
+        tone: "warn",
+        title: "No debug payload",
+        message: "Lore Recall does not have a copyable debug payload for that operation yet."
+      });
+      render();
+      return;
+    }
+    copyTextToClipboard(payload, "Debug payload copied", "Send that payload back here and we can inspect the failure directly.");
+  }
   function createOperationSummary(operation, compact = false) {
     const wrap = createElement("div", compact ? "lore-operation compact" : "lore-operation");
     const head = createElement("div", "lore-operation-head");
@@ -2008,6 +2081,12 @@ function setup(ctx) {
         issueList.appendChild(createTag(issue.message, issue.severity === "error" ? "warn" : "accent"));
       }
       wrap.appendChild(issueList);
+    }
+    const debugPayload = getOperationDebugPayload(operation);
+    if (debugPayload && !compact) {
+      const actions = createElement("div", "lore-cluster");
+      actions.appendChild(createButton("Copy debug payload", "lore-btn-link", () => copyOperationDebugPayload(operation)));
+      wrap.appendChild(actions);
     }
     return wrap;
   }
@@ -2115,6 +2194,9 @@ function setup(ctx) {
         continue;
       }
       const actions = createElement("div", "lore-cluster");
+      if (getOperationDebugPayload(operation)) {
+        actions.appendChild(createButton("Copy debug", "lore-btn lore-btn-sm", () => copyOperationDebugPayload(operation)));
+      }
       if (operation.status === "failed" && operation.retryable) {
         actions.appendChild(createButton("Retry", "lore-btn lore-btn-sm", () => retryOperation(operation.id)));
       }
