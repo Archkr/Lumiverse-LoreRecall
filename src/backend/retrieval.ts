@@ -63,14 +63,12 @@ interface TraversalCategoryChoice {
 interface TraversalFrontier {
   scopeLabel: string;
   categories: TraversalCategoryChoice[];
-  entries: ScoredEntry[];
 }
 
 const CONTROLLER_TIMEOUT_MS = 45_000;
 const CONTROLLER_TOTAL_BUDGET_MS = 175_000;
 const CONTROLLER_MAX_CALLS = 12;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
-const TRAVERSAL_ENTRY_LIMIT = 14;
 
 function stripCodeFences(content: string): string {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -156,6 +154,49 @@ function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): s
     .slice(-contextMessages)
     .map((message) => `${message.role}: ${stripSearchMarkup(message.content)}`)
     .join("\n");
+}
+
+function buildCompactSceneSummary(queryText: string): string {
+  const lines = queryText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-2)
+    .map((line) => truncateText(line.replace(/^(assistant|user):\s*/i, ""), 420));
+
+  if (!lines.length) return "";
+
+  return lines.map((line) => `- ${line}`).join("\n");
+}
+
+function buildPromptFocusTerms(queryText: string, scored: ScoredEntry[] = []): string[] {
+  const labels = uniqueStrings(scored.slice(0, 8).map((item) => item.entry.label)).slice(0, 6);
+  if (labels.length) return labels;
+
+  const extracted: string[] = [];
+  const seen = new Set<string>();
+  const properNounPattern = /\b[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}\b/g;
+  for (const match of queryText.matchAll(properNounPattern)) {
+    const value = match[0]?.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extracted.push(value);
+    if (extracted.length >= 6) break;
+  }
+  return extracted;
+}
+
+function buildPromptContext(queryText: string, scored: ScoredEntry[] = []): string {
+  const summary = buildCompactSceneSummary(queryText);
+  const focusTerms = buildPromptFocusTerms(queryText, scored);
+  return [
+    summary ? `Scene summary:\n${summary}` : "",
+    focusTerms.length ? `Focus terms: ${focusTerms.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
@@ -353,7 +394,7 @@ async function maybeChooseBooks(
     'Return ONLY JSON in this exact shape: {"bookIds":["book-id-1","book-id-2"]}.',
     `Choose up to ${Math.min(3, books.length)} books.`,
     "",
-    `Query: ${queryText}`,
+    buildPromptContext(queryText),
     "",
     "Books:",
     ...books.map((book) =>
@@ -396,7 +437,7 @@ async function maybeRerankEntries(
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
     "Use only entryIds from the candidate list.",
     "",
-    `Query: ${queryText}`,
+    buildPromptContext(queryText, scored),
     "",
     "Candidates:",
     ...scored.map((item) =>
@@ -445,9 +486,11 @@ async function maybeSelectEntries(
     "It is fine to return far fewer than the limit.",
     "Prefer the smallest useful set.",
     "Prefer a balanced set across characters, factions, places, rules, incidents, or powers when those angles genuinely matter.",
+    "When a person, faction, place, creature, or item is central, include adjacent support entries only if they explain abilities, threat profile, relationships, command response, or operational context.",
+    "Good support examples include powers, organizations, bases/vehicles, threat frameworks, species/world rules, or incident context when those help explain reactions.",
     "Do not pad the list with generic sibling characters or branch-adjacent trivia just because they are available.",
     "",
-    `Query: ${queryText}`,
+    buildPromptContext(queryText, candidates),
     "",
     "Entry manifest:",
     ...candidates.slice(0, Math.max(config.maxResults * 3, 12)).map((item) =>
@@ -680,12 +723,13 @@ function buildTraversalFrontier(
   scopes: TraversalScope[],
   deterministicById: Map<string, ScoredEntry>,
   config: CharacterRetrievalConfig,
-  overrideEntries: ScoredEntry[] | null,
+  overrideScoresById: Map<string, ScoredEntry> | null,
+  step: number,
 ): TraversalFrontier {
   const categories: TraversalCategoryChoice[] = [];
-  const entries: ScoredEntry[] = [];
   const seenCategories = new Set<string>();
-  const seenEntries = new Set<string>();
+  const showAllCurrentCategories =
+    step === 0 && scopes.length > 0 && scopes.every((scope) => scope.nodeId === scope.book.tree.rootId);
 
   for (const scope of scopes) {
     const node = scope.book.tree.nodes[scope.nodeId];
@@ -698,7 +742,7 @@ function buildTraversalFrontier(
         const choiceId = makeCategoryChoiceId(scope.book.summary.id, child.id);
         if (seenCategories.has(choiceId)) continue;
         seenCategories.add(choiceId);
-        const matchMeta = describeScopeMatches(scope.book, child.id, deterministicById);
+        const matchMeta = describeScopeMatches(scope.book, child.id, overrideScoresById ?? deterministicById);
         categories.push({
           choiceId,
           book: scope.book,
@@ -713,21 +757,6 @@ function buildTraversalFrontier(
         });
       }
     }
-
-    if (overrideEntries) continue;
-    for (const entry of collectEntriesByIds(getScopedEntryIds(scope.book, scope.nodeId, false), deterministicById)) {
-      if (seenEntries.has(entry.entry.entryId)) continue;
-      seenEntries.add(entry.entry.entryId);
-      entries.push(entry);
-    }
-  }
-
-  if (overrideEntries) {
-    for (const entry of overrideEntries) {
-      if (seenEntries.has(entry.entry.entryId)) continue;
-      seenEntries.add(entry.entry.entryId);
-      entries.push(entry);
-    }
   }
 
   return {
@@ -738,12 +767,14 @@ function buildTraversalFrontier(
         return `${scope.book.summary.name} :: ${node.label}`;
       })
       .join(" | "),
-    categories: categories
-      .sort((left, right) => right.relevance - left.relevance || left.depth - right.depth || left.label.localeCompare(right.label))
-      .slice(0, TRAVERSAL_CATEGORY_LIMIT),
-    entries: entries
-      .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
-      .slice(0, TRAVERSAL_ENTRY_LIMIT),
+    categories: showAllCurrentCategories
+      ? categories
+      : categories
+          .sort(
+            (left, right) =>
+              right.relevance - left.relevance || left.depth - right.depth || left.label.localeCompare(right.label),
+          )
+          .slice(0, TRAVERSAL_CATEGORY_LIMIT),
   };
 }
 
@@ -754,38 +785,31 @@ function buildTraversalPrompt(
   config: CharacterRetrievalConfig,
 ): string {
   return [
-    "You are the Lore Recall traversal controller.",
-    'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","choiceIds":["..."],"query":"optional search query","reason":"short reason"}.',
+    "You are a retrieval assistant for a hierarchical knowledge tree.",
+    'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","nodeIds":["node-id-1"],"query":"optional search query","reason":"brief explanation"}.',
+    "Task:",
+    "- Pick the most relevant node IDs from the tree to retrieve for the next response.",
     "Rules:",
-    "- Use action navigate only when a category is still too broad to retrieve directly.",
-    "- Use action retrieve to pull content from one or more category or entry choiceIds in the current frontier.",
-    "- Retrieving a category choice pulls ALL descendant entries under that branch, then Lore Recall narrows to the best matching entries.",
-    "- Use action search to narrow the current scope with a short search query.",
-    "- Use action finish only when the current scope already contains enough relevant context to resolve entries without another retrieval choice.",
-    "- Prefer specific nodes over root-wide branches, but retrieve multiple sibling/supporting nodes when the scene clearly involves multiple people, factions, locations, organizations, incidents, rules, or powers.",
-    "- Do not default to character profiles only when the scene also depends on world state, places, systems, laws, factions, or supernatural mechanics.",
-    "- At broad/root levels, prefer a small cross-domain set of useful nodes instead of tunneling into one character branch immediately.",
-    "- It is fine to retrieve fewer nodes or fewer entries than the configured limit if that gives a cleaner result.",
-    `- Stay within ${config.traversalStepLimit} total steps and retrieve 1-5 useful nodes maximum.`,
+    "- Pick 1-5 nodeIds maximum and prefer specific nodes over broad branches.",
+    "- On the first pass, review all categories shown below and choose from those nodeIds.",
+    "- Use action navigate when a shown category still needs to be opened before retrieval.",
+    "- Use action retrieve when one or more shown nodes are specific enough to retrieve content from.",
+    "- Use action search only to narrow the current scope with a short keyword query.",
+    "- Use action finish only when the current scope is already specific enough to resolve entries without choosing another node.",
+    "- Do not pick entries directly. Exact entry selection happens later after node retrieval.",
+    "- Pick nodes whose content would be most useful for the next response.",
+    "- Consider world info, rules, places, systems, organizations, incidents, abilities, or factions when they matter to the scene, not just named people.",
+    "- If nothing seems relevant, keep the result small instead of padding it.",
+    `- Stay within ${config.traversalStepLimit} total steps.`,
     "",
-    `Original query: ${queryText}`,
+    buildPromptContext(queryText),
     `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
     "",
     "Category choices:",
     ...(frontier.categories.length
       ? frontier.categories.map((category) =>
-          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
-        )
-      : ["- none"]),
-    "",
-    "Direct entry choices:",
-    ...(frontier.entries.length
-      ? frontier.entries.map((entry) =>
-          `- choiceId=${makeEntryChoiceId(entry.entry.entryId)}; label=${entry.entry.label}; book=${entry.entry.worldBookName}; breadcrumb=${entry.entry.worldBookName} :: ${entry.entry.label}; summary=${truncateText(
-            entry.entry.summary || getEntryBody(entry.entry),
-            180,
-          )}`,
+          `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
         )
       : ["- none"]),
   ].join("\n");
@@ -806,32 +830,23 @@ function buildScopeRefinementPrompt(
   config: CharacterRetrievalConfig,
 ): string {
   return [
-    "You already selected broad retrieval branches for Lore Recall.",
-    'Return ONLY JSON in this exact shape: {"choiceIds":["..."],"reason":"short reason"}.',
-    `Choose 1-${Math.min(5, Math.max(2, config.maxResults))} more specific category or entry choiceIds from the current frontier.`,
+    "You already selected broad retrieval branches for a knowledge tree.",
+    'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
+    `Choose 1-${Math.min(5, Math.max(2, config.maxResults))} more specific nodeIds from the current frontier.`,
     "Rules:",
-    "- Prefer leaf categories and direct entry choices over broad branches.",
+    "- Prefer leaf categories over broad branches.",
     "- Pick the smallest set of specific nodes that still covers the people, factions, places, rules, incidents, and world state needed for the reply.",
     "- If a broad branch contains many unrelated descendants, narrow it before retrieval.",
+    "- If the current set is only people-focused, add 1-2 specific support choices for powers, faction procedure, bases/vehicles, threat systems, or world mechanics when clearly relevant.",
     "- Do not pad the result. It is fine to keep this very small.",
     "",
-    `Original query: ${queryText}`,
+    buildPromptContext(queryText),
     `Current broad scopes: ${frontier.scopeLabel || "Selected branches"}`,
     "",
     "Category choices:",
     ...(frontier.categories.length
       ? frontier.categories.map((category) =>
-          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
-        )
-      : ["- none"]),
-    "",
-    "Direct entry choices:",
-    ...(frontier.entries.length
-      ? frontier.entries.map((entry) =>
-          `- choiceId=${makeEntryChoiceId(entry.entry.entryId)}; label=${entry.entry.label}; book=${entry.entry.worldBookName}; summary=${truncateText(
-            entry.entry.summary || getEntryBody(entry.entry),
-            160,
-          )}`,
+          `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
         )
       : ["- none"]),
   ].join("\n");
@@ -877,15 +892,48 @@ async function selectTraversalEntries(
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   const booksById = new Map(books.map((book) => [book.summary.id, book]));
   let scopes: TraversalScope[] = books.map((book) => ({ book, nodeId: book.tree.rootId }));
-  let overrideEntries: ScoredEntry[] | null = null;
+  let overrideScoresById: Map<string, ScoredEntry> | null = null;
+  let activeSelectionQuery = queryText;
   const steps = [
     `${books.length} book(s) considered for traversal.`,
     `${deterministic.length} scored entry candidate(s) available for traversal.`,
   ];
 
   for (let step = 0; step < config.traversalStepLimit; step += 1) {
-    const frontier = buildTraversalFrontier(scopes, deterministicById, config, overrideEntries);
-    if (!frontier.categories.length && !frontier.entries.length) {
+    const frontier = buildTraversalFrontier(scopes, deterministicById, config, overrideScoresById, step);
+    if (!frontier.categories.length) {
+      const autoSelected = collectCandidatesForScopes(activeSelectionQuery, scopes, [], deterministicById);
+      if (!autoSelected.length) {
+        pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
+        return {
+          selected: deterministic.slice(0, config.maxResults),
+          retrievedScopes: [],
+          fallbackReason: "Traversal reached an empty frontier, so collapsed retrieval was used instead.",
+          steps: [...steps, "Collapsed fallback used because traversal had no frontier choices."],
+          trace,
+        };
+      }
+      const finalAutoSelected = config.selectiveRetrieval
+        ? await maybeSelectEntries(activeSelectionQuery, autoSelected, config, controller, allowController)
+        : autoSelected.slice(0, config.maxResults);
+      pushTrace(
+        trace,
+        "retrieve",
+        "Retrieve current scope",
+        `Current scope had no deeper categories, so Lore Recall resolved ${finalAutoSelected.length} entry candidate(s) from the current node scope.`,
+        { entryCount: finalAutoSelected.length },
+      );
+      return {
+        selected: finalAutoSelected,
+        retrievedScopes: scopes,
+        fallbackReason: null,
+        steps: [...steps, `Traversal selected ${finalAutoSelected.length} entry candidate(s).`],
+        trace,
+      };
+    }
+
+    const response = await runControllerJson(buildTraversalPrompt(activeSelectionQuery, frontier, step, config), controller);
+    if (!response.parsed) {
       pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
       return {
         selected: deterministic.slice(0, config.maxResults),
@@ -895,10 +943,8 @@ async function selectTraversalEntries(
         trace,
       };
     }
-
-    const response = await runControllerJson(buildTraversalPrompt(queryText, frontier, step, config), controller);
+    const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
     if (!response.parsed) {
-      const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
       pushTrace(trace, "fallback", "Controller failed", fallbackReason);
       return {
         selected: deterministic.slice(0, config.maxResults),
@@ -910,8 +956,10 @@ async function selectTraversalEntries(
     }
 
     const action = typeof response.parsed.action === "string" ? response.parsed.action.trim().toLowerCase() : "";
-    const choiceIds = Array.isArray(response.parsed.choiceIds)
-      ? response.parsed.choiceIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    const nodeIds = Array.isArray(response.parsed.nodeIds)
+      ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : Array.isArray(response.parsed.choiceIds)
+        ? response.parsed.choiceIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
     const reason =
       typeof response.parsed.reason === "string" && response.parsed.reason.trim()
@@ -919,7 +967,7 @@ async function selectTraversalEntries(
         : "No controller reason provided.";
 
     if (action === "navigate") {
-      const nextScopes = choiceIds
+      const nextScopes = nodeIds
         .map(parseCategoryChoiceId)
         .filter((value): value is { bookId: string; nodeId: string } => !!value)
         .map((value) => ({ book: booksById.get(value.bookId) ?? null, nodeId: value.nodeId }))
@@ -937,7 +985,6 @@ async function selectTraversalEntries(
       }
 
       scopes = nextScopes;
-      overrideEntries = null;
       pushTrace(
         trace,
         "navigate",
@@ -955,7 +1002,7 @@ async function selectTraversalEntries(
       const searchQuery =
         typeof response.parsed.query === "string" && response.parsed.query.trim()
           ? response.parsed.query.trim()
-          : queryText;
+          : activeSelectionQuery;
       const scopeEntries = collectEntriesByIds(
         uniqueStrings(scopes.flatMap((scope) => getScopedEntryIds(scope.book, scope.nodeId, true))),
         deterministicById,
@@ -971,12 +1018,13 @@ async function selectTraversalEntries(
           trace,
         };
       }
-      overrideEntries = rescored;
+      overrideScoresById = new Map(rescored.map((item) => [item.entry.entryId, item]));
+      activeSelectionQuery = searchQuery;
       pushTrace(
         trace,
         "search",
         `Search: ${searchQuery}`,
-        `${reason} Search surfaced ${rescored.length} direct entry option(s).`,
+        `${reason} Search re-ranked the current scope using ${rescored.length} matching entry candidate(s).`,
         { entryCount: rescored.length },
       );
       continue;
@@ -985,61 +1033,53 @@ async function selectTraversalEntries(
     if (action === "retrieve" || action === "finish") {
       let selectedCandidates: ScoredEntry[] = [];
       let retrievedScopes: TraversalScope[] = [];
-      let directEntryIds: string[] = [];
       if (action === "finish") {
-        if (overrideEntries?.length) {
-          selectedCandidates = overrideEntries.slice(0, Math.max(config.maxResults * 2, 10));
-        } else {
-          retrievedScopes = scopes;
-        }
+        retrievedScopes = scopes;
       } else {
         const selectedScopeMap = new Map<string, TraversalScope>();
-        for (const choiceId of choiceIds) {
-          const categoryChoice = parseCategoryChoiceId(choiceId);
+        for (const nodeId of nodeIds) {
+          const categoryChoice = parseCategoryChoiceId(nodeId);
           if (categoryChoice) {
             const book = booksById.get(categoryChoice.bookId);
             if (!book || !book.tree.nodes[categoryChoice.nodeId]) continue;
             selectedScopeMap.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
-            continue;
           }
-          const entryId = parseEntryChoiceId(choiceId);
-          if (entryId) directEntryIds.push(entryId);
         }
-        retrievedScopes = Array.from(selectedScopeMap.values());
+        retrievedScopes = selectedScopeMap.size ? Array.from(selectedScopeMap.values()) : scopes;
       }
 
       if (!selectedCandidates.length && retrievedScopes.length && shouldRefineRetrievedScopes(retrievedScopes, config)) {
-        const refinementFrontier = buildTraversalFrontier(retrievedScopes, deterministicById, config, null);
-        const refinement = await runControllerJson(buildScopeRefinementPrompt(queryText, refinementFrontier, config), controller);
+        const refinementFrontier = buildTraversalFrontier(retrievedScopes, deterministicById, config, overrideScoresById, step + 1);
+        const refinement = await runControllerJson(
+          buildScopeRefinementPrompt(activeSelectionQuery, refinementFrontier, config),
+          controller,
+        );
         if (refinement.parsed) {
-          const refinedChoiceIds = Array.isArray(refinement.parsed.choiceIds)
-            ? refinement.parsed.choiceIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          const refinedNodeIds = Array.isArray(refinement.parsed.nodeIds)
+            ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : Array.isArray(refinement.parsed.choiceIds)
+              ? refinement.parsed.choiceIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
             : [];
           const refinedReason =
             typeof refinement.parsed.reason === "string" && refinement.parsed.reason.trim()
               ? refinement.parsed.reason.trim()
               : "No controller reason provided.";
           const refinedScopeMap = new Map<string, TraversalScope>();
-          const refinedDirectEntryIds: string[] = [];
-          for (const choiceId of refinedChoiceIds) {
-            const categoryChoice = parseCategoryChoiceId(choiceId);
+          for (const nodeId of refinedNodeIds) {
+            const categoryChoice = parseCategoryChoiceId(nodeId);
             if (categoryChoice) {
               const book = booksById.get(categoryChoice.bookId);
               if (!book || !book.tree.nodes[categoryChoice.nodeId]) continue;
               refinedScopeMap.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
-              continue;
             }
-            const entryId = parseEntryChoiceId(choiceId);
-            if (entryId) refinedDirectEntryIds.push(entryId);
           }
-          if (refinedScopeMap.size || refinedDirectEntryIds.length) {
+          if (refinedScopeMap.size) {
             retrievedScopes = Array.from(refinedScopeMap.values());
-            directEntryIds = uniqueStrings([...directEntryIds, ...refinedDirectEntryIds]);
             pushTrace(
               trace,
               "navigate",
               "Refine retrieved branches",
-              `${refinedReason} Narrowed broad retrieval branches into ${Math.max(retrievedScopes.length + directEntryIds.length, 1)} more specific choice(s).`,
+              `${refinedReason} Narrowed broad retrieval branches into ${retrievedScopes.length} more specific node choice(s).`,
               {
                 bookId: retrievedScopes[0]?.book.summary.id ?? null,
                 nodeId: retrievedScopes[0]?.nodeId ?? null,
@@ -1050,7 +1090,7 @@ async function selectTraversalEntries(
       }
 
       if (!selectedCandidates.length) {
-        selectedCandidates = collectCandidatesForScopes(queryText, retrievedScopes, directEntryIds, deterministicById);
+        selectedCandidates = collectCandidatesForScopes(activeSelectionQuery, retrievedScopes, [], deterministicById);
       }
 
       if (!selectedCandidates.length) {
@@ -1197,7 +1237,7 @@ export async function buildRetrievalPreview(
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`,
   ];
-  const trace: TraversalTraceStep[] = [...chosenBooksResult.trace];
+    const trace: TraversalTraceStep[] = [...chosenBooksResult.trace];
   let retrievedScopes: TraversalScope[] = [];
 
   let selected: ScoredEntry[] = [];
