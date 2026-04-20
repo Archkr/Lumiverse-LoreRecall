@@ -25,10 +25,38 @@ var DEFAULT_CHARACTER_CONFIG = {
   contextMessages: 10
 };
 var TREE_GRANULARITY_PRESETS = {
-  1: { targetCategories: "3-5", maxEntries: 20, label: "Minimal", description: "Keep entries grouped broadly." },
-  2: { targetCategories: "5-8", maxEntries: 12, label: "Moderate", description: "Balanced split for most books." },
-  3: { targetCategories: "8-15", maxEntries: 8, label: "Detailed", description: "Break books into more specific groups." },
-  4: { targetCategories: "12-20", maxEntries: 5, label: "Extensive", description: "Maximum splitting into small groups." }
+  1: {
+    targetCategories: "3-5",
+    targetTopLevelMin: 3,
+    targetTopLevelMax: 5,
+    maxEntries: 20,
+    label: "Minimal",
+    description: "Keep entries grouped broadly."
+  },
+  2: {
+    targetCategories: "5-8",
+    targetTopLevelMin: 5,
+    targetTopLevelMax: 8,
+    maxEntries: 12,
+    label: "Moderate",
+    description: "Balanced split for most books."
+  },
+  3: {
+    targetCategories: "8-15",
+    targetTopLevelMin: 8,
+    targetTopLevelMax: 15,
+    maxEntries: 8,
+    label: "Detailed",
+    description: "Break books into more specific groups."
+  },
+  4: {
+    targetCategories: "12-20",
+    targetTopLevelMin: 12,
+    targetTopLevelMax: 20,
+    maxEntries: 5,
+    label: "Extensive",
+    description: "Maximum splitting into small groups."
+  }
 };
 function clampInt(value, min, max) {
   if (!Number.isFinite(value))

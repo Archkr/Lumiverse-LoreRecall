@@ -34,10 +34,38 @@ var DEFAULT_BOOK_CONFIG = {
   permission: "read_write"
 };
 var TREE_GRANULARITY_PRESETS = {
-  1: { targetCategories: "3-5", maxEntries: 20, label: "Minimal", description: "Keep entries grouped broadly." },
-  2: { targetCategories: "5-8", maxEntries: 12, label: "Moderate", description: "Balanced split for most books." },
-  3: { targetCategories: "8-15", maxEntries: 8, label: "Detailed", description: "Break books into more specific groups." },
-  4: { targetCategories: "12-20", maxEntries: 5, label: "Extensive", description: "Maximum splitting into small groups." }
+  1: {
+    targetCategories: "3-5",
+    targetTopLevelMin: 3,
+    targetTopLevelMax: 5,
+    maxEntries: 20,
+    label: "Minimal",
+    description: "Keep entries grouped broadly."
+  },
+  2: {
+    targetCategories: "5-8",
+    targetTopLevelMin: 5,
+    targetTopLevelMax: 8,
+    maxEntries: 12,
+    label: "Moderate",
+    description: "Balanced split for most books."
+  },
+  3: {
+    targetCategories: "8-15",
+    targetTopLevelMin: 8,
+    targetTopLevelMax: 15,
+    maxEntries: 8,
+    label: "Detailed",
+    description: "Break books into more specific groups."
+  },
+  4: {
+    targetCategories: "12-20",
+    targetTopLevelMin: 12,
+    targetTopLevelMax: 20,
+    maxEntries: 5,
+    label: "Extensive",
+    description: "Maximum splitting into small groups."
+  }
 };
 function clampInt(value, min, max) {
   if (!Number.isFinite(value))
@@ -1558,6 +1586,52 @@ function buildAssignmentEntryPayload(entry, detail) {
     preview: truncateText(entry.content, 260)
   };
 }
+function getCategoryLabelPath(tree, nodeId) {
+  const labels = [];
+  const visited = new Set;
+  let cursor = nodeId;
+  while (cursor && cursor !== tree.rootId && !visited.has(cursor)) {
+    visited.add(cursor);
+    const node = tree.nodes[cursor];
+    if (!node)
+      break;
+    if (node.label.trim())
+      labels.push(node.label.trim());
+    cursor = node.parentId;
+  }
+  return labels.reverse();
+}
+function buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount) {
+  const root = tree.nodes[tree.rootId];
+  const topLevelIds = root?.childIds.filter((nodeId) => !!tree.nodes[nodeId]) ?? [];
+  const topLevelLabels = topLevelIds.map((nodeId) => tree.nodes[nodeId].label.trim()).filter(Boolean);
+  const remainingTopLevelSlots = Math.max(0, granularity.targetTopLevelMax - topLevelLabels.length);
+  const leafSummaries = Object.values(tree.nodes).filter((node) => node.id !== tree.rootId && node.childIds.length === 0).map((node) => ({
+    path: getCategoryLabelPath(tree, node.id).join(" > "),
+    entryCount: node.entryIds.length
+  })).sort((left, right) => right.entryCount - left.entryCount || left.path.localeCompare(right.path)).slice(0, 48);
+  const guidance = [
+    `This is chunk ${chunkIndex + 1} of ${chunkCount} for one shared final tree. Keep category choices consistent with earlier chunks.`,
+    `Final top-level category target for the whole book: ${granularity.targetCategories}. Hard cap: ${granularity.targetTopLevelMax} top-level categories total.`
+  ];
+  if (topLevelLabels.length > 0) {
+    guidance.push(`Existing top-level categories (${topLevelLabels.length}/${granularity.targetTopLevelMax}): ${topLevelLabels.join(" | ")}.`);
+    if (remainingTopLevelSlots === 0) {
+      guidance.push("Do not create any new top-level categories. Reuse one of the existing top-level categories.");
+    } else {
+      guidance.push(`Reuse an existing top-level category whenever possible. Only create a new top-level category if none fit, and create at most ${remainingTopLevelSlots} more top-level categor${remainingTopLevelSlots === 1 ? "y" : "ies"}.`);
+    }
+  } else {
+    guidance.push(`No top-level categories exist yet. Start with broad, reusable top-level categories and create no more than ${granularity.targetTopLevelMax} top-level categories in this chunk.`);
+  }
+  if (leafSummaries.length > 0) {
+    guidance.push("Existing leaf categories and current entry counts:");
+    guidance.push(...leafSummaries.map((item) => `- ${item.path} [${item.entryCount} entries]`));
+    guidance.push(`If an existing leaf category is already near or above ${granularity.maxEntries} entries, create or reuse a sibling subcategory under the same top-level category instead of overfilling that leaf.`);
+  }
+  guidance.push("Prefer broader reusable categories over one-off niche labels, and avoid near-duplicate top-level categories that overlap with existing ones.");
+  return guidance;
+}
 
 class ControllerJsonError extends Error {
   debugPayload;
@@ -2167,6 +2241,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
       const updates = [];
       const chunks = chunkEntries(cache.entries, settings.chunkTokens, (entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length);
       const granularity = getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length);
+      const allEntryManifest = chunks.length > 1 ? cache.entries.map((entry) => truncateText(entry.label || entry.comment || entry.entryId, 80)).filter(Boolean).join(`
+- `) : "";
       const entrySummaryBatchSize = 8;
       const entrySummaryBatches = Array.from({ length: Math.ceil(cache.entries.length / entrySummaryBatchSize) }, (_, index) => cache.entries.slice(index * entrySummaryBatchSize, (index + 1) * entrySummaryBatchSize)).filter((batch) => batch.length > 0);
       for (const [chunkIndex, chunk] of chunks.entries()) {
@@ -2186,6 +2262,12 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
           `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
           `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. Aim for ${granularity.targetCategories} top-level categories and no more than ${granularity.maxEntries} entries per leaf category.`,
+          ...buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount),
+          ...chunkIndex === 0 && allEntryManifest ? [
+            `This book has ${cache.entries.length} total entries across ${chunkCount} chunks. Design the category structure to accommodate the whole book, not just this chunk.`,
+            "All entry names in the book:",
+            `- ${allEntryManifest}`
+          ] : [],
           "Use empty path [] when an entry should stay unassigned.",
           "",
           "Entries:",
