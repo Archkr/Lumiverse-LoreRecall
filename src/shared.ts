@@ -2,6 +2,7 @@ import type {
   BookRetrievalConfig,
   BookTreeIndex,
   BookTreeNode,
+  BuildDetail,
   CharacterRetrievalConfig,
   EntryRecallMeta,
   GlobalLoreRecallSettings,
@@ -44,6 +45,22 @@ export const DEFAULT_BOOK_CONFIG: BookRetrievalConfig = {
   description: "",
   permission: "read_write",
 };
+
+export const TREE_GRANULARITY_PRESETS = {
+  1: { targetCategories: "3-5", maxEntries: 20, label: "Minimal", description: "Keep entries grouped broadly." },
+  2: { targetCategories: "5-8", maxEntries: 12, label: "Moderate", description: "Balanced split for most books." },
+  3: { targetCategories: "8-15", maxEntries: 8, label: "Detailed", description: "Break books into more specific groups." },
+  4: { targetCategories: "12-20", maxEntries: 5, label: "Extensive", description: "Maximum splitting into small groups." },
+} as const;
+
+export interface EffectiveTreeGranularity {
+  level: number;
+  label: string;
+  targetCategories: string;
+  maxEntries: number;
+  description: string;
+  isAuto: boolean;
+}
 
 export function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
@@ -114,7 +131,7 @@ export function normalizeGlobalSettings(value?: Partial<GlobalLoreRecallSettings
       256,
       32768,
     ),
-    buildDetail: next.buildDetail === "full" ? "full" : "lite",
+    buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(
       typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity,
       0,
@@ -127,6 +144,47 @@ export function normalizeGlobalSettings(value?: Partial<GlobalLoreRecallSettings
     ),
     dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none",
   };
+}
+
+export function getEffectiveTreeGranularity(setting: number, entryCount = 0): EffectiveTreeGranularity {
+  let level = clampInt(setting, 0, 4);
+  const isAuto = level === 0;
+
+  if (level === 0) {
+    if (entryCount >= 3000) level = 4;
+    else if (entryCount >= 1000) level = 3;
+    else if (entryCount >= 200) level = 2;
+    else level = 1;
+  }
+
+  const preset = TREE_GRANULARITY_PRESETS[level as keyof typeof TREE_GRANULARITY_PRESETS];
+  return {
+    level,
+    isAuto,
+    ...preset,
+  };
+}
+
+export function getBuildDetailLabel(detail: BuildDetail): string {
+  switch (detail) {
+    case "full":
+      return "Full";
+    case "names":
+      return "Names only";
+    default:
+      return "Lite";
+  }
+}
+
+export function getBuildDetailDescription(detail: BuildDetail): string {
+  switch (detail) {
+    case "full":
+      return "Send complete entry content and metadata for stronger categorization.";
+    case "names":
+      return "Send labels only. Cheapest, but the model can only group by names.";
+    default:
+      return "Send a trimmed content preview plus metadata. Good balance of quality and cost.";
+  }
 }
 
 export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfig> | null): CharacterRetrievalConfig {

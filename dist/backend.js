@@ -33,6 +33,12 @@ var DEFAULT_BOOK_CONFIG = {
   description: "",
   permission: "read_write"
 };
+var TREE_GRANULARITY_PRESETS = {
+  1: { targetCategories: "3-5", maxEntries: 20, label: "Minimal", description: "Keep entries grouped broadly." },
+  2: { targetCategories: "5-8", maxEntries: 12, label: "Moderate", description: "Balanced split for most books." },
+  3: { targetCategories: "8-15", maxEntries: 8, label: "Detailed", description: "Break books into more specific groups." },
+  4: { targetCategories: "12-20", maxEntries: 5, label: "Extensive", description: "Maximum splitting into small groups." }
+};
 function clampInt(value, min, max) {
   if (!Number.isFinite(value))
     return min;
@@ -73,11 +79,51 @@ function normalizeGlobalSettings(value) {
     controllerConnectionId: typeof next.controllerConnectionId === "string" && next.controllerConnectionId.trim() ? next.controllerConnectionId.trim() : null,
     controllerTemperature: clampFloat(typeof next.controllerTemperature === "number" ? next.controllerTemperature : DEFAULT_GLOBAL_SETTINGS.controllerTemperature, 0, 2),
     controllerMaxTokens: clampInt(typeof next.controllerMaxTokens === "number" ? next.controllerMaxTokens : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens, 256, 32768),
-    buildDetail: next.buildDetail === "full" ? "full" : "lite",
+    buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
     dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none"
   };
+}
+function getEffectiveTreeGranularity(setting, entryCount = 0) {
+  let level = clampInt(setting, 0, 4);
+  const isAuto = level === 0;
+  if (level === 0) {
+    if (entryCount >= 3000)
+      level = 4;
+    else if (entryCount >= 1000)
+      level = 3;
+    else if (entryCount >= 200)
+      level = 2;
+    else
+      level = 1;
+  }
+  const preset = TREE_GRANULARITY_PRESETS[level];
+  return {
+    level,
+    isAuto,
+    ...preset
+  };
+}
+function getBuildDetailLabel(detail) {
+  switch (detail) {
+    case "full":
+      return "Full";
+    case "names":
+      return "Names only";
+    default:
+      return "Lite";
+  }
+}
+function getBuildDetailDescription(detail) {
+  switch (detail) {
+    case "full":
+      return "Send complete entry content and metadata for stronger categorization.";
+    case "names":
+      return "Send labels only. Cheapest, but the model can only group by names.";
+    default:
+      return "Send a trimmed content preview plus metadata. Good balance of quality and cost.";
+  }
 }
 function normalizeCharacterConfig(value) {
   const next = value ?? {};
@@ -1486,6 +1532,32 @@ var SUMMARY_SYSTEM_PROMPT = "You are a summarization assistant. Return only the 
 function sanitizeControllerText(value) {
   return value.replace(THINK_BLOCK_RE, "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
+function buildAssignmentEntryPayload(entry, detail) {
+  const base = {
+    entryId: entry.entryId,
+    comment: entry.comment
+  };
+  if (detail === "names") {
+    return base;
+  }
+  const expanded = {
+    ...base,
+    keys: [...entry.key, ...entry.keysecondary],
+    groupName: entry.groupName,
+    constant: entry.constant,
+    selective: entry.selective
+  };
+  if (detail === "full") {
+    return {
+      ...expanded,
+      content: entry.content
+    };
+  }
+  return {
+    ...expanded,
+    preview: truncateText(entry.content, 260)
+  };
+}
 
 class ControllerJsonError extends Error {
   debugPayload;
@@ -1984,14 +2056,14 @@ async function buildTreeFromMetadata(bookIds, userId, operation) {
     total: ids.length
   };
 }
-function chunkEntries(items, chunkTokens) {
+function chunkEntries(items, chunkTokens, measure) {
   const maxChars = Math.max(2000, chunkTokens * 4);
   const maxItems = 12;
   const chunks = [];
   let current = [];
   let currentChars = 0;
   for (const item of items) {
-    const size = Math.max(item.content.length, item.previewText.length);
+    const size = Math.max(1, measure ? measure(item) : Math.max(item.content.length, item.previewText.length));
     if (current.length && (currentChars + size > maxChars || current.length >= maxItems)) {
       chunks.push(current);
       current = [];
@@ -2069,7 +2141,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
         bookId,
         bookName,
         cache,
-        chunkCount: Math.max(1, chunkEntries(cache.entries, settings.chunkTokens).length),
+        chunkCount: Math.max(1, chunkEntries(cache.entries, settings.chunkTokens, (entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length).length),
         entrySummaryBatchCount: Math.max(1, Math.ceil(cache.entries.length / 8)),
         originalIndex: index
       });
@@ -2093,7 +2165,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
     try {
       const tree = createEmptyTreeIndex(bookId);
       const updates = [];
-      const chunks = chunkEntries(cache.entries, settings.chunkTokens);
+      const chunks = chunkEntries(cache.entries, settings.chunkTokens, (entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length);
+      const granularity = getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length);
       const entrySummaryBatchSize = 8;
       const entrySummaryBatches = Array.from({ length: Math.ceil(cache.entries.length / entrySummaryBatchSize) }, (_, index) => cache.entries.slice(index * entrySummaryBatchSize, (index + 1) * entrySummaryBatchSize)).filter((batch) => batch.length > 0);
       for (const [chunkIndex, chunk] of chunks.entries()) {
@@ -2111,20 +2184,12 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
         const prompt = [
           "Organize these lore entries into a compact retrieval tree.",
           'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
-          `Build detail: ${settings.buildDetail}.`,
-          `Tree granularity: ${settings.treeGranularity}.`,
+          `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
+          `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. Aim for ${granularity.targetCategories} top-level categories and no more than ${granularity.maxEntries} entries per leaf category.`,
           "Use empty path [] when an entry should stay unassigned.",
           "",
           "Entries:",
-          ...chunk.map((entry) => JSON.stringify({
-            entryId: entry.entryId,
-            comment: entry.comment,
-            keys: [...entry.key, ...entry.keysecondary],
-            groupName: entry.groupName,
-            constant: entry.constant,
-            selective: entry.selective,
-            preview: truncateText(entry.content, 260)
-          }))
+          ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)))
         ].join(`
 `);
         const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {

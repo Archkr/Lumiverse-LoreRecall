@@ -1,7 +1,7 @@
 export type SearchMode = "collapsed" | "traversal";
 export type BookPermission = "read_write" | "read_only" | "write_only";
 export type MultiBookMode = "unified" | "per_book";
-export type BuildDetail = "lite" | "full";
+export type BuildDetail = "names" | "lite" | "full";
 export type DedupMode = "none" | "lexical" | "llm";
 export type TreeBuildSource = "metadata" | "llm" | "migration" | "manual" | null;
 export type TreeNodeKind = "root" | "category";

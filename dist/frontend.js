@@ -24,6 +24,12 @@ var DEFAULT_CHARACTER_CONFIG = {
   multiBookMode: "unified",
   contextMessages: 10
 };
+var TREE_GRANULARITY_PRESETS = {
+  1: { targetCategories: "3-5", maxEntries: 20, label: "Minimal", description: "Keep entries grouped broadly." },
+  2: { targetCategories: "5-8", maxEntries: 12, label: "Moderate", description: "Balanced split for most books." },
+  3: { targetCategories: "8-15", maxEntries: 8, label: "Detailed", description: "Break books into more specific groups." },
+  4: { targetCategories: "12-20", maxEntries: 5, label: "Extensive", description: "Maximum splitting into small groups." }
+};
 function clampInt(value, min, max) {
   if (!Number.isFinite(value))
     return min;
@@ -63,11 +69,51 @@ function normalizeGlobalSettings(value) {
     controllerConnectionId: typeof next.controllerConnectionId === "string" && next.controllerConnectionId.trim() ? next.controllerConnectionId.trim() : null,
     controllerTemperature: clampFloat(typeof next.controllerTemperature === "number" ? next.controllerTemperature : DEFAULT_GLOBAL_SETTINGS.controllerTemperature, 0, 2),
     controllerMaxTokens: clampInt(typeof next.controllerMaxTokens === "number" ? next.controllerMaxTokens : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens, 256, 32768),
-    buildDetail: next.buildDetail === "full" ? "full" : "lite",
+    buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
     dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none"
   };
+}
+function getEffectiveTreeGranularity(setting, entryCount = 0) {
+  let level = clampInt(setting, 0, 4);
+  const isAuto = level === 0;
+  if (level === 0) {
+    if (entryCount >= 3000)
+      level = 4;
+    else if (entryCount >= 1000)
+      level = 3;
+    else if (entryCount >= 200)
+      level = 2;
+    else
+      level = 1;
+  }
+  const preset = TREE_GRANULARITY_PRESETS[level];
+  return {
+    level,
+    isAuto,
+    ...preset
+  };
+}
+function getBuildDetailLabel(detail) {
+  switch (detail) {
+    case "full":
+      return "Full";
+    case "names":
+      return "Names only";
+    default:
+      return "Lite";
+  }
+}
+function getBuildDetailDescription(detail) {
+  switch (detail) {
+    case "full":
+      return "Send complete entry content and metadata for stronger categorization.";
+    case "names":
+      return "Send labels only. Cheapest, but the model can only group by names.";
+    default:
+      return "Send a trimmed content preview plus metadata. Good balance of quality and cost.";
+  }
 }
 function normalizeCharacterConfig(value) {
   const next = value ?? {};
@@ -1420,6 +1466,13 @@ var LORE_RECALL_CSS = `
 
 // src/ui/app.ts
 var TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v0"/><path d="M7 18h6a4 4 0 0 0 4-4v0"/></svg>`;
+var TREE_GRANULARITY_OPTIONS = [
+  [0, "Auto"],
+  [1, "Minimal"],
+  [2, "Moderate"],
+  [3, "Detailed"],
+  [4, "Extensive"]
+];
 function sendToBackend(ctx, message) {
   try {
     ctx.sendToBackend(message);
@@ -1944,12 +1997,16 @@ function setup(ctx) {
     wrap.append(createElement("span", "lore-label", label), control);
     return wrap;
   }
+  function createFieldNote(text) {
+    return createElement("div", "lore-hint", text);
+  }
   function createSelect(value, options, onChange) {
     const select = createElement("select", "lore-select");
+    const usesNumber = typeof value === "number";
     for (const [v, label] of options)
-      select.appendChild(new Option(label, v));
-    select.value = value;
-    select.addEventListener("change", () => onChange(select.value));
+      select.appendChild(new Option(label, String(v)));
+    select.value = String(value);
+    select.addEventListener("change", () => onChange(usesNumber ? Number(select.value) : select.value));
     return select;
   }
   function createNumberInput(value, onChange) {
@@ -2620,6 +2677,7 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."));
     const managedBookIds = getManagedBookIds();
+    const effectiveGranularity = getEffectiveTreeGranularity(state.globalSettings.treeGranularity, managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0));
     const hasManaged = managedBookIds.length > 0;
     const metadataMessage = {
       type: "build_tree_from_metadata",
@@ -2646,6 +2704,7 @@ function setup(ctx) {
     }
     actions.append(metaBtn, llmBtn, createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()));
     section.appendChild(actions);
+    section.appendChild(createFieldNote(`Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`));
     if (!hasManaged) {
       section.appendChild(createElement("div", "lore-hint", "Manage at least one lorebook before building a tree."));
     }
@@ -2862,19 +2921,31 @@ function setup(ctx) {
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
       ["controllerMaxTokens", "Controller max tokens"],
-      ["treeGranularity", "Tree granularity"],
-      ["chunkTokens", "Chunk tokens"]
+      ["chunkTokens", "LLM chunk size"]
     ]) {
       form.appendChild(createField(label, createNumberInput(globalDraft[key] ?? 0, (next) => {
         globalDraft[key] = next;
       })));
     }
     form.appendChild(createField("Build detail", createSelect(globalDraft.buildDetail, [
-      ["lite", "Lite"],
-      ["full", "Full"]
+      ["lite", "Lite - preview + metadata"],
+      ["full", "Full - full content + metadata"],
+      ["names", "Names only - labels only"]
     ], (next) => {
       globalDraft.buildDetail = next;
     })));
+    form.appendChild(createFieldNote(getBuildDetailDescription(globalDraft.buildDetail)));
+    const granularityPreview = getEffectiveTreeGranularity(globalDraft.treeGranularity, getManagedBookIds().reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0));
+    form.appendChild(createField("Tree granularity", createSelect(globalDraft.treeGranularity, TREE_GRANULARITY_OPTIONS.map(([value, label]) => {
+      if (value === 0)
+        return [value, "Auto - scale with lorebook size"];
+      const preset = getEffectiveTreeGranularity(value, 0);
+      return [value, `${preset.label} - ${preset.targetCategories} categories, ~${preset.maxEntries} entries/leaf`];
+    }), (next) => {
+      globalDraft.treeGranularity = next;
+    })));
+    form.appendChild(createFieldNote(`${granularityPreview.label}${granularityPreview.isAuto ? " (auto)" : ""}: ${granularityPreview.description} Aim for ${granularityPreview.targetCategories} top-level categories and about ${granularityPreview.maxEntries} entries per leaf before deeper branching.`));
+    form.appendChild(createFieldNote(`Chunk tokens control how much Lore Recall sends per categorization call. Larger chunks mean fewer calls, smaller chunks are safer for weaker models.`));
     form.appendChild(createField("Dedup mode", createSelect(globalDraft.dedupMode, [
       ["none", "None"],
       ["lexical", "Lexical"],

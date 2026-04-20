@@ -9,6 +9,9 @@ import {
   deleteCategoryNode,
   ensureCategoryPath,
   ensureTreeIndexShape,
+  getBuildDetailDescription,
+  getBuildDetailLabel,
+  getEffectiveTreeGranularity,
   makeNodeId,
   moveCategoryNode,
   normalizeEntryRecallMeta,
@@ -109,6 +112,37 @@ interface ControllerJsonOptions {
   systemPrompt?: string;
   maxTokensOverride?: number;
   disableReasoning?: boolean;
+}
+
+function buildAssignmentEntryPayload(entry: IndexedEntry, detail: GlobalLoreRecallSettings["buildDetail"]): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    entryId: entry.entryId,
+    comment: entry.comment,
+  };
+
+  if (detail === "names") {
+    return base;
+  }
+
+  const expanded = {
+    ...base,
+    keys: [...entry.key, ...entry.keysecondary],
+    groupName: entry.groupName,
+    constant: entry.constant,
+    selective: entry.selective,
+  };
+
+  if (detail === "full") {
+    return {
+      ...expanded,
+      content: entry.content,
+    };
+  }
+
+  return {
+    ...expanded,
+    preview: truncateText(entry.content, 260),
+  };
 }
 
 class ControllerJsonError extends Error {
@@ -780,14 +814,18 @@ export async function buildTreeFromMetadata(
   };
 }
 
-function chunkEntries<T extends { content: string; previewText: string }>(items: T[], chunkTokens: number): T[][] {
+function chunkEntries<T extends { content: string; previewText: string }>(
+  items: T[],
+  chunkTokens: number,
+  measure?: (item: T) => number,
+): T[][] {
   const maxChars = Math.max(2000, chunkTokens * 4);
   const maxItems = 12;
   const chunks: T[][] = [];
   let current: T[] = [];
   let currentChars = 0;
   for (const item of items) {
-    const size = Math.max(item.content.length, item.previewText.length);
+    const size = Math.max(1, measure ? measure(item) : Math.max(item.content.length, item.previewText.length));
     if (current.length && (currentChars + size > maxChars || current.length >= maxItems)) {
       chunks.push(current);
       current = [];
@@ -883,7 +921,12 @@ export async function buildTreeWithLlm(
         bookId,
         bookName,
         cache,
-        chunkCount: Math.max(1, chunkEntries(cache.entries, settings.chunkTokens).length),
+        chunkCount: Math.max(
+          1,
+          chunkEntries(cache.entries, settings.chunkTokens, (entry) =>
+            JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length,
+          ).length,
+        ),
         entrySummaryBatchCount: Math.max(1, Math.ceil(cache.entries.length / 8)),
         originalIndex: index,
       });
@@ -910,7 +953,10 @@ export async function buildTreeWithLlm(
     try {
       const tree = createEmptyTreeIndex(bookId);
       const updates: Array<{ entryId: string; summary?: string; collapsedText?: string }> = [];
-      const chunks = chunkEntries(cache.entries, settings.chunkTokens);
+      const chunks = chunkEntries(cache.entries, settings.chunkTokens, (entry) =>
+        JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length,
+      );
+      const granularity = getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length);
       const entrySummaryBatchSize = 8;
       const entrySummaryBatches = Array.from(
         { length: Math.ceil(cache.entries.length / entrySummaryBatchSize) },
@@ -933,22 +979,12 @@ export async function buildTreeWithLlm(
         const prompt = [
           "Organize these lore entries into a compact retrieval tree.",
           'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
-          `Build detail: ${settings.buildDetail}.`,
-          `Tree granularity: ${settings.treeGranularity}.`,
+          `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
+          `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. Aim for ${granularity.targetCategories} top-level categories and no more than ${granularity.maxEntries} entries per leaf category.`,
           "Use empty path [] when an entry should stay unassigned.",
           "",
           "Entries:",
-          ...chunk.map((entry) =>
-            JSON.stringify({
-              entryId: entry.entryId,
-              comment: entry.comment,
-              keys: [...entry.key, ...entry.keysecondary],
-              groupName: entry.groupName,
-              constant: entry.constant,
-              selective: entry.selective,
-              preview: truncateText(entry.content, 260),
-            }),
-          ),
+          ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail))),
         ].join("\n");
 
         const controllerResult = await runControllerJson(

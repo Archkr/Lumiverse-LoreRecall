@@ -1,5 +1,14 @@
 import type { SpindleFrontendContext } from "lumiverse-spindle-types";
-import { joinCommaList, normalizeBookConfig, normalizeCharacterConfig, normalizeGlobalSettings, splitCommaList } from "../shared";
+import {
+  getBuildDetailDescription,
+  getBuildDetailLabel,
+  getEffectiveTreeGranularity,
+  joinCommaList,
+  normalizeBookConfig,
+  normalizeCharacterConfig,
+  normalizeGlobalSettings,
+  splitCommaList,
+} from "../shared";
 import type {
   BackendToFrontend,
   BookPermission,
@@ -53,6 +62,14 @@ interface UiNotice {
   message: string;
   retryOperationId?: string | null;
 }
+
+const TREE_GRANULARITY_OPTIONS = [
+  [0, "Auto"],
+  [1, "Minimal"],
+  [2, "Moderate"],
+  [3, "Detailed"],
+  [4, "Extensive"],
+] as const;
 
 function sendToBackend(ctx: SpindleFrontendContext, message: FrontendToBackend): boolean {
   try {
@@ -620,11 +637,16 @@ export function setup(ctx: SpindleFrontendContext) {
     return wrap;
   }
 
-  function createSelect<T extends string>(value: T, options: Array<[T, string]>, onChange: (next: T) => void): HTMLSelectElement {
+  function createFieldNote(text: string): HTMLElement {
+    return createElement("div", "lore-hint", text);
+  }
+
+  function createSelect<T extends string | number>(value: T, options: Array<[T, string]>, onChange: (next: T) => void): HTMLSelectElement {
     const select = createElement("select", "lore-select") as HTMLSelectElement;
-    for (const [v, label] of options) select.appendChild(new Option(label, v));
-    select.value = value;
-    select.addEventListener("change", () => onChange(select.value as T));
+    const usesNumber = typeof value === "number";
+    for (const [v, label] of options) select.appendChild(new Option(label, String(v)));
+    select.value = String(value);
+    select.addEventListener("change", () => onChange((usesNumber ? Number(select.value) : select.value) as T));
     return select;
   }
 
@@ -1503,6 +1525,10 @@ export function setup(ctx: SpindleFrontendContext) {
       createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."),
     );
     const managedBookIds = getManagedBookIds();
+    const effectiveGranularity = getEffectiveTreeGranularity(
+      state.globalSettings.treeGranularity,
+      managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0),
+    );
     const hasManaged = managedBookIds.length > 0;
     const metadataMessage: TrackedFrontendMessage = {
       type: "build_tree_from_metadata",
@@ -1543,6 +1569,11 @@ export function setup(ctx: SpindleFrontendContext) {
       createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()),
     );
     section.appendChild(actions);
+    section.appendChild(
+      createFieldNote(
+        `Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`,
+      ),
+    );
 
     if (!hasManaged) {
       section.appendChild(createElement("div", "lore-hint", "Manage at least one lorebook before building a tree."));
@@ -1895,8 +1926,7 @@ export function setup(ctx: SpindleFrontendContext) {
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
       ["controllerMaxTokens", "Controller max tokens"],
-      ["treeGranularity", "Tree granularity"],
-      ["chunkTokens", "Chunk tokens"],
+      ["chunkTokens", "LLM chunk size"],
     ] as const) {
       form.appendChild(
         createField(
@@ -1913,13 +1943,42 @@ export function setup(ctx: SpindleFrontendContext) {
         createSelect(
           globalDraft.buildDetail,
           [
-            ["lite", "Lite"],
-            ["full", "Full"],
+            ["lite", "Lite - preview + metadata"],
+            ["full", "Full - full content + metadata"],
+            ["names", "Names only - labels only"],
           ],
           (next) => {
             globalDraft!.buildDetail = next;
           },
         ),
+      ),
+    );
+    form.appendChild(createFieldNote(getBuildDetailDescription(globalDraft.buildDetail)));
+    const granularityPreview = getEffectiveTreeGranularity(globalDraft.treeGranularity, getManagedBookIds().reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0));
+    form.appendChild(
+      createField(
+        "Tree granularity",
+        createSelect(
+          globalDraft.treeGranularity,
+          TREE_GRANULARITY_OPTIONS.map(([value, label]) => {
+            if (value === 0) return [value, "Auto - scale with lorebook size"] as const;
+            const preset = getEffectiveTreeGranularity(value, 0);
+            return [value, `${preset.label} - ${preset.targetCategories} categories, ~${preset.maxEntries} entries/leaf`] as const;
+          }),
+          (next) => {
+            globalDraft!.treeGranularity = next;
+          },
+        ),
+      ),
+    );
+    form.appendChild(
+      createFieldNote(
+        `${granularityPreview.label}${granularityPreview.isAuto ? " (auto)" : ""}: ${granularityPreview.description} Aim for ${granularityPreview.targetCategories} top-level categories and about ${granularityPreview.maxEntries} entries per leaf before deeper branching.`,
+      ),
+    );
+    form.appendChild(
+      createFieldNote(
+        `Chunk tokens control how much Lore Recall sends per categorization call. Larger chunks mean fewer calls, smaller chunks are safer for weaker models.`,
       ),
     );
     form.appendChild(
