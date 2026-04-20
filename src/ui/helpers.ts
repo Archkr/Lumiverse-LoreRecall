@@ -1,6 +1,6 @@
 import type { BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
 
-export type DrawerPreviewTab = "injected" | "nodes" | "query";
+export type DrawerPreviewTab = "searches" | "pulled" | "injected";
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }

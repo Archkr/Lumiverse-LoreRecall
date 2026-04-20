@@ -22,7 +22,7 @@ var DEFAULT_CHARACTER_CONFIG = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
-  tokenBudget: 900,
+  tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
   multiBookMode: "unified",
@@ -156,6 +156,8 @@ function getBuildDetailDescription(detail) {
 function normalizeCharacterConfig(value) {
   const next = value ?? {};
   const searchMode = next.searchMode === "traversal" || next.defaultMode === "traversal" ? "traversal" : "collapsed";
+  const legacyBudget = typeof next.tokenBudget === "number" && Number.isFinite(next.tokenBudget) ? Math.floor(next.tokenBudget) : null;
+  const injectedEntryLimit = legacyBudget == null ? DEFAULT_CHARACTER_CONFIG.tokenBudget : legacyBudget > 64 ? typeof next.maxResults === "number" && Number.isFinite(next.maxResults) ? Math.floor(next.maxResults) : DEFAULT_CHARACTER_CONFIG.tokenBudget : legacyBudget;
   return {
     enabled: !!next.enabled,
     managedBookIds: uniqueStrings(Array.isArray(next.managedBookIds) ? next.managedBookIds : []),
@@ -164,7 +166,7 @@ function normalizeCharacterConfig(value) {
     maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 16),
     maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 8),
     traversalStepLimit: clampInt(typeof next.traversalStepLimit === "number" ? next.traversalStepLimit : DEFAULT_CHARACTER_CONFIG.traversalStepLimit, 1, 12),
-    tokenBudget: clampInt(typeof next.tokenBudget === "number" ? next.tokenBudget : DEFAULT_CHARACTER_CONFIG.tokenBudget, 200, 8000),
+    tokenBudget: clampInt(injectedEntryLimit, 1, 32),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
     multiBookMode: next.multiBookMode === "per_book" ? "per_book" : "unified",
@@ -1438,16 +1440,16 @@ function buildPreviewNodes(selected, booksById) {
     };
   });
 }
-function buildInjectionText(selected, booksById, tokenBudget, collapsedDepth) {
+function buildInjectionText(selected, booksById, injectedEntryLimit, collapsedDepth) {
   if (!selected.length)
     return null;
-  const maxChars = clampInt(tokenBudget, 200, 8000) * 4;
+  const maxEntries = clampInt(injectedEntryLimit, 1, 32);
   const parts = [
     "[Lore Recall Retrieved Context]",
     "Use this retrieved reference only if it is relevant to the current reply. Do not mention Lore Recall or describe this block explicitly."
   ];
   const included = [];
-  for (const item of selected) {
+  for (const item of selected.slice(0, maxEntries)) {
     const book = booksById.get(item.entry.worldBookId);
     const path = book ? getEntryCategoryPath(book.tree, item.entry.entryId).slice(-collapsedDepth) : [];
     const pathLabels = path.map((node) => node.label);
@@ -1461,26 +1463,8 @@ function buildInjectionText(selected, booksById, tokenBudget, collapsedDepth) {
       getEntryBody(item.entry)
     ].filter(Boolean).join(`
 `);
-    const nextText = [...parts, section].join(`
-`);
-    if (nextText.length <= maxChars) {
-      parts.push(section);
-      included.push(item);
-      continue;
-    }
-    if (!included.length) {
-      const remaining = Math.max(180, maxChars - parts.join(`
-`).length - 20);
-      parts.push([
-        "",
-        `1. ${[...pathLabels, item.entry.label].join(" > ")}`,
-        `Book: ${item.entry.worldBookName}`,
-        truncateText(getEntryBody(item.entry), remaining)
-      ].join(`
-`));
-      included.push(item);
-    }
-    break;
+    parts.push(section);
+    included.push(item);
   }
   const text = parts.join(`
 `).trim();
@@ -1536,12 +1520,16 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
   const included = injection?.included ?? selected;
+  const pulledNodes = buildPreviewNodes(selected, booksById);
+  const injectedNodes = buildPreviewNodes(included, booksById);
   return {
     mode: config.searchMode,
     queryText,
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
-    selectedNodes: buildPreviewNodes(included, booksById),
+    pulledNodes,
+    injectedNodes,
+    selectedNodes: injectedNodes,
     fallbackReason,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
     steps,

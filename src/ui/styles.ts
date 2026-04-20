@@ -1,6 +1,6 @@
 export const LORE_RECALL_CSS = `
 /* ===========================================================
-   Lore Recall — visual system
+   Lore Recall - visual system
    Flat, quiet, typography-first. Accent appears only on
    active elements (primary button, active tab, focus ring,
    selected row indicator). No decorative gradients.
@@ -719,58 +719,148 @@ export const LORE_RECALL_CSS = `
   transition: width 160ms ease;
 }
 
-/* preview nodes */
-.lore-node {
-  padding: 10px 12px;
-  border: 1px solid var(--lr-line);
-  border-radius: var(--lr-r);
-  background: var(--lr-bg-0);
+/* retrieval activity */
+.lore-last-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lore-last-panel {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.lore-node-title {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--lr-text);
-}
-
-.lore-node-meta {
+.lore-last-panel-title {
   font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--lr-dim);
 }
 
-.lore-node-body {
-  font-size: 12px;
-  color: var(--lr-muted);
-  line-height: 1.5;
-}
-
-.lore-trace-list {
+.lore-search-log,
+.lore-retrieval-cards {
   display: grid;
   gap: 8px;
-  margin-top: 10px;
 }
 
-.lore-trace-item {
-  padding: 10px 12px;
+.lore-search-query,
+.lore-search-step,
+.lore-retrieval-card {
+  padding: 11px 12px;
   border: 1px solid var(--lr-line);
   border-radius: var(--lr-r);
   background: var(--lr-bg-0);
 }
 
-.lore-trace-step {
-  font-size: 12px;
+.lore-search-kicker {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--lr-dim);
+}
+
+.lore-search-query-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lr-text);
+  white-space: pre-wrap;
+}
+
+.lore-search-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.lore-search-step-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.lore-search-step-index {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-acc) 14%, transparent);
+  color: var(--lr-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.lore-search-step-title,
+.lore-retrieval-card-title {
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--lr-text);
 }
 
-.lore-trace-body {
+.lore-search-step-body,
+.lore-retrieval-card-body {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--lr-muted);
+}
+
+.lore-search-step-count {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-retrieval-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lore-retrieval-card.injected {
+  border-color: color-mix(in srgb, var(--lr-good) 32%, var(--lr-line));
+}
+
+.lore-retrieval-card.pulled {
+  border-color: color-mix(in srgb, var(--lr-acc) 28%, var(--lr-line));
+}
+
+.lore-retrieval-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.lore-retrieval-card-index {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-text) 8%, transparent);
+  color: var(--lr-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.lore-retrieval-card-meta {
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-retrieval-card-reasons {
+  gap: 6px;
+  margin-top: 2px;
 }
 
 /* ---------- Forms ---------------------------------------- */
@@ -1183,6 +1273,7 @@ export const LORE_RECALL_CSS = `
   }
   .lore-columns { grid-template-columns: 1fr; }
   .lore-modal-body { grid-template-columns: 1fr; }
+  .lore-last-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {

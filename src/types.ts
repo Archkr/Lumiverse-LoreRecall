@@ -155,6 +155,8 @@ export interface RetrievalPreview {
   queryText: string;
   estimatedTokens: number;
   injectedText: string;
+  pulledNodes: PreviewNode[];
+  injectedNodes: PreviewNode[];
   selectedNodes: PreviewNode[];
   fallbackReason: string | null;
   selectedBookIds: string[];

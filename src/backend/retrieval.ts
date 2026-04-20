@@ -891,19 +891,19 @@ function buildPreviewNodes(selected: ScoredEntry[], booksById: Map<string, Runti
 function buildInjectionText(
   selected: ScoredEntry[],
   booksById: Map<string, RuntimeBook>,
-  tokenBudget: number,
+  injectedEntryLimit: number,
   collapsedDepth: number,
 ): { text: string; included: ScoredEntry[]; estimatedTokens: number } | null {
   if (!selected.length) return null;
 
-  const maxChars = clampInt(tokenBudget, 200, 8000) * 4;
+  const maxEntries = clampInt(injectedEntryLimit, 1, 32);
   const parts: string[] = [
     "[Lore Recall Retrieved Context]",
     "Use this retrieved reference only if it is relevant to the current reply. Do not mention Lore Recall or describe this block explicitly.",
   ];
   const included: ScoredEntry[] = [];
 
-  for (const item of selected) {
+  for (const item of selected.slice(0, maxEntries)) {
     const book = booksById.get(item.entry.worldBookId);
     const path = book ? getEntryCategoryPath(book.tree, item.entry.entryId).slice(-collapsedDepth) : [];
     const pathLabels = path.map((node) => node.label);
@@ -922,27 +922,8 @@ function buildInjectionText(
     ]
       .filter(Boolean)
       .join("\n");
-
-    const nextText = [...parts, section].join("\n");
-    if (nextText.length <= maxChars) {
-      parts.push(section);
-      included.push(item);
-      continue;
-    }
-
-    if (!included.length) {
-      const remaining = Math.max(180, maxChars - parts.join("\n").length - 20);
-      parts.push(
-        [
-          "",
-          `1. ${[...pathLabels, item.entry.label].join(" > ")}`,
-          `Book: ${item.entry.worldBookName}`,
-          truncateText(getEntryBody(item.entry), remaining),
-        ].join("\n"),
-      );
-      included.push(item);
-    }
-    break;
+    parts.push(section);
+    included.push(item);
   }
 
   const text = parts.join("\n").trim();
@@ -1016,13 +997,17 @@ export async function buildRetrievalPreview(
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
   const included = injection?.included ?? selected;
+  const pulledNodes = buildPreviewNodes(selected, booksById);
+  const injectedNodes = buildPreviewNodes(included, booksById);
 
   return {
     mode: config.searchMode,
     queryText,
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
-    selectedNodes: buildPreviewNodes(included, booksById),
+    pulledNodes,
+    injectedNodes,
+    selectedNodes: injectedNodes,
     fallbackReason,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
     steps,

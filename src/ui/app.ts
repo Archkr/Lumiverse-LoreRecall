@@ -21,6 +21,7 @@ import type {
   ManagedBookEntryView,
   OperationKind,
   OperationUpdate,
+  PreviewNode,
 } from "../types";
 import {
   DrawerPreviewTab,
@@ -104,7 +105,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let currentState: FrontendState | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
-  let drawerTabMode: DrawerPreviewTab = "injected";
+  let drawerTabMode: DrawerPreviewTab = "searches";
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection: WorkspaceSection = "sources";
@@ -780,15 +781,15 @@ export function setup(ctx: SpindleFrontendContext) {
     const meta = createElement("div", "lore-operation-meta");
     if (operation.bookName) meta.appendChild(createElement("span", "", operation.bookName));
     if (typeof operation.current === "number" && typeof operation.total === "number") {
-      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "·"));
+      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", `${operation.current}/${operation.total}`));
     }
     if (typeof operation.chunkCurrent === "number" && typeof operation.chunkTotal === "number") {
-      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "·"));
+      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", `chunk ${operation.chunkCurrent}/${operation.chunkTotal}`));
     }
     if (operation.phase) {
-      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "·"));
+      if (meta.childElementCount) meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", operation.phase.replace(/_/g, " ")));
     }
     if (meta.childElementCount) wrap.appendChild(meta);
@@ -830,20 +831,99 @@ export function setup(ctx: SpindleFrontendContext) {
     });
   }
 
-  function renderRetrievalTrace(): HTMLElement | null {
-    const preview = currentState?.preview;
-    if (!preview?.trace?.length) return null;
+  function getPreviewPulledNodes(preview: FrontendState["preview"]): PreviewNode[] {
+    if (!preview) return [];
+    return preview.pulledNodes?.length ? preview.pulledNodes : preview.selectedNodes;
+  }
 
-    const trace = createElement("div", "lore-trace-list");
-    for (const step of preview.trace) {
-      const item = createElement("div", "lore-trace-item");
-      item.append(
-        createElement("div", "lore-trace-step", `${step.step}. ${step.label}`),
-        createElement("div", "lore-trace-body", step.summary),
+  function getPreviewInjectedNodes(preview: FrontendState["preview"]): PreviewNode[] {
+    if (!preview) return [];
+    if (preview.injectedNodes?.length) return preview.injectedNodes;
+    if (preview.injectedText?.trim()) return preview.selectedNodes;
+    return [];
+  }
+
+  function renderSearchActivity(preview: FrontendState["preview"]): HTMLElement | null {
+    if (!preview) return null;
+
+    const wrap = createElement("div", "lore-search-log");
+    const query = preview.queryText?.trim();
+    if (query) {
+      const queryCard = createElement("div", "lore-search-query");
+      queryCard.append(
+        createElement("div", "lore-search-kicker", "Search query"),
+        createElement("div", "lore-search-query-text", query),
       );
+      wrap.appendChild(queryCard);
+    }
+
+    if (!preview.trace?.length) {
+      wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
+      return wrap;
+    }
+
+    const trace = createElement("div", "lore-search-steps");
+    for (const step of preview.trace) {
+      const item = createElement("div", "lore-search-step");
+      const meta = createElement("div", "lore-search-step-meta");
+      meta.append(
+        createElement("span", "lore-search-step-index", String(step.step)),
+        createTag(step.phase.replace(/_/g, " "), step.phase === "fallback" ? "warn" : "accent"),
+      );
+      item.append(
+        meta,
+        createElement("div", "lore-search-step-title", step.label),
+        createElement("div", "lore-search-step-body", step.summary),
+      );
+      if (typeof step.entryCount === "number" && step.entryCount > 0) {
+        item.appendChild(createElement("div", "lore-search-step-count", `${step.entryCount} entry candidate(s)`));
+      }
       trace.appendChild(item);
     }
-    return trace;
+    wrap.appendChild(trace);
+    return wrap;
+  }
+
+  function createRetrievalEntryCard(
+    node: NonNullable<FrontendState["preview"]>["selectedNodes"][number],
+    index: number,
+    emphasis: "pulled" | "injected",
+  ): HTMLElement {
+    const item = createElement("div", `lore-retrieval-card ${emphasis}`);
+    const head = createElement("div", "lore-retrieval-card-head");
+    head.append(
+      createElement("div", "lore-retrieval-card-index", String(index + 1)),
+      createElement("div", "lore-retrieval-card-title", node.label),
+      createTag(emphasis === "injected" ? "Injected" : "Pulled", emphasis === "injected" ? "good" : "accent"),
+    );
+    const meta = createElement(
+      "div",
+      "lore-retrieval-card-meta",
+      [node.worldBookName, node.breadcrumb || "Root"].filter(Boolean).join(" | "),
+    );
+    const body = createElement("div", "lore-retrieval-card-body", clipText(node.previewText, emphasis === "injected" ? 260 : 200));
+    const reasonRow = createElement("div", "lore-cluster");
+    reasonRow.classList.add("lore-retrieval-card-reasons");
+    for (const reason of node.reasons.slice(0, 4)) {
+      reasonRow.appendChild(createTag(reason, "neutral"));
+    }
+    item.append(head, meta, body);
+    if (reasonRow.childElementCount) item.appendChild(reasonRow);
+    return item;
+  }
+
+  function renderRetrievalEntries(
+    nodes: NonNullable<FrontendState["preview"]>["selectedNodes"],
+    emphasis: "pulled" | "injected",
+    emptyTitle: string,
+    emptyBody: string,
+  ): HTMLElement {
+    if (!nodes.length) return createEmpty(emptyTitle, emptyBody);
+    const list = createElement("div", "lore-retrieval-cards");
+    for (const [index, node] of nodes.entries()) {
+      list.appendChild(createRetrievalEntryCard(node, index, emphasis));
+    }
+    return list;
   }
 
   function renderLastRetrievalWorkspaceSection(): HTMLElement | null {
@@ -865,25 +945,37 @@ export function setup(ctx: SpindleFrontendContext) {
       section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
     }
 
-    if (preview.selectedNodes.length) {
-      const list = createElement("div", "lore-stack");
-      list.style.gap = "8px";
-      for (const node of preview.selectedNodes.slice(0, 4)) {
-        const item = createElement("div", "lore-node");
-        item.append(
-          createElement("div", "lore-node-title", node.label),
-          createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`),
-          createElement("div", "lore-node-body", clipText(node.previewText, 220)),
-        );
-        list.appendChild(item);
-      }
-      section.appendChild(list);
-    } else {
-      section.appendChild(createEmpty("Nothing injected", "The most recent turn completed with no retrieved entries."));
-    }
+    const grid = createElement("div", "lore-last-grid");
+    const searches = createElement("div", "lore-last-panel");
+    searches.append(
+      createElement("div", "lore-last-panel-title", "Searches"),
+      renderSearchActivity(preview) ?? createEmpty("No search activity"),
+    );
 
-    const trace = renderRetrievalTrace();
-    if (trace) section.appendChild(trace);
+    const pulled = createElement("div", "lore-last-panel");
+    pulled.append(
+      createElement("div", "lore-last-panel-title", "Pulled"),
+      renderRetrievalEntries(
+        getPreviewPulledNodes(preview),
+        "pulled",
+        "Nothing pulled",
+        "No entries were pulled into the retrieval set for this turn.",
+      ),
+    );
+
+    const injected = createElement("div", "lore-last-panel");
+    injected.append(
+      createElement("div", "lore-last-panel-title", "Injected"),
+      renderRetrievalEntries(
+        getPreviewInjectedNodes(preview),
+        "injected",
+        "Nothing injected",
+        "The turn completed without injecting any retrieved entries.",
+      ),
+    );
+
+    grid.append(searches, pulled, injected);
+    section.appendChild(grid);
     return section;
   }
 
@@ -894,7 +986,7 @@ export function setup(ctx: SpindleFrontendContext) {
       return wrap;
     }
     segments.forEach((seg, i) => {
-      if (i > 0) wrap.appendChild(createElement("span", "sep", "›"));
+      if (i > 0) wrap.appendChild(createElement("span", "sep", ">"));
       wrap.appendChild(createElement("span", "", seg));
     });
     return wrap;
@@ -991,7 +1083,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const state = currentState;
     const managed = getManagedBookIds();
     const enabled = !!state?.characterConfig?.enabled;
-    const tokenBudget = state?.characterConfig?.tokenBudget ?? 0;
+    const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
     const mode = state?.characterConfig?.searchMode ?? "collapsed";
 
     // --- Page head (no card, just typography) -----------------------
@@ -1004,7 +1096,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const meta = createElement("div", "lore-page-meta");
     meta.appendChild(createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"));
     if (state?.activeChatId) {
-      meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", truncateMiddle(state.activeChatId)));
     }
     copy.appendChild(meta);
@@ -1032,7 +1124,7 @@ export function setup(ctx: SpindleFrontendContext) {
     metrics.append(
       metric(managed.length, managed.length === 1 ? "book" : "books"),
       metric(mode, "mode"),
-      metric(tokenBudget, "token budget"),
+      metric(injectLimit, "inject limit"),
     );
     shell.appendChild(metrics);
 
@@ -1048,9 +1140,9 @@ export function setup(ctx: SpindleFrontendContext) {
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
+      ["searches", "Searches"],
+      ["pulled", "Pulled"],
       ["injected", "Injected"],
-      ["nodes", "Nodes"],
-      ["query", "Query"],
     ] as const) {
       tabs.appendChild(
         createButton(label, `lore-tab${drawerTabMode === value ? " active" : ""}`, () => {
@@ -1081,32 +1173,30 @@ export function setup(ctx: SpindleFrontendContext) {
 
     if (!state?.preview) {
       // already rendered empty state above
-    } else if (drawerTabMode === "injected") {
-      const text = state.preview.injectedText?.trim() ? state.preview.injectedText : "";
-      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Nothing injected", "This turn ran with no retrieved entries."));
-    } else if (drawerTabMode === "query") {
-      const text = state.preview.queryText?.trim() ? state.preview.queryText : "";
-      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Empty query", "The retrieval query was blank for this turn."));
+    } else if (drawerTabMode === "searches") {
+      preview.appendChild(
+        renderSearchActivity(state.preview) ??
+          createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."),
+      );
+    } else if (drawerTabMode === "pulled") {
+      preview.appendChild(
+        renderRetrievalEntries(
+          getPreviewPulledNodes(state.preview),
+          "pulled",
+          "Nothing pulled",
+          "No entries were pulled into the retrieval set for this turn.",
+        ),
+      );
     } else {
-      if (!state.preview.selectedNodes.length) {
-        preview.appendChild(createEmpty("No nodes selected", "No candidate entries matched this turn."));
-      } else {
-        const list = createElement("div", "lore-stack");
-        list.style.gap = "8px";
-        for (const node of state.preview.selectedNodes) {
-          const item = createElement("div", "lore-node");
-          item.append(
-            createElement("div", "lore-node-title", node.label),
-            createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`),
-            createElement("div", "lore-node-body", clipText(node.previewText, 220)),
-          );
-          list.appendChild(item);
-        }
-        preview.appendChild(list);
-      }
+      preview.appendChild(
+        renderRetrievalEntries(
+          getPreviewInjectedNodes(state.preview),
+          "injected",
+          "Nothing injected",
+          "The turn completed without injecting any retrieved entries.",
+        ),
+      );
     }
-    const trace = renderRetrievalTrace();
-    if (trace) preview.appendChild(trace);
     shell.appendChild(preview);
 
     // --- Sources section --------------------------------------------
@@ -1115,7 +1205,7 @@ export function setup(ctx: SpindleFrontendContext) {
       createSectionHead(
         "Managed sources",
         managed.length
-          ? `${managed.length} book${managed.length === 1 ? "" : "s"} · retrieval drives only these`
+          ? `${managed.length} book${managed.length === 1 ? "" : "s"} | retrieval drives only these`
           : "No sources managed yet.",
       ),
     );
@@ -1141,7 +1231,7 @@ export function setup(ctx: SpindleFrontendContext) {
           createElement(
             "div",
             "lore-row-meta",
-            `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`,
+            `${status?.entryCount ?? 0} entries | ${status?.categoryCount ?? 0} categories | ${status?.unassignedCount ?? 0} unassigned`,
           ),
         );
         row.appendChild(body);
@@ -1187,7 +1277,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const sub = createElement("div", "lore-page-meta");
     if (state?.activeCharacterName) {
       sub.appendChild(createElement("span", "", state.activeCharacterName));
-      sub.appendChild(createElement("span", "sep", "·"));
+      sub.appendChild(createElement("span", "sep", "|"));
     }
     sub.appendChild(
       createElement(
@@ -1224,7 +1314,7 @@ export function setup(ctx: SpindleFrontendContext) {
     section.appendChild(head);
 
     const tools = createElement("div", "lore-cluster");
-    const filterInput = createTextInput(sourceFilter, "Filter lorebooks…", (v) => {
+    const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (v) => {
       sourceFilter = v;
       render();
     });
@@ -1651,7 +1741,7 @@ export function setup(ctx: SpindleFrontendContext) {
         createElement(
           "div",
           "lore-hint",
-          `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree — build one to enable retrieval.`,
+          `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree - build one to enable retrieval.`, 
         ),
       );
     }
@@ -1759,10 +1849,10 @@ export function setup(ctx: SpindleFrontendContext) {
 
     for (const [key, label] of [
       ["collapsedDepth", "Collapsed depth"],
-      ["maxResults", "Max results"],
+      ["maxResults", "Pull limit"],
       ["maxTraversalDepth", "Traversal depth"],
       ["traversalStepLimit", "Traversal step limit"],
-      ["tokenBudget", "Token budget"],
+      ["tokenBudget", "Inject limit"],
       ["contextMessages", "Context messages"],
     ] as const) {
       form.appendChild(
@@ -1774,6 +1864,12 @@ export function setup(ctx: SpindleFrontendContext) {
         ),
       );
     }
+
+    form.appendChild(
+      createFieldNote(
+        "Pull limit controls how many entries Lore Recall can keep in the retrieved set. Inject limit controls how many of those entries are actually injected into the prompt.",
+      ),
+    );
 
     // Switches row
     const switches = createElement("div", "lore-field-span");
@@ -1915,7 +2011,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const connectionSelect = createElement("select", "lore-select") as HTMLSelectElement;
     connectionSelect.appendChild(new Option("Use default connection", ""));
     for (const connection of state.availableConnections) {
-      connectionSelect.appendChild(new Option(`${connection.name} · ${connection.model}`, connection.id));
+      connectionSelect.appendChild(new Option(`${connection.name} | ${connection.model}`, connection.id));
     }
     connectionSelect.value = globalDraft.controllerConnectionId ?? "";
     connectionSelect.addEventListener("change", () => {
@@ -2019,7 +2115,7 @@ export function setup(ctx: SpindleFrontendContext) {
     shell.appendChild(renderWorkspaceHeader());
 
     if (!currentState) {
-      shell.appendChild(createEmpty("Loading", "Lore Recall is loading state…"));
+      shell.appendChild(createEmpty("Loading", "Lore Recall is loading state..."));
       return;
     }
 
@@ -2421,7 +2517,7 @@ export function setup(ctx: SpindleFrontendContext) {
     workspaceModal.root.replaceChildren();
     workspaceModal.setTitle(
       currentState?.activeCharacterName
-        ? `${currentState.activeCharacterName} · Tree workspace`
+        ? `${currentState.activeCharacterName} | Tree workspace`
         : "Lore Recall workspace",
     );
 
@@ -2429,7 +2525,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     // Toolbar
     const toolbar = createElement("div", "lore-modal-toolbar");
-    const search = createTextInput(workspaceSearch, "Filter categories and entries…", (v) => {
+    const search = createTextInput(workspaceSearch, "Filter categories and entries...", (v) => {
       workspaceSearch = v;
       renderWorkspaceModal();
     });
@@ -2458,7 +2554,7 @@ export function setup(ctx: SpindleFrontendContext) {
       shell.appendChild(context);
     }
 
-    // Empty state: no books managed → collapsed single-column layout
+    // Empty state: no books managed -> collapsed single-column layout
     if (!books.length) {
       const body = createElement("div", "lore-modal-body empty");
       const editor = createElement("div", "lore-modal-editor");

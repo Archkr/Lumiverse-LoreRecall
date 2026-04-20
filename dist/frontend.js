@@ -18,7 +18,7 @@ var DEFAULT_CHARACTER_CONFIG = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
-  tokenBudget: 900,
+  tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
   multiBookMode: "unified",
@@ -146,6 +146,8 @@ function getBuildDetailDescription(detail) {
 function normalizeCharacterConfig(value) {
   const next = value ?? {};
   const searchMode = next.searchMode === "traversal" || next.defaultMode === "traversal" ? "traversal" : "collapsed";
+  const legacyBudget = typeof next.tokenBudget === "number" && Number.isFinite(next.tokenBudget) ? Math.floor(next.tokenBudget) : null;
+  const injectedEntryLimit = legacyBudget == null ? DEFAULT_CHARACTER_CONFIG.tokenBudget : legacyBudget > 64 ? typeof next.maxResults === "number" && Number.isFinite(next.maxResults) ? Math.floor(next.maxResults) : DEFAULT_CHARACTER_CONFIG.tokenBudget : legacyBudget;
   return {
     enabled: !!next.enabled,
     managedBookIds: uniqueStrings(Array.isArray(next.managedBookIds) ? next.managedBookIds : []),
@@ -154,7 +156,7 @@ function normalizeCharacterConfig(value) {
     maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 16),
     maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 8),
     traversalStepLimit: clampInt(typeof next.traversalStepLimit === "number" ? next.traversalStepLimit : DEFAULT_CHARACTER_CONFIG.traversalStepLimit, 1, 12),
-    tokenBudget: clampInt(typeof next.tokenBudget === "number" ? next.tokenBudget : DEFAULT_CHARACTER_CONFIG.tokenBudget, 200, 8000),
+    tokenBudget: clampInt(injectedEntryLimit, 1, 32),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
     multiBookMode: next.multiBookMode === "per_book" ? "per_book" : "unified",
@@ -294,7 +296,7 @@ function filterTreeEntries(entries, filterText) {
 // src/ui/styles.ts
 var LORE_RECALL_CSS = `
 /* ===========================================================
-   Lore Recall — visual system
+   Lore Recall - visual system
    Flat, quiet, typography-first. Accent appears only on
    active elements (primary button, active tab, focus ring,
    selected row indicator). No decorative gradients.
@@ -1013,58 +1015,148 @@ var LORE_RECALL_CSS = `
   transition: width 160ms ease;
 }
 
-/* preview nodes */
-.lore-node {
-  padding: 10px 12px;
-  border: 1px solid var(--lr-line);
-  border-radius: var(--lr-r);
-  background: var(--lr-bg-0);
+/* retrieval activity */
+.lore-last-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lore-last-panel {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.lore-node-title {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--lr-text);
-}
-
-.lore-node-meta {
+.lore-last-panel-title {
   font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--lr-dim);
 }
 
-.lore-node-body {
-  font-size: 12px;
-  color: var(--lr-muted);
-  line-height: 1.5;
-}
-
-.lore-trace-list {
+.lore-search-log,
+.lore-retrieval-cards {
   display: grid;
   gap: 8px;
-  margin-top: 10px;
 }
 
-.lore-trace-item {
-  padding: 10px 12px;
+.lore-search-query,
+.lore-search-step,
+.lore-retrieval-card {
+  padding: 11px 12px;
   border: 1px solid var(--lr-line);
   border-radius: var(--lr-r);
   background: var(--lr-bg-0);
 }
 
-.lore-trace-step {
-  font-size: 12px;
+.lore-search-kicker {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--lr-dim);
+}
+
+.lore-search-query-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lr-text);
+  white-space: pre-wrap;
+}
+
+.lore-search-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.lore-search-step-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.lore-search-step-index {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-acc) 14%, transparent);
+  color: var(--lr-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.lore-search-step-title,
+.lore-retrieval-card-title {
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--lr-text);
 }
 
-.lore-trace-body {
+.lore-search-step-body,
+.lore-retrieval-card-body {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--lr-muted);
+}
+
+.lore-search-step-count {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-retrieval-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lore-retrieval-card.injected {
+  border-color: color-mix(in srgb, var(--lr-good) 32%, var(--lr-line));
+}
+
+.lore-retrieval-card.pulled {
+  border-color: color-mix(in srgb, var(--lr-acc) 28%, var(--lr-line));
+}
+
+.lore-retrieval-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.lore-retrieval-card-index {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-text) 8%, transparent);
+  color: var(--lr-text);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.lore-retrieval-card-meta {
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-retrieval-card-reasons {
+  gap: 6px;
+  margin-top: 2px;
 }
 
 /* ---------- Forms ---------------------------------------- */
@@ -1477,6 +1569,7 @@ var LORE_RECALL_CSS = `
   }
   .lore-columns { grid-template-columns: 1fr; }
   .lore-modal-body { grid-template-columns: 1fr; }
+  .lore-last-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
@@ -1529,7 +1622,7 @@ function setup(ctx) {
   let currentState = null;
   let refreshTimer = null;
   let pendingChatId = null;
-  let drawerTabMode = "injected";
+  let drawerTabMode = "searches";
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection = "sources";
@@ -2145,17 +2238,17 @@ function setup(ctx) {
       meta.appendChild(createElement("span", "", operation.bookName));
     if (typeof operation.current === "number" && typeof operation.total === "number") {
       if (meta.childElementCount)
-        meta.appendChild(createElement("span", "sep", "·"));
+        meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", `${operation.current}/${operation.total}`));
     }
     if (typeof operation.chunkCurrent === "number" && typeof operation.chunkTotal === "number") {
       if (meta.childElementCount)
-        meta.appendChild(createElement("span", "sep", "·"));
+        meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", `chunk ${operation.chunkCurrent}/${operation.chunkTotal}`));
     }
     if (operation.phase) {
       if (meta.childElementCount)
-        meta.appendChild(createElement("span", "sep", "·"));
+        meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", operation.phase.replace(/_/g, " ")));
     }
     if (meta.childElementCount)
@@ -2194,17 +2287,72 @@ function setup(ctx) {
       minute: "2-digit"
     });
   }
-  function renderRetrievalTrace() {
-    const preview = currentState?.preview;
-    if (!preview?.trace?.length)
+  function getPreviewPulledNodes(preview) {
+    if (!preview)
+      return [];
+    return preview.pulledNodes?.length ? preview.pulledNodes : preview.selectedNodes;
+  }
+  function getPreviewInjectedNodes(preview) {
+    if (!preview)
+      return [];
+    if (preview.injectedNodes?.length)
+      return preview.injectedNodes;
+    if (preview.injectedText?.trim())
+      return preview.selectedNodes;
+    return [];
+  }
+  function renderSearchActivity(preview) {
+    if (!preview)
       return null;
-    const trace = createElement("div", "lore-trace-list");
+    const wrap = createElement("div", "lore-search-log");
+    const query = preview.queryText?.trim();
+    if (query) {
+      const queryCard = createElement("div", "lore-search-query");
+      queryCard.append(createElement("div", "lore-search-kicker", "Search query"), createElement("div", "lore-search-query-text", query));
+      wrap.appendChild(queryCard);
+    }
+    if (!preview.trace?.length) {
+      wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
+      return wrap;
+    }
+    const trace = createElement("div", "lore-search-steps");
     for (const step of preview.trace) {
-      const item = createElement("div", "lore-trace-item");
-      item.append(createElement("div", "lore-trace-step", `${step.step}. ${step.label}`), createElement("div", "lore-trace-body", step.summary));
+      const item = createElement("div", "lore-search-step");
+      const meta = createElement("div", "lore-search-step-meta");
+      meta.append(createElement("span", "lore-search-step-index", String(step.step)), createTag(step.phase.replace(/_/g, " "), step.phase === "fallback" ? "warn" : "accent"));
+      item.append(meta, createElement("div", "lore-search-step-title", step.label), createElement("div", "lore-search-step-body", step.summary));
+      if (typeof step.entryCount === "number" && step.entryCount > 0) {
+        item.appendChild(createElement("div", "lore-search-step-count", `${step.entryCount} entry candidate(s)`));
+      }
       trace.appendChild(item);
     }
-    return trace;
+    wrap.appendChild(trace);
+    return wrap;
+  }
+  function createRetrievalEntryCard(node, index, emphasis) {
+    const item = createElement("div", `lore-retrieval-card ${emphasis}`);
+    const head = createElement("div", "lore-retrieval-card-head");
+    head.append(createElement("div", "lore-retrieval-card-index", String(index + 1)), createElement("div", "lore-retrieval-card-title", node.label), createTag(emphasis === "injected" ? "Injected" : "Pulled", emphasis === "injected" ? "good" : "accent"));
+    const meta = createElement("div", "lore-retrieval-card-meta", [node.worldBookName, node.breadcrumb || "Root"].filter(Boolean).join(" | "));
+    const body = createElement("div", "lore-retrieval-card-body", clipText(node.previewText, emphasis === "injected" ? 260 : 200));
+    const reasonRow = createElement("div", "lore-cluster");
+    reasonRow.classList.add("lore-retrieval-card-reasons");
+    for (const reason of node.reasons.slice(0, 4)) {
+      reasonRow.appendChild(createTag(reason, "neutral"));
+    }
+    item.append(head, meta, body);
+    if (reasonRow.childElementCount)
+      item.appendChild(reasonRow);
+    return item;
+  }
+  function renderRetrievalEntries(nodes, emphasis, emptyTitle, emptyBody) {
+    if (!nodes.length)
+      return createEmpty(emptyTitle, emptyBody);
+    const list = createElement("div", "lore-retrieval-cards");
+    for (const [index, node] of nodes.entries()) {
+      list.appendChild(createRetrievalEntryCard(node, index, emphasis));
+    }
+    return list;
   }
   function renderLastRetrievalWorkspaceSection() {
     const preview = currentState?.preview;
@@ -2218,21 +2366,15 @@ function setup(ctx) {
     if (preview.fallbackReason) {
       section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
     }
-    if (preview.selectedNodes.length) {
-      const list = createElement("div", "lore-stack");
-      list.style.gap = "8px";
-      for (const node of preview.selectedNodes.slice(0, 4)) {
-        const item = createElement("div", "lore-node");
-        item.append(createElement("div", "lore-node-title", node.label), createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`), createElement("div", "lore-node-body", clipText(node.previewText, 220)));
-        list.appendChild(item);
-      }
-      section.appendChild(list);
-    } else {
-      section.appendChild(createEmpty("Nothing injected", "The most recent turn completed with no retrieved entries."));
-    }
-    const trace = renderRetrievalTrace();
-    if (trace)
-      section.appendChild(trace);
+    const grid = createElement("div", "lore-last-grid");
+    const searches = createElement("div", "lore-last-panel");
+    searches.append(createElement("div", "lore-last-panel-title", "Searches"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
+    const pulled = createElement("div", "lore-last-panel");
+    pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
+    const injected = createElement("div", "lore-last-panel");
+    injected.append(createElement("div", "lore-last-panel-title", "Injected"), renderRetrievalEntries(getPreviewInjectedNodes(preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
+    grid.append(searches, pulled, injected);
+    section.appendChild(grid);
     return section;
   }
   function createBreadcrumb(segments) {
@@ -2243,7 +2385,7 @@ function setup(ctx) {
     }
     segments.forEach((seg, i) => {
       if (i > 0)
-        wrap.appendChild(createElement("span", "sep", "›"));
+        wrap.appendChild(createElement("span", "sep", ">"));
       wrap.appendChild(createElement("span", "", seg));
     });
     return wrap;
@@ -2317,7 +2459,7 @@ function setup(ctx) {
     const state = currentState;
     const managed = getManagedBookIds();
     const enabled = !!state?.characterConfig?.enabled;
-    const tokenBudget = state?.characterConfig?.tokenBudget ?? 0;
+    const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
     const mode = state?.characterConfig?.searchMode ?? "collapsed";
     const head = createElement("div", "lore-page-head");
     const copy = createElement("div", "lore-stack");
@@ -2327,7 +2469,7 @@ function setup(ctx) {
     const meta = createElement("div", "lore-page-meta");
     meta.appendChild(createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"));
     if (state?.activeChatId) {
-      meta.appendChild(createElement("span", "sep", "·"));
+      meta.appendChild(createElement("span", "sep", "|"));
       meta.appendChild(createElement("span", "", truncateMiddle(state.activeChatId)));
     }
     copy.appendChild(meta);
@@ -2342,7 +2484,7 @@ function setup(ctx) {
       m.append(createElement("div", "lore-metric-value", String(value)), createElement("div", "lore-metric-label", label));
       return m;
     };
-    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(mode, "mode"), metric(tokenBudget, "token budget"));
+    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(mode, "mode"), metric(injectLimit, "inject limit"));
     shell.appendChild(metrics);
     const activeOperation = getActiveOperation();
     if (activeOperation) {
@@ -2354,9 +2496,9 @@ function setup(ctx) {
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
-      ["injected", "Injected"],
-      ["nodes", "Nodes"],
-      ["query", "Query"]
+      ["searches", "Searches"],
+      ["pulled", "Pulled"],
+      ["injected", "Injected"]
     ]) {
       tabs.appendChild(createButton(label, `lore-tab${drawerTabMode === value ? " active" : ""}`, () => {
         drawerTabMode = value;
@@ -2377,32 +2519,16 @@ function setup(ctx) {
         preview.appendChild(createBanner("warn", "Fallback used", state.preview.fallbackReason));
       }
     }
-    if (!state?.preview) {} else if (drawerTabMode === "injected") {
-      const text = state.preview.injectedText?.trim() ? state.preview.injectedText : "";
-      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Nothing injected", "This turn ran with no retrieved entries."));
-    } else if (drawerTabMode === "query") {
-      const text = state.preview.queryText?.trim() ? state.preview.queryText : "";
-      preview.appendChild(text ? createElement("pre", "lore-pre", text) : createEmpty("Empty query", "The retrieval query was blank for this turn."));
+    if (!state?.preview) {} else if (drawerTabMode === "searches") {
+      preview.appendChild(renderSearchActivity(state.preview) ?? createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
+    } else if (drawerTabMode === "pulled") {
+      preview.appendChild(renderRetrievalEntries(getPreviewPulledNodes(state.preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
     } else {
-      if (!state.preview.selectedNodes.length) {
-        preview.appendChild(createEmpty("No nodes selected", "No candidate entries matched this turn."));
-      } else {
-        const list = createElement("div", "lore-stack");
-        list.style.gap = "8px";
-        for (const node of state.preview.selectedNodes) {
-          const item = createElement("div", "lore-node");
-          item.append(createElement("div", "lore-node-title", node.label), createElement("div", "lore-node-meta", `${node.worldBookName} · ${node.breadcrumb || "—"}`), createElement("div", "lore-node-body", clipText(node.previewText, 220)));
-          list.appendChild(item);
-        }
-        preview.appendChild(list);
-      }
+      preview.appendChild(renderRetrievalEntries(getPreviewInjectedNodes(state.preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
     }
-    const trace = renderRetrievalTrace();
-    if (trace)
-      preview.appendChild(trace);
     shell.appendChild(preview);
     const sources = createElement("section", "lore-section");
-    sources.appendChild(createSectionHead("Managed sources", managed.length ? `${managed.length} book${managed.length === 1 ? "" : "s"} · retrieval drives only these` : "No sources managed yet."));
+    sources.appendChild(createSectionHead("Managed sources", managed.length ? `${managed.length} book${managed.length === 1 ? "" : "s"} | retrieval drives only these` : "No sources managed yet."));
     if (!managed.length) {
       sources.appendChild(createEmpty("No managed books", "Open the workspace to pick lorebooks this character should pull from.", createButton("Open workspace", "lore-btn lore-btn-sm", () => openWorkspace())));
     } else {
@@ -2412,7 +2538,7 @@ function setup(ctx) {
         const status = state?.bookStatuses[bookId];
         const row = createElement("div", "lore-row");
         const body = createElement("div", "lore-row-body");
-        body.append(createElement("div", "lore-row-title", book?.name || bookId), createElement("div", "lore-row-meta", `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`));
+        body.append(createElement("div", "lore-row-title", book?.name || bookId), createElement("div", "lore-row-meta", `${status?.entryCount ?? 0} entries | ${status?.categoryCount ?? 0} categories | ${status?.unassignedCount ?? 0} unassigned`));
         row.appendChild(body);
         const rowTags = createElement("div", "lore-row-tags");
         if (status?.treeMissing)
@@ -2448,7 +2574,7 @@ function setup(ctx) {
     const sub = createElement("div", "lore-page-meta");
     if (state?.activeCharacterName) {
       sub.appendChild(createElement("span", "", state.activeCharacterName));
-      sub.appendChild(createElement("span", "sep", "·"));
+      sub.appendChild(createElement("span", "sep", "|"));
     }
     sub.appendChild(createElement("span", "", state?.activeChatId ? "Retrieval setup, build, and maintenance." : "Open a character chat to configure retrieval."));
     copy.appendChild(sub);
@@ -2470,7 +2596,7 @@ function setup(ctx) {
     const head = createSectionHead("Lorebooks", "Managed books drive retrieval. Natively-attached books only generate warnings.");
     section.appendChild(head);
     const tools = createElement("div", "lore-cluster");
-    const filterInput = createTextInput(sourceFilter, "Filter lorebooks…", (v) => {
+    const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (v) => {
       sourceFilter = v;
       render();
     });
@@ -2782,7 +2908,7 @@ function setup(ctx) {
     metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(totals.categories, "categories"), metric(totals.entries, "entries"), metric(totals.unassigned, "unassigned"));
     section.appendChild(metrics);
     if (totals.missingTrees) {
-      section.appendChild(createElement("div", "lore-hint", `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree — build one to enable retrieval.`));
+      section.appendChild(createElement("div", "lore-hint", `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree - build one to enable retrieval.`));
     }
     return section;
   }
@@ -2847,16 +2973,17 @@ function setup(ctx) {
     })));
     for (const [key, label] of [
       ["collapsedDepth", "Collapsed depth"],
-      ["maxResults", "Max results"],
+      ["maxResults", "Pull limit"],
       ["maxTraversalDepth", "Traversal depth"],
       ["traversalStepLimit", "Traversal step limit"],
-      ["tokenBudget", "Token budget"],
+      ["tokenBudget", "Inject limit"],
       ["contextMessages", "Context messages"]
     ]) {
       form.appendChild(createField(label, createNumberInput(characterDraft[key], (next) => {
         characterDraft[key] = Number.parseInt(String(next), 10) || 0;
       })));
     }
+    form.appendChild(createFieldNote("Pull limit controls how many entries Lore Recall can keep in the retrieved set. Inject limit controls how many of those entries are actually injected into the prompt."));
     const switches = createElement("div", "lore-field-span");
     const switchRow = createElement("div", "lore-cluster");
     switchRow.style.gap = "20px";
@@ -2939,7 +3066,7 @@ function setup(ctx) {
     const connectionSelect = createElement("select", "lore-select");
     connectionSelect.appendChild(new Option("Use default connection", ""));
     for (const connection of state.availableConnections) {
-      connectionSelect.appendChild(new Option(`${connection.name} · ${connection.model}`, connection.id));
+      connectionSelect.appendChild(new Option(`${connection.name} | ${connection.model}`, connection.id));
     }
     connectionSelect.value = globalDraft.controllerConnectionId ?? "";
     connectionSelect.addEventListener("change", () => {
@@ -2994,7 +3121,7 @@ function setup(ctx) {
     settingsRoot.appendChild(shell);
     shell.appendChild(renderWorkspaceHeader());
     if (!currentState) {
-      shell.appendChild(createEmpty("Loading", "Lore Recall is loading state…"));
+      shell.appendChild(createEmpty("Loading", "Lore Recall is loading state..."));
       return;
     }
     const workspace = createElement("div", "lore-workspace-shell");
@@ -3273,10 +3400,10 @@ function setup(ctx) {
     if (!workspaceModal)
       return;
     workspaceModal.root.replaceChildren();
-    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree workspace` : "Lore Recall workspace");
+    workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} | Tree workspace` : "Lore Recall workspace");
     const shell = createElement("div", "lore-root lore-modal");
     const toolbar = createElement("div", "lore-modal-toolbar");
-    const search = createTextInput(workspaceSearch, "Filter categories and entries…", (v) => {
+    const search = createTextInput(workspaceSearch, "Filter categories and entries...", (v) => {
       workspaceSearch = v;
       renderWorkspaceModal();
     });

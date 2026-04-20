@@ -33,7 +33,7 @@ export const DEFAULT_CHARACTER_CONFIG: CharacterRetrievalConfig = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
-  tokenBudget: 900,
+  tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
   multiBookMode: "unified",
@@ -220,6 +220,16 @@ export function getBuildDetailDescription(detail: BuildDetail): string {
 export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfig> | null): CharacterRetrievalConfig {
   const next = (value ?? {}) as Partial<CharacterRetrievalConfig> & { defaultMode?: string };
   const searchMode = next.searchMode === "traversal" || next.defaultMode === "traversal" ? "traversal" : "collapsed";
+  const legacyBudget =
+    typeof next.tokenBudget === "number" && Number.isFinite(next.tokenBudget) ? Math.floor(next.tokenBudget) : null;
+  const injectedEntryLimit =
+    legacyBudget == null
+      ? DEFAULT_CHARACTER_CONFIG.tokenBudget
+      : legacyBudget > 64
+        ? typeof next.maxResults === "number" && Number.isFinite(next.maxResults)
+          ? Math.floor(next.maxResults)
+          : DEFAULT_CHARACTER_CONFIG.tokenBudget
+        : legacyBudget;
 
   return {
     enabled: !!next.enabled,
@@ -247,11 +257,7 @@ export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfi
       1,
       12,
     ),
-    tokenBudget: clampInt(
-      typeof next.tokenBudget === "number" ? next.tokenBudget : DEFAULT_CHARACTER_CONFIG.tokenBudget,
-      200,
-      8000,
-    ),
+    tokenBudget: clampInt(injectedEntryLimit, 1, 32),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
     multiBookMode: next.multiBookMode === "per_book" ? "per_book" : "unified",
