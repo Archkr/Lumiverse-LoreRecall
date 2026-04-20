@@ -413,7 +413,7 @@ spindle.registerInterceptor(async (messages, context) => {
         );
       } else if (preview.mode === "traversal" && preview.controllerUsed) {
         spindle.log.info(
-          `Lore Recall traversal used controller for chat ${chatId}: selected=${preview.selectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`,
+          `Lore Recall traversal used controller for chat ${chatId}: scopes=${preview.retrievedScopes.length}, pulled=${preview.pulledNodes.length}, injected=${preview.injectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`,
         );
       } else if (preview.mode === "collapsed" && preview.fallbackReason) {
         spindle.log.info(

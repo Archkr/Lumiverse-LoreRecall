@@ -22,6 +22,7 @@ import type {
   OperationKind,
   OperationUpdate,
   PreviewNode,
+  PreviewScope,
 } from "../types";
 import {
   DrawerPreviewTab,
@@ -776,6 +777,15 @@ export function setup(ctx: SpindleFrontendContext) {
         pullLimit: currentState?.characterConfig?.maxResults ?? null,
         injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
         trace: preview.trace,
+        retrievedScopes: preview.retrievedScopes.map((scope) => ({
+          nodeId: scope.nodeId,
+          label: scope.label,
+          worldBookId: scope.worldBookId,
+          worldBookName: scope.worldBookName,
+          breadcrumb: scope.breadcrumb,
+          summary: scope.summary,
+          descendantEntryCount: scope.descendantEntryCount,
+        })),
         pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
           entryId: node.entryId,
           label: node.label,
@@ -894,10 +904,34 @@ export function setup(ctx: SpindleFrontendContext) {
     return [];
   }
 
+  function renderRetrievedScopes(scopes: PreviewScope[]): HTMLElement | null {
+    if (!scopes.length) return null;
+    const list = createElement("div", "lore-search-scopes");
+    for (const scope of scopes) {
+      const item = createElement("div", "lore-search-scope");
+      const head = createElement("div", "lore-search-scope-head");
+      head.append(
+        createElement("div", "lore-search-scope-title", scope.label),
+        createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"),
+      );
+      item.append(
+        head,
+        createElement("div", "lore-search-scope-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`),
+      );
+      if (scope.summary?.trim()) {
+        item.appendChild(createElement("div", "lore-search-scope-summary", scope.summary));
+      }
+      list.appendChild(item);
+    }
+    return list;
+  }
+
   function renderSearchActivity(preview: FrontendState["preview"]): HTMLElement | null {
     if (!preview) return null;
 
     const wrap = createElement("div", "lore-search-log");
+    const scopes = renderRetrievedScopes(preview.retrievedScopes ?? []);
+    if (scopes) wrap.appendChild(scopes);
     if (!preview.trace?.length) {
       wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;

@@ -140,6 +140,16 @@ export interface PreviewNode {
   previewText: string;
 }
 
+export interface PreviewScope {
+  nodeId: string;
+  label: string;
+  worldBookId: string;
+  worldBookName: string;
+  breadcrumb: string;
+  summary: string;
+  descendantEntryCount: number;
+}
+
 export interface TraversalTraceStep {
   step: number;
   phase: TraversalTracePhase;
@@ -155,6 +165,7 @@ export interface RetrievalPreview {
   queryText: string;
   estimatedTokens: number;
   injectedText: string;
+  retrievedScopes: PreviewScope[];
   pulledNodes: PreviewNode[];
   injectedNodes: PreviewNode[];
   selectedNodes: PreviewNode[];

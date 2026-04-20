@@ -746,6 +746,44 @@ export const LORE_RECALL_CSS = `
   gap: 8px;
 }
 
+.lore-search-scopes {
+  display: grid;
+  gap: 8px;
+}
+
+.lore-search-scope {
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--lr-acc) 24%, var(--lr-line));
+  border-radius: var(--lr-r);
+  background: color-mix(in srgb, var(--lr-bg-0) 84%, var(--lr-acc) 6%);
+}
+
+.lore-search-scope-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.lore-search-scope-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-search-scope-meta {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-search-scope-summary {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--lr-muted);
+}
+
 .lore-search-query,
 .lore-search-step,
 .lore-retrieval-card {
