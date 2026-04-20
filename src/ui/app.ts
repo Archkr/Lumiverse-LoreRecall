@@ -760,6 +760,57 @@ export function setup(ctx: SpindleFrontendContext) {
     void copyTextToClipboard(payload, "Debug payload copied", "Send that payload back here and we can inspect the failure directly.");
   }
 
+  function buildPreviewDebugReport(preview: NonNullable<FrontendState["preview"]>): string {
+    return JSON.stringify(
+      {
+        capturedAt: preview.capturedAt,
+        activeChatId: currentState?.activeChatId ?? null,
+        activeCharacterId: currentState?.activeCharacterId ?? null,
+        activeCharacterName: currentState?.activeCharacterName ?? null,
+        mode: preview.mode,
+        controllerUsed: preview.controllerUsed,
+        resolvedConnectionId: preview.resolvedConnectionId ?? null,
+        fallbackReason: preview.fallbackReason,
+        selectedBookIds: preview.selectedBookIds,
+        queryText: preview.queryText,
+        pullLimit: currentState?.characterConfig?.maxResults ?? null,
+        injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
+        trace: preview.trace,
+        pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
+          entryId: node.entryId,
+          label: node.label,
+          worldBookId: node.worldBookId,
+          worldBookName: node.worldBookName,
+          breadcrumb: node.breadcrumb,
+          score: node.score,
+          reasons: node.reasons,
+          previewText: node.previewText,
+        })),
+        injectedNodes: getPreviewInjectedNodes(preview).map((node) => ({
+          entryId: node.entryId,
+          label: node.label,
+          worldBookId: node.worldBookId,
+          worldBookName: node.worldBookName,
+          breadcrumb: node.breadcrumb,
+          score: node.score,
+          reasons: node.reasons,
+          previewText: node.previewText,
+        })),
+        injectedText: preview.injectedText,
+      },
+      null,
+      2,
+    );
+  }
+
+  function copyPreviewDebugReport(preview: NonNullable<FrontendState["preview"]>): void {
+    void copyTextToClipboard(
+      buildPreviewDebugReport(preview),
+      "Retrieval report copied",
+      "Send that payload back here and we can inspect the last retrieval directly.",
+    );
+  }
+
   function createOperationSummary(operation: OperationUpdate, compact = false): HTMLElement {
     const wrap = createElement("div", compact ? "lore-operation compact" : "lore-operation");
     const head = createElement("div", "lore-operation-head");
@@ -847,16 +898,6 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!preview) return null;
 
     const wrap = createElement("div", "lore-search-log");
-    const query = preview.queryText?.trim();
-    if (query) {
-      const queryCard = createElement("div", "lore-search-query");
-      queryCard.append(
-        createElement("div", "lore-search-kicker", "Search query"),
-        createElement("div", "lore-search-query-text", query),
-      );
-      wrap.appendChild(queryCard);
-    }
-
     if (!preview.trace?.length) {
       wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;
@@ -1151,7 +1192,11 @@ export function setup(ctx: SpindleFrontendContext) {
         }),
       );
     }
-    preview.append(createSectionHead("Last retrieval", "Captured from the most recent generated turn."), tabs);
+    const previewActions =
+      state?.preview
+        ? createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview!))
+        : null;
+    preview.append(createSectionHead("Last retrieval", "Captured from the most recent generated turn.", previewActions), tabs);
 
     if (!state?.preview) {
       preview.appendChild(createEmpty("No retrieval captured yet", "Send a message to capture Lore Recall's actual retrieval for this chat."));
@@ -2125,8 +2170,6 @@ export function setup(ctx: SpindleFrontendContext) {
     const detail = createElement("div", "lore-workspace-detail");
     const operationStrip = renderOperationStrip(false);
     if (operationStrip) detail.appendChild(operationStrip);
-    const lastRetrieval = renderLastRetrievalWorkspaceSection();
-    if (lastRetrieval) detail.appendChild(lastRetrieval);
 
     const activePanel = createElement("div", "lore-detail-stack");
     switch (workspaceSection) {
