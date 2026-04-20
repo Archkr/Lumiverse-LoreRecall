@@ -63,12 +63,14 @@ interface TraversalCategoryChoice {
 interface TraversalFrontier {
   scopeLabel: string;
   categories: TraversalCategoryChoice[];
+  fullTreeOverview: string;
 }
 
 const CONTROLLER_TIMEOUT_MS = 45_000;
 const CONTROLLER_TOTAL_BUDGET_MS = 175_000;
 const CONTROLLER_MAX_CALLS = 12;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
+const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
 
 function stripCodeFences(content: string): string {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -558,6 +560,22 @@ async function maybeSelectEntries(
       };
     })
     .filter((item): item is { scope: TraversalScope; candidates: ScoredEntry[] } => !!item);
+  const buildScopedFallbackSelection = (): ScoredEntry[] => {
+    if (!scopedManifests.length) {
+      return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
+    }
+    if (scopedManifests.length === 1) {
+      return scopedManifests[0].candidates.slice(
+        0,
+        Math.min(scopedManifests[0].candidates.length, Math.min(config.maxResults, 4)),
+      );
+    }
+    return scopedManifests
+      .map((item) => item.candidates[0])
+      .filter((item): item is ScoredEntry => !!item)
+      .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
+      .slice(0, config.maxResults);
+  };
 
   const prompt = [
     "Select the exact lore entries that should be injected.",
@@ -609,7 +627,7 @@ async function maybeSelectEntries(
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  if (!ids.length) return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
+  if (!ids.length) return buildScopedFallbackSelection();
 
   const byId = new Map(candidates.map((item) => [item.entry.entryId, item]));
   const chosen: ScoredEntry[] = [];
@@ -621,7 +639,7 @@ async function maybeSelectEntries(
     chosen.push(match);
     if (chosen.length >= config.maxResults) break;
   }
-  if (!chosen.length) return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
+  if (!chosen.length) return buildScopedFallbackSelection();
   return chosen;
 }
 
@@ -823,6 +841,67 @@ function describeScopeMatches(
   };
 }
 
+function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
+  const lines: string[] = [];
+  const seenScopes = new Set<string>();
+  const visitedNodes = new Set<string>();
+
+  const pushNode = (book: RuntimeBook, nodeId: string, depth: number): void => {
+    const visitKey = `${book.summary.id}:${nodeId}`;
+    if (visitedNodes.has(visitKey)) return;
+    visitedNodes.add(visitKey);
+
+    const node = book.tree.nodes[nodeId];
+    if (!node) return;
+
+    const indent = "  ".repeat(depth);
+    const type = node.childIds.length ? "branch" : "leaf";
+    const labelPrefix = depth === 0 ? `${book.summary.name} :: ` : "";
+    lines.push(
+      `${indent}- nodeId=${makeCategoryChoiceId(book.summary.id, node.id)}; label=${labelPrefix}${node.label}; type=${type}; descendantEntries=${getScopedEntryIds(
+        book,
+        node.id,
+        true,
+      ).length}; summary=${truncateText(node.summary || "No summary.", 140)}`,
+    );
+
+    for (const childId of node.childIds) {
+      pushNode(book, childId, depth + 1);
+    }
+  };
+
+  for (const scope of scopes) {
+    const scopeKey = `${scope.book.summary.id}:${scope.nodeId}`;
+    if (seenScopes.has(scopeKey)) continue;
+    seenScopes.add(scopeKey);
+
+    const scopeNode = scope.book.tree.nodes[scope.nodeId];
+    if (!scopeNode) continue;
+
+    if (scope.nodeId === scope.book.tree.rootId) {
+      lines.push(`Book: ${scope.book.summary.name}`);
+      for (const childId of scopeNode.childIds) {
+        pushNode(scope.book, childId, 0);
+      }
+      if (scope.book.tree.unassignedEntryIds.length) {
+        lines.push(
+          `- nodeId=${makeCategoryChoiceId(scope.book.summary.id, scope.book.tree.rootId)}; label=${scope.book.summary.name} :: Root / Unassigned; type=leaf; descendantEntries=${scope.book.tree.unassignedEntryIds.length}; summary=Root-level or unassigned entries.`,
+        );
+      }
+      lines.push("");
+      continue;
+    }
+
+    lines.push(`Scope: ${getScopeBreadcrumb(scope.book, scope.nodeId)} (${scope.book.summary.name})`);
+    pushNode(scope.book, scope.nodeId, 0);
+    lines.push("");
+  }
+
+  const text = lines.join("\n").trim();
+  if (text.length <= TRAVERSAL_FULL_OVERVIEW_LIMIT) return text;
+  return `${text.slice(0, TRAVERSAL_FULL_OVERVIEW_LIMIT - 28).trimEnd()}\n... (tree index truncated)`;
+}
+
 function buildTraversalFrontier(
   scopes: TraversalScope[],
   deterministicById: Map<string, ScoredEntry>,
@@ -871,6 +950,7 @@ function buildTraversalFrontier(
         return `${scope.book.summary.name} :: ${node.label}`;
       })
       .join(" | "),
+    fullTreeOverview: showAllCurrentCategories ? buildFullTraversalTreeOverview(scopes) : "",
     categories: showAllCurrentCategories
       ? categories
       : categories
@@ -888,6 +968,7 @@ function buildTraversalPrompt(
   step: number,
   config: CharacterRetrievalConfig,
 ): string {
+  const hasFullTreeOverview = frontier.fullTreeOverview.trim().length > 0;
   return [
     "You are a retrieval assistant for a hierarchical knowledge tree.",
     'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","nodeIds":["node-id-1"],"query":"optional search query","reason":"brief explanation"}.',
@@ -895,14 +976,19 @@ function buildTraversalPrompt(
     "- Pick the most relevant node IDs from the tree to retrieve for the next response.",
     "Rules:",
     "- Pick 1-5 nodeIds maximum and prefer specific nodes over broad branches.",
-    "- On the first pass, review all categories shown below and choose from those nodeIds.",
+    hasFullTreeOverview
+      ? "- The full tree index below already includes categories from across the selected books. You may choose nodeIds from anywhere in that index."
+      : "- Choose nodeIds only from the category list shown below.",
     "- Use action navigate when a shown category still needs to be opened before retrieval.",
     "- Use action retrieve when one or more shown nodes are specific enough to retrieve content from.",
-    "- Use action search only to narrow the current scope with a short keyword query.",
+    hasFullTreeOverview
+      ? "- Use action search only if the needed concept is not clearly represented in the shown tree index."
+      : "- Use action search only to narrow the current scope with a short keyword query.",
     "- Use action finish only when the current scope is already specific enough to resolve entries without choosing another node.",
     "- Do not pick entries directly. Exact entry selection happens later after node retrieval.",
     "- Pick nodes whose content would be most useful for the next response.",
     "- Consider world info, rules, places, systems, organizations, incidents, abilities, or factions when they matter to the scene, not just named people.",
+    "- Do not stop at Characters if other categories better explain powers, organizations, command response, locations, vehicles, rules, or ongoing incidents.",
     "- If nothing seems relevant, keep the result small instead of padding it.",
     `- Stay within ${config.traversalStepLimit} total steps.`,
     "",
@@ -910,12 +996,14 @@ function buildTraversalPrompt(
     `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
     "",
-    "Category choices:",
-    ...(frontier.categories.length
-      ? frontier.categories.map((category) =>
-          `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
-        )
-      : ["- none"]),
+    hasFullTreeOverview ? "Full tree index:" : "Category choices:",
+    ...(hasFullTreeOverview
+      ? [frontier.fullTreeOverview]
+      : frontier.categories.length
+        ? frontier.categories.map((category) =>
+            `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
+          )
+        : ["- none"]),
   ].join("\n");
 }
 
@@ -1018,7 +1106,7 @@ async function selectTraversalEntries(
         };
       }
       const finalAutoSelected = config.selectiveRetrieval
-        ? await maybeSelectEntries(activeSelectionQuery, autoSelected, config, controller, allowController)
+        ? await maybeSelectEntries(activeSelectionQuery, autoSelected, config, controller, allowController, scopes)
         : autoSelected.slice(0, config.maxResults);
       pushTrace(
         trace,
@@ -1209,7 +1297,7 @@ async function selectTraversalEntries(
       }
 
       let finalSelected = config.selectiveRetrieval
-        ? await maybeSelectEntries(queryText, selectedCandidates, config, controller, allowController)
+        ? await maybeSelectEntries(activeSelectionQuery, selectedCandidates, config, controller, allowController, retrievedScopes)
         : selectedCandidates.slice(0, config.maxResults);
 
       pushTrace(
