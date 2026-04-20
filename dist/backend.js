@@ -863,32 +863,77 @@ function buildQueryText(messages, contextMessages) {
 }
 function buildCompactSceneSummary(queryText) {
   const lines = queryText.split(`
-`).map((line) => line.trim()).filter(Boolean).slice(-2).map((line) => truncateText(line.replace(/^(assistant|user):\s*/i, ""), 420));
+`).map((line) => line.trim()).filter(Boolean).slice(-3);
   if (!lines.length)
     return "";
-  return lines.map((line) => `- ${line}`).join(`
+  const latestUser = [...lines].reverse().find((line) => /^user:/i.test(line))?.replace(/^user:\s*/i, "");
+  const latestAssistant = [...lines].reverse().find((line) => /^assistant:/i.test(line))?.replace(/^assistant:\s*/i, "");
+  const parts = [
+    latestUser ? `Latest user move: ${truncateText(latestUser, 320)}` : "",
+    latestAssistant ? `Latest scene context: ${truncateText(latestAssistant, 320)}` : ""
+  ].filter(Boolean);
+  return parts.map((line) => `- ${line}`).join(`
 `);
 }
 function buildPromptFocusTerms(queryText, scored = []) {
-  const labels = uniqueStrings(scored.slice(0, 8).map((item) => item.entry.label)).slice(0, 6);
-  if (labels.length)
-    return labels;
-  const extracted = [];
-  const seen = new Set;
-  const properNounPattern = /\b[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}\b/g;
-  for (const match of queryText.matchAll(properNounPattern)) {
-    const value = match[0]?.trim();
-    if (!value)
+  const importantLabels = uniqueStrings(scored.filter((item) => item.score >= 18).slice(0, 6).map((item) => item.entry.label));
+  const genericStarts = new Set([
+    "The",
+    "A",
+    "An",
+    "And",
+    "But",
+    "Or",
+    "If",
+    "When",
+    "What",
+    "Why",
+    "How",
+    "Not",
+    "This",
+    "That",
+    "There",
+    "Then",
+    "Working",
+    "Good",
+    "Because",
+    "Latest"
+  ]);
+  const weighted = new Map;
+  const pushTerm = (value, weight) => {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length < 2)
+      return;
+    if (genericStarts.has(trimmed))
+      return;
+    const key = trimmed.toLowerCase();
+    weighted.set(trimmed, Math.max(weighted.get(trimmed) ?? 0, weight));
+  };
+  for (const label of importantLabels)
+    pushTerm(label, 100);
+  const acronymPattern = /\b[A-Z]{2,}(?:-[A-Z]{2,})?\b/g;
+  for (const match of queryText.matchAll(acronymPattern)) {
+    if (!match[0])
       continue;
-    const key = value.toLowerCase();
-    if (seen.has(key))
-      continue;
-    seen.add(key);
-    extracted.push(value);
-    if (extracted.length >= 6)
-      break;
+    pushTerm(match[0], 80 - match.index / 2000);
   }
-  return extracted;
+  const namePattern = /\b[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}\b/g;
+  for (const match of queryText.matchAll(namePattern)) {
+    const value = match[0]?.trim();
+    if (!value || genericStarts.has(value))
+      continue;
+    const looksLikeName = value.includes(" ") || /[A-Z].*[A-Z]/.test(value) || value.endsWith("-sensei");
+    if (!looksLikeName)
+      continue;
+    pushTerm(value, 60 - match.index / 3000);
+  }
+  const cuePattern = /\b(spacequake|angel|spirit|fraxinus|ratatoskr|dem|ast|wizard|realizer|territory|seal(?:ing)?|neighboring world|tengu city)\b/gi;
+  for (const match of queryText.matchAll(cuePattern)) {
+    if (!match[0])
+      continue;
+    pushTerm(match[0], 40 - match.index / 4000);
+  }
+  return Array.from(weighted.entries()).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 10).map(([value]) => value);
 }
 function buildPromptContext(queryText, scored = []) {
   const summary = buildCompactSceneSummary(queryText);
@@ -1118,9 +1163,19 @@ async function maybeRerankEntries(queryText, scored, controller, allowController
   }
   return ordered;
 }
-async function maybeSelectEntries(queryText, candidates, config, controller, allowController) {
+async function maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes = []) {
   if (!allowController || !config.selectiveRetrieval || !candidates.length)
     return candidates.slice(0, config.maxResults);
+  const candidatesById = new Map(candidates.map((item) => [item.entry.entryId, item]));
+  const scopedManifests = scopes.map((scope) => {
+    const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true).map((entryId) => candidatesById.get(entryId)).filter((item) => !!item).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, 8);
+    if (!scopeCandidates.length)
+      return null;
+    return {
+      scope,
+      candidates: scopeCandidates
+    };
+  }).filter((item) => !!item);
   const prompt = [
     "Select the exact lore entries that should be injected.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
@@ -1130,12 +1185,28 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     "Prefer a balanced set across characters, factions, places, rules, incidents, or powers when those angles genuinely matter.",
     "When a person, faction, place, creature, or item is central, include adjacent support entries only if they explain abilities, threat profile, relationships, command response, or operational context.",
     "Good support examples include powers, organizations, bases/vehicles, threat frameworks, species/world rules, or incident context when those help explain reactions.",
+    "Treat each retrieved scope separately.",
+    "It is okay to choose zero or one entry from a scope if the rest are only loosely related siblings.",
+    "Do not select extra entries from a broad leaf category just because they share the same branch.",
     "Do not pad the list with generic sibling characters or branch-adjacent trivia just because they are available.",
     "",
     buildPromptContext(queryText, candidates),
     "",
-    "Entry manifest:",
-    ...candidates.slice(0, Math.max(config.maxResults * 3, 12)).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
+    ...scopedManifests.length ? [
+      "Entry manifest by retrieved scope:",
+      ...scopedManifests.flatMap((item) => {
+        const node = item.scope.book.tree.nodes[item.scope.nodeId];
+        const scopeHeader = `Scope: ${getScopeBreadcrumb(item.scope.book, item.scope.nodeId)} (${node?.label || item.scope.book.summary.name})`;
+        return [
+          scopeHeader,
+          ...item.candidates.map((entry) => `- entryId=${entry.entry.entryId}; label=${entry.entry.label}; score=${entry.score.toFixed(2)}; summary=${truncateText(entry.entry.summary, 140)}; preview=${truncateText(getEntryBody(entry.entry), 180)}`),
+          ""
+        ];
+      })
+    ] : [
+      "Entry manifest:",
+      ...candidates.slice(0, Math.min(Math.max(config.maxResults * 2, 12), 24)).map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; score=${item.score.toFixed(2)}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
+    ]
   ].join(`
 `);
   const { parsed } = await runControllerJson(prompt, controller);
@@ -1395,17 +1466,17 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
     "",
     "Category choices:",
-    ...frontier.categories.length ? frontier.categories.map((category) => `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`) : ["- none"]
+    ...frontier.categories.length ? frontier.categories.map((category) => `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"]
   ].join(`
 `);
 }
 function shouldRefineRetrievedScopes(scopes, config) {
   return scopes.some((scope) => {
     const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node || !node.childIds.length)
+    if (!node)
       return false;
     const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
-    return descendantCount > Math.max(config.maxResults, 8);
+    return node.childIds.length > 0 ? descendantCount > 8 : descendantCount > 10;
   });
 }
 function buildScopeRefinementPrompt(queryText, frontier, config) {
@@ -1424,7 +1495,7 @@ function buildScopeRefinementPrompt(queryText, frontier, config) {
     `Current broad scopes: ${frontier.scopeLabel || "Selected branches"}`,
     "",
     "Category choices:",
-    ...frontier.categories.length ? frontier.categories.map((category) => `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`) : ["- none"]
+    ...frontier.categories.length ? frontier.categories.map((category) => `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"]
   ].join(`
 `);
 }
