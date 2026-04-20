@@ -1817,7 +1817,7 @@ function setup(ctx) {
       pendingTrackedRequest = null;
       optimisticOperationTimer = null;
       render();
-    }, 2000);
+    }, 1e4);
     render();
     if (!sendToBackend(ctx, message)) {
       clearOptimisticOperation();

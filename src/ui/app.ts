@@ -447,7 +447,7 @@ export function setup(ctx: SpindleFrontendContext) {
       pendingTrackedRequest = null;
       optimisticOperationTimer = null;
       render();
-    }, 2000);
+    }, 10000);
     render();
     if (!sendToBackend(ctx, message)) {
       clearOptimisticOperation();

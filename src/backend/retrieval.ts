@@ -55,9 +55,9 @@ interface TraversalFrontier {
   entries: ScoredEntry[];
 }
 
-const CONTROLLER_TIMEOUT_MS = 1500;
-const CONTROLLER_TOTAL_BUDGET_MS = 6000;
-const CONTROLLER_MAX_CALLS = 4;
+const CONTROLLER_TIMEOUT_MS = 45_000;
+const CONTROLLER_TOTAL_BUDGET_MS = 175_000;
+const CONTROLLER_MAX_CALLS = 12;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
 const TRAVERSAL_ENTRY_LIMIT = 14;
 
@@ -264,7 +264,7 @@ async function runControllerJson(
   }
 
   const remainingMs = controller.deadlineAt - Date.now();
-  if (remainingMs <= 250) {
+  if (remainingMs <= 1_000) {
     return { parsed: null, error: "Traversal controller ran out of time." };
   }
 

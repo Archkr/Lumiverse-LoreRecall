@@ -765,9 +765,9 @@ function canEditBook(config) {
 }
 
 // src/backend/retrieval.ts
-var CONTROLLER_TIMEOUT_MS = 1500;
-var CONTROLLER_TOTAL_BUDGET_MS = 6000;
-var CONTROLLER_MAX_CALLS = 4;
+var CONTROLLER_TIMEOUT_MS = 45000;
+var CONTROLLER_TOTAL_BUDGET_MS = 175000;
+var CONTROLLER_MAX_CALLS = 12;
 var TRAVERSAL_CATEGORY_LIMIT = 24;
 var TRAVERSAL_ENTRY_LIMIT = 14;
 function stripCodeFences(content) {
@@ -933,7 +933,7 @@ async function runControllerJson(prompt, controller) {
     return { parsed: null, error: "Traversal controller hit its call limit." };
   }
   const remainingMs = controller.deadlineAt - Date.now();
-  if (remainingMs <= 250) {
+  if (remainingMs <= 1000) {
     return { parsed: null, error: "Traversal controller ran out of time." };
   }
   controller.callCount += 1;
