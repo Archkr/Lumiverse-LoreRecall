@@ -780,6 +780,51 @@ function buildTraversalPrompt(
   ].join("\n");
 }
 
+function shouldRefineRetrievedScopes(scopes: TraversalScope[], config: CharacterRetrievalConfig): boolean {
+  return scopes.some((scope) => {
+    const node = scope.book.tree.nodes[scope.nodeId];
+    if (!node || !node.childIds.length) return false;
+    const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
+    return descendantCount > Math.max(config.maxResults, 8);
+  });
+}
+
+function buildScopeRefinementPrompt(
+  queryText: string,
+  frontier: TraversalFrontier,
+  config: CharacterRetrievalConfig,
+): string {
+  return [
+    "You already selected broad retrieval branches for Lore Recall.",
+    'Return ONLY JSON in this exact shape: {"choiceIds":["..."],"reason":"short reason"}.',
+    `Choose 1-${Math.min(5, Math.max(2, config.maxResults))} more specific category or entry choiceIds from the current frontier.`,
+    "Rules:",
+    "- Prefer leaf categories and direct entry choices over broad branches.",
+    "- Pick the smallest set of specific nodes that still covers the people, factions, places, and rules needed for the reply.",
+    "- If a broad branch contains many unrelated descendants, narrow it before retrieval.",
+    "",
+    `Original query: ${queryText}`,
+    `Current broad scopes: ${frontier.scopeLabel || "Selected branches"}`,
+    "",
+    "Category choices:",
+    ...(frontier.categories.length
+      ? frontier.categories.map((category) =>
+          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
+        )
+      : ["- none"]),
+    "",
+    "Direct entry choices:",
+    ...(frontier.entries.length
+      ? frontier.entries.map((entry) =>
+          `- choiceId=${makeEntryChoiceId(entry.entry.entryId)}; label=${entry.entry.label}; book=${entry.entry.worldBookName}; summary=${truncateText(
+            entry.entry.summary || getEntryBody(entry.entry),
+            160,
+          )}`,
+        )
+      : ["- none"]),
+  ].join("\n");
+}
+
 async function selectTraversalEntries(
   queryText: string,
   books: RuntimeBook[],
@@ -928,15 +973,14 @@ async function selectTraversalEntries(
     if (action === "retrieve" || action === "finish") {
       let selectedCandidates: ScoredEntry[] = [];
       let retrievedScopes: TraversalScope[] = [];
+      let directEntryIds: string[] = [];
       if (action === "finish") {
         if (overrideEntries?.length) {
           selectedCandidates = overrideEntries.slice(0, Math.max(config.maxResults * 2, 10));
         } else {
           retrievedScopes = scopes;
-          selectedCandidates = collectCandidatesForScopes(queryText, scopes, [], deterministicById);
         }
       } else {
-        const directEntryIds: string[] = [];
         const selectedScopeMap = new Map<string, TraversalScope>();
         for (const choiceId of choiceIds) {
           const categoryChoice = parseCategoryChoiceId(choiceId);
@@ -950,6 +994,50 @@ async function selectTraversalEntries(
           if (entryId) directEntryIds.push(entryId);
         }
         retrievedScopes = Array.from(selectedScopeMap.values());
+      }
+
+      if (!selectedCandidates.length && retrievedScopes.length && shouldRefineRetrievedScopes(retrievedScopes, config)) {
+        const refinementFrontier = buildTraversalFrontier(retrievedScopes, deterministicById, config, null);
+        const refinement = await runControllerJson(buildScopeRefinementPrompt(queryText, refinementFrontier, config), controller);
+        if (refinement.parsed) {
+          const refinedChoiceIds = Array.isArray(refinement.parsed.choiceIds)
+            ? refinement.parsed.choiceIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [];
+          const refinedReason =
+            typeof refinement.parsed.reason === "string" && refinement.parsed.reason.trim()
+              ? refinement.parsed.reason.trim()
+              : "No controller reason provided.";
+          const refinedScopeMap = new Map<string, TraversalScope>();
+          const refinedDirectEntryIds: string[] = [];
+          for (const choiceId of refinedChoiceIds) {
+            const categoryChoice = parseCategoryChoiceId(choiceId);
+            if (categoryChoice) {
+              const book = booksById.get(categoryChoice.bookId);
+              if (!book || !book.tree.nodes[categoryChoice.nodeId]) continue;
+              refinedScopeMap.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
+              continue;
+            }
+            const entryId = parseEntryChoiceId(choiceId);
+            if (entryId) refinedDirectEntryIds.push(entryId);
+          }
+          if (refinedScopeMap.size || refinedDirectEntryIds.length) {
+            retrievedScopes = Array.from(refinedScopeMap.values());
+            directEntryIds = uniqueStrings([...directEntryIds, ...refinedDirectEntryIds]);
+            pushTrace(
+              trace,
+              "navigate",
+              "Refine retrieved branches",
+              `${refinedReason} Narrowed broad retrieval branches into ${Math.max(retrievedScopes.length + directEntryIds.length, 1)} more specific choice(s).`,
+              {
+                bookId: retrievedScopes[0]?.book.summary.id ?? null,
+                nodeId: retrievedScopes[0]?.nodeId ?? null,
+              },
+            );
+          }
+        }
+      }
+
+      if (!selectedCandidates.length) {
         selectedCandidates = collectCandidatesForScopes(queryText, retrievedScopes, directEntryIds, deterministicById);
       }
 
