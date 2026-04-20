@@ -1500,6 +1500,9 @@ function extractGenerationUsage(result) {
   const usage = result.usage;
   return usage && typeof usage === "object" ? usage : null;
 }
+function extractGenerationReasoning(result) {
+  return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
+}
 function parseJsonValue(content) {
   const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   if (!cleaned)
@@ -1578,6 +1581,8 @@ function buildControllerDebugPayload(input) {
     finishReason: input.finishReason ?? null,
     toolCallsCount: input.toolCallsCount ?? null,
     usage: input.usage ?? null,
+    parsedFrom: input.parsedFrom ?? null,
+    reasoningLength: input.reasoningLength ?? null,
     controllerSettings: {
       controllerConnectionId: input.settings.controllerConnectionId,
       controllerTemperature: input.settings.controllerTemperature,
@@ -1610,8 +1615,13 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     userId
   });
   const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const reasoning = extractGenerationReasoning(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const parseSource = content || reasoning;
+  const parsedFrom = content ? "content" : reasoning ? "reasoning" : null;
   const base = {
     rawContent: content,
+    rawReasoning: reasoning,
+    parsedFrom,
     provider: connection?.provider ?? null,
     model: connection?.model ?? null,
     connectionId: settings.controllerConnectionId?.trim() || null,
@@ -1619,9 +1629,9 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
     usage: extractGenerationUsage(result)
   };
-  if (!content)
+  if (!parseSource)
     return { parsed: null, ...base };
-  const parsed = parseJsonValue(content);
+  const parsed = parseJsonValue(parseSource);
   if (!primaryKey) {
     return {
       parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
@@ -1631,7 +1641,7 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
   const normalized = normalizeArrayPayload(parsed, primaryKey);
   if (normalized)
     return { parsed: normalized, ...base };
-  spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} content=${content.slice(0, 280)}`);
+  spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`);
   return { parsed: null, ...base };
 }
 var ASSIGNMENTS_SCHEMA = {
@@ -2040,6 +2050,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
             finishReason: controllerResult.finishReason,
             toolCallsCount: controllerResult.toolCallsCount,
             usage: controllerResult.usage,
+            parsedFrom: controllerResult.parsedFrom,
+            reasoningLength: controllerResult.rawReasoning.length,
             settings,
             prompt,
             rawContent: controllerResult.rawContent,

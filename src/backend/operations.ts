@@ -81,6 +81,8 @@ export interface OperationOutcome<T = void> {
 interface ControllerJsonResult {
   parsed: Record<string, unknown> | null;
   rawContent: string;
+  rawReasoning: string;
+  parsedFrom: "content" | "reasoning" | null;
   provider: string | null;
   model: string | null;
   connectionId: string | null;
@@ -113,6 +115,12 @@ function extractGenerationUsage(result: unknown): Record<string, unknown> | null
   if (!result || typeof result !== "object") return null;
   const usage = (result as { usage?: unknown }).usage;
   return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
+}
+
+function extractGenerationReasoning(result: unknown): string {
+  return result && typeof result === "object" && typeof (result as { reasoning?: unknown }).reasoning === "string"
+    ? (result as { reasoning: string }).reasoning
+    : "";
 }
 
 function parseJsonValue(content: string): unknown {
@@ -204,6 +212,8 @@ function buildControllerDebugPayload(input: {
   finishReason?: string | null;
   toolCallsCount?: number | null;
   usage?: Record<string, unknown> | null;
+  parsedFrom?: "content" | "reasoning" | null;
+  reasoningLength?: number | null;
   settings: GlobalLoreRecallSettings;
   prompt: string;
   rawContent: string;
@@ -224,6 +234,8 @@ function buildControllerDebugPayload(input: {
       finishReason: input.finishReason ?? null,
       toolCallsCount: input.toolCallsCount ?? null,
       usage: input.usage ?? null,
+      parsedFrom: input.parsedFrom ?? null,
+      reasoningLength: input.reasoningLength ?? null,
       controllerSettings: {
         controllerConnectionId: input.settings.controllerConnectionId,
         controllerTemperature: input.settings.controllerTemperature,
@@ -272,8 +284,13 @@ async function runControllerJson(
     userId,
   });
   const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const reasoning = extractGenerationReasoning(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const parseSource = content || reasoning;
+  const parsedFrom: "content" | "reasoning" | null = content ? "content" : reasoning ? "reasoning" : null;
   const base = {
     rawContent: content,
+    rawReasoning: reasoning,
+    parsedFrom,
     provider: connection?.provider ?? null,
     model: connection?.model ?? null,
     connectionId: settings.controllerConnectionId?.trim() || null,
@@ -287,9 +304,9 @@ async function runControllerJson(
         : null,
     usage: extractGenerationUsage(result),
   };
-  if (!content) return { parsed: null, ...base };
+  if (!parseSource) return { parsed: null, ...base };
 
-  const parsed = parseJsonValue(content);
+  const parsed = parseJsonValue(parseSource);
   if (!primaryKey) {
     return {
       parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null,
@@ -301,7 +318,7 @@ async function runControllerJson(
   if (normalized) return { parsed: normalized, ...base };
 
   spindle.log.warn(
-    `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} content=${content.slice(0, 280)}`,
+    `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`,
   );
   return { parsed: null, ...base };
 }
@@ -799,6 +816,8 @@ export async function buildTreeWithLlm(
               finishReason: controllerResult.finishReason,
               toolCallsCount: controllerResult.toolCallsCount,
               usage: controllerResult.usage,
+              parsedFrom: controllerResult.parsedFrom,
+              reasoningLength: controllerResult.rawReasoning.length,
               settings,
               prompt,
               rawContent: controllerResult.rawContent,
