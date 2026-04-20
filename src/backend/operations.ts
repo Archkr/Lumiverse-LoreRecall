@@ -82,41 +82,186 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function extractGenerationContent(result: unknown): string {
+  return result && typeof result === "object" && typeof (result as { content?: unknown }).content === "string"
+    ? (result as { content: string }).content
+    : "";
+}
+
+function parseJsonValue(content: string): unknown {
+  const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  if (!cleaned) return null;
+
+  try {
+    return JSON.parse(cleaned) as unknown;
+  } catch {
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      try {
+        return JSON.parse(objectMatch[0]) as unknown;
+      } catch {
+        // Fall through and try array extraction below.
+      }
+    }
+
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      try {
+        return JSON.parse(arrayMatch[0]) as unknown;
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+}
+
+function normalizeArrayPayload(parsed: unknown, primaryKey: string): Record<string, unknown> | null {
+  if (Array.isArray(parsed)) return { [primaryKey]: parsed };
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const record = parsed as Record<string, unknown>;
+  if (Array.isArray(record[primaryKey])) return record;
+  if (Array.isArray(record.data)) return { [primaryKey]: record.data };
+  if (Array.isArray(record.items)) return { [primaryKey]: record.items };
+
+  const result = record.result;
+  if (result && typeof result === "object" && Array.isArray((result as Record<string, unknown>)[primaryKey])) {
+    return { [primaryKey]: (result as Record<string, unknown>)[primaryKey] };
+  }
+
+  return null;
+}
+
+function buildStructuredJsonParameters(
+  provider: string | null,
+  schemaName: string,
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+
+  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
+    return {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+    };
+  }
+
+  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
+    return {
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: schemaName,
+          schema,
+        },
+      },
+    };
+  }
+
+  return {};
+}
+
 async function runControllerJson(
   prompt: string,
   settings: GlobalLoreRecallSettings,
   userId: string,
+  primaryKey?: string,
+  schemaName?: string,
+  schema?: Record<string, unknown>,
 ): Promise<Record<string, unknown> | null> {
+  const connection =
+    settings.controllerConnectionId?.trim()
+      ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null)
+      : null;
+  const structuredParameters =
+    primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
+
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [{ role: "user", content: prompt }],
     parameters: {
       temperature: settings.controllerTemperature,
       max_tokens: settings.controllerMaxTokens,
+      ...structuredParameters,
     },
     ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
     userId,
   });
-  const content = (result && typeof result === "object" && typeof (result as { content?: unknown }).content === "string"
-    ? (result as { content: string }).content
-    : ""
-  ).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   if (!content) return null;
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-  } catch {
-    const match = content.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    try {
-      const parsed = JSON.parse(match[0]) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    } catch {
-      return null;
-    }
+
+  const parsed = parseJsonValue(content);
+  if (!primaryKey) {
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   }
+
+  const normalized = normalizeArrayPayload(parsed, primaryKey);
+  if (normalized) return normalized;
+
+  spindle.log.warn(
+    `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} content=${content.slice(0, 280)}`,
+  );
   return null;
 }
+
+const ASSIGNMENTS_SCHEMA = {
+  type: "object",
+  properties: {
+    assignments: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          entryId: { type: "string" },
+          path: { type: "array", items: { type: "string" } },
+          summary: { type: "string" },
+          collapsedText: { type: "string" },
+        },
+        required: ["entryId", "path"],
+      },
+    },
+  },
+  required: ["assignments"],
+} satisfies Record<string, unknown>;
+
+const CATEGORY_SUMMARIES_SCHEMA = {
+  type: "object",
+  properties: {
+    summaries: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          nodeId: { type: "string" },
+          summary: { type: "string" },
+        },
+        required: ["nodeId", "summary"],
+      },
+    },
+  },
+  required: ["summaries"],
+} satisfies Record<string, unknown>;
+
+const ENTRY_SUMMARIES_SCHEMA = {
+  type: "object",
+  properties: {
+    entries: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          entryId: { type: "string" },
+          summary: { type: "string" },
+          collapsedText: { type: "string" },
+        },
+        required: ["entryId"],
+      },
+    },
+  },
+  required: ["entries"],
+} satisfies Record<string, unknown>;
 
 function collectCategorySummaryContext(
   tree: any,
@@ -181,7 +326,14 @@ async function generateCategorySummary(
     .filter(Boolean)
     .join("\n");
 
-  const parsed = await runControllerJson(prompt, settings, userId);
+  const parsed = await runControllerJson(
+    prompt,
+    settings,
+    userId,
+    "summaries",
+    "lore_recall_category_summaries",
+    CATEGORY_SUMMARIES_SCHEMA,
+  );
   if (!Array.isArray(parsed?.summaries)) {
     throw new Error("The controller did not return usable category summary JSON.");
   }
@@ -519,7 +671,14 @@ export async function buildTreeWithLlm(
           ),
         ].join("\n");
 
-        const parsed = await runControllerJson(prompt, settings, userId);
+        const parsed = await runControllerJson(
+          prompt,
+          settings,
+          userId,
+          "assignments",
+          "lore_recall_tree_assignments",
+          ASSIGNMENTS_SCHEMA,
+        );
         if (!parsed || !Array.isArray(parsed.assignments)) {
           throw new Error(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`);
         }
@@ -898,7 +1057,14 @@ export async function regenerateSummaries(
     ].join("\n");
 
     try {
-      const parsed = await runControllerJson(prompt, settings, userId);
+      const parsed = await runControllerJson(
+        prompt,
+        settings,
+        userId,
+        "entries",
+        "lore_recall_entry_summaries",
+        ENTRY_SUMMARIES_SCHEMA,
+      );
       if (!parsed || !Array.isArray(parsed.entries)) {
         throw new Error("The controller did not return usable entry summary JSON.");
       }
