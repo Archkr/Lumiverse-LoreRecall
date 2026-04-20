@@ -78,6 +78,20 @@ export interface OperationOutcome<T = void> {
   total: number;
 }
 
+const THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
+const CATEGORIZATION_SYSTEM_PROMPT =
+  "You are a categorization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
+const SUMMARY_SYSTEM_PROMPT =
+  "You are a summarization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
+
+function sanitizeControllerText(value: string): string {
+  return value
+    .replace(THINK_BLOCK_RE, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
 interface ControllerJsonResult {
   parsed: Record<string, unknown> | null;
   rawContent: string;
@@ -264,6 +278,7 @@ async function runControllerJson(
   primaryKey?: string,
   schemaName?: string,
   schema?: Record<string, unknown>,
+  systemPrompt?: string,
 ): Promise<ControllerJsonResult> {
   const connection =
     settings.controllerConnectionId?.trim()
@@ -274,7 +289,10 @@ async function runControllerJson(
 
   const result = await spindle.generate.quiet({
     type: "quiet",
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+      { role: "user" as const, content: prompt },
+    ],
     parameters: {
       temperature: settings.controllerTemperature,
       max_tokens: settings.controllerMaxTokens,
@@ -283,8 +301,8 @@ async function runControllerJson(
     ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
     userId,
   });
-  const content = extractGenerationContent(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  const reasoning = extractGenerationReasoning(result).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const content = sanitizeControllerText(extractGenerationContent(result));
+  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
   const parseSource = content || reasoning;
   const parsedFrom: "content" | "reasoning" | null = content ? "content" : reasoning ? "reasoning" : null;
   const base = {
@@ -333,8 +351,6 @@ const ASSIGNMENTS_SCHEMA = {
         properties: {
           entryId: { type: "string" },
           path: { type: "array", items: { type: "string" } },
-          summary: { type: "string" },
-          collapsedText: { type: "string" },
         },
         required: ["entryId", "path"],
       },
@@ -450,6 +466,7 @@ async function generateCategorySummary(
     "summaries",
     "lore_recall_category_summaries",
     CATEGORY_SUMMARIES_SCHEMA,
+    SUMMARY_SYSTEM_PROMPT,
   );
   const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
@@ -464,6 +481,55 @@ async function generateCategorySummary(
     result[nodeId] = summary;
   }
   return result;
+}
+
+function buildEntrySummaryPrompt(entries: IndexedEntry[]): string {
+  return [
+    "Write short retrieval summaries for these lore entries.",
+    'Return ONLY JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
+    "",
+    "Entries:",
+    ...entries.map((entry) =>
+      JSON.stringify({
+        entryId: entry.entryId,
+        label: entry.label,
+        comment: entry.comment,
+        keys: [...entry.key, ...entry.keysecondary],
+        content: truncateText(entry.content, 500),
+      }),
+    ),
+  ].join("\n");
+}
+
+async function generateEntrySummaryBatch(
+  entries: IndexedEntry[],
+  settings: GlobalLoreRecallSettings,
+  userId: string,
+): Promise<Array<{ entryId: string; summary?: string; collapsedText?: string }>> {
+  if (!entries.length) return [];
+
+  const controllerResult = await runControllerJson(
+    buildEntrySummaryPrompt(entries),
+    settings,
+    userId,
+    "entries",
+    "lore_recall_entry_summaries",
+    ENTRY_SUMMARIES_SCHEMA,
+    SUMMARY_SYSTEM_PROMPT,
+  );
+  const parsed = controllerResult.parsed;
+  if (!parsed || !Array.isArray(parsed.entries)) {
+    throw new Error("The controller did not return usable entry summary JSON.");
+  }
+
+  return parsed.entries
+    .filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
+    .map((update) => ({
+      entryId: typeof update.entryId === "string" ? update.entryId : "",
+      summary: typeof update.summary === "string" ? update.summary.trim() : undefined,
+      collapsedText: typeof update.collapsedText === "string" ? update.collapsedText.trim() : undefined,
+    }))
+    .filter((update) => !!update.entryId);
 }
 
 export async function updateEntryMeta(entryId: string, meta: EntryRecallMeta, userId: string): Promise<void> {
@@ -664,6 +730,7 @@ export async function buildTreeWithLlm(
     bookName: string;
     cache: NonNullable<Awaited<ReturnType<typeof loadBookCache>>>;
     chunkCount: number;
+    entrySummaryBatchCount: number;
     originalIndex: number;
   }> = [];
 
@@ -729,6 +796,7 @@ export async function buildTreeWithLlm(
         bookName,
         cache,
         chunkCount: Math.max(1, chunkEntries(cache.entries, settings.chunkTokens).length),
+        entrySummaryBatchCount: Math.max(1, Math.ceil(cache.entries.length / 8)),
         originalIndex: index,
       });
     } catch (error: unknown) {
@@ -744,7 +812,7 @@ export async function buildTreeWithLlm(
     }
   }
 
-  const totalUnits = preparedBooks.reduce((sum, book) => sum + book.chunkCount + 2, 0);
+  const totalUnits = preparedBooks.reduce((sum, book) => sum + book.chunkCount + book.entrySummaryBatchCount + 2, 0);
   let completedUnits = 0;
   let completedBooks = 0;
 
@@ -755,6 +823,11 @@ export async function buildTreeWithLlm(
       const tree = createEmptyTreeIndex(bookId);
       const updates: Array<{ entryId: string; summary?: string; collapsedText?: string }> = [];
       const chunks = chunkEntries(cache.entries, settings.chunkTokens);
+      const entrySummaryBatchSize = 8;
+      const entrySummaryBatches = Array.from(
+        { length: Math.ceil(cache.entries.length / entrySummaryBatchSize) },
+        (_, index) => cache.entries.slice(index * entrySummaryBatchSize, (index + 1) * entrySummaryBatchSize),
+      ).filter((batch) => batch.length > 0);
 
       for (const [chunkIndex, chunk] of chunks.entries()) {
         operation?.progress({
@@ -771,7 +844,7 @@ export async function buildTreeWithLlm(
 
         const prompt = [
           "Organize these lore entries into a compact retrieval tree.",
-          'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"],"summary":"...","collapsedText":"..."}]}',
+          'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
           `Build detail: ${settings.buildDetail}.`,
           `Tree granularity: ${settings.treeGranularity}.`,
           "Use empty path [] when an entry should stay unassigned.",
@@ -797,6 +870,7 @@ export async function buildTreeWithLlm(
           "assignments",
           "lore_recall_tree_assignments",
           ASSIGNMENTS_SCHEMA,
+          CATEGORIZATION_SYSTEM_PROMPT,
         );
         const parsed = controllerResult.parsed;
         if (!parsed || !Array.isArray(parsed.assignments)) {
@@ -844,11 +918,6 @@ export async function buildTreeWithLlm(
           } else {
             assignEntryToTarget(tree, entryId, "unassigned");
           }
-          updates.push({
-            entryId,
-            summary: typeof assignment.summary === "string" ? assignment.summary.trim() : undefined,
-            collapsedText: typeof assignment.collapsedText === "string" ? assignment.collapsedText.trim() : undefined,
-          });
         }
 
         completedUnits += 1;
@@ -936,6 +1005,34 @@ export async function buildTreeWithLlm(
       tree.buildSource = "llm";
       await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
       completedUnits += 1;
+
+      for (const [batchIndex, entryBatch] of entrySummaryBatches.entries()) {
+        operation?.progress({
+          phase: "entry_controller",
+          message: `Generating entry summaries batch ${batchIndex + 1} of ${entrySummaryBatches.length} for ${bookName}.`,
+          current: originalIndex + 1,
+          total: ids.length,
+          percent: totalUnits ? Math.round((completedUnits / totalUnits) * 100) : null,
+          bookId,
+          bookName,
+          chunkCurrent: batchIndex + 1,
+          chunkTotal: entrySummaryBatches.length,
+        });
+
+        try {
+          updates.push(...(await generateEntrySummaryBatch(entryBatch, settings, userId)));
+        } catch (error: unknown) {
+          const issue: OperationIssue = {
+            severity: "warn",
+            message: `Entry summary batch ${batchIndex + 1} failed for ${bookName}: ${describeError(error)}`,
+            bookId,
+            bookName,
+            phase: "entry_controller",
+          };
+          issues.push(issue);
+          operation?.addIssue(issue);
+        }
+      }
 
       operation?.progress({
         phase: "writing_summaries",
@@ -1187,36 +1284,8 @@ export async function regenerateSummaries(
       chunkTotal: 1,
     });
 
-    const prompt = [
-      "Write short retrieval summaries for these lore entries.",
-      'Return ONLY JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
-      "",
-      "Entries:",
-      ...targetEntries.map((entry) =>
-        JSON.stringify({
-          entryId: entry.entryId,
-          label: entry.label,
-          comment: entry.comment,
-          keys: [...entry.key, ...entry.keysecondary],
-          content: truncateText(entry.content, 500),
-        }),
-      ),
-    ].join("\n");
-
     try {
-      const controllerResult = await runControllerJson(
-        prompt,
-        settings,
-        userId,
-        "entries",
-        "lore_recall_entry_summaries",
-        ENTRY_SUMMARIES_SCHEMA,
-      );
-      const parsed = controllerResult.parsed;
-      if (!parsed || !Array.isArray(parsed.entries)) {
-        throw new Error("The controller did not return usable entry summary JSON.");
-      }
-      const updates = parsed.entries.filter((value): value is Record<string, unknown> => !!value && typeof value === "object");
+      const updates = await generateEntrySummaryBatch(targetEntries, settings, userId);
 
       for (const update of updates) {
         const entryId = typeof update.entryId === "string" ? update.entryId : "";
