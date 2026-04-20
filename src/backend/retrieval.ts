@@ -56,6 +56,8 @@ interface TraversalCategoryChoice {
   depth: number;
   childCount: number;
   entryCount: number;
+  relevance: number;
+  matchHints: string[];
 }
 
 interface TraversalFrontier {
@@ -439,7 +441,11 @@ async function maybeSelectEntries(
   const prompt = [
     "Select the exact lore entries that should be injected.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${config.maxResults} entryIds.`,
+    `Choose up to ${config.maxResults} entryIds, but only include entries that materially help the next reply.`,
+    "It is fine to return far fewer than the limit.",
+    "Prefer the smallest useful set.",
+    "Prefer a balanced set across characters, factions, places, rules, incidents, or powers when those angles genuinely matter.",
+    "Do not pad the list with generic sibling characters or branch-adjacent trivia just because they are available.",
     "",
     `Query: ${queryText}`,
     "",
@@ -456,7 +462,7 @@ async function maybeSelectEntries(
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  if (!ids.length) return candidates.slice(0, config.maxResults);
+  if (!ids.length) return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
 
   const byId = new Map(candidates.map((item) => [item.entry.entryId, item]));
   const chosen: ScoredEntry[] = [];
@@ -468,12 +474,7 @@ async function maybeSelectEntries(
     chosen.push(match);
     if (chosen.length >= config.maxResults) break;
   }
-  if (!chosen.length) return candidates.slice(0, config.maxResults);
-  for (const item of candidates) {
-    if (chosen.length >= config.maxResults) break;
-    if (seen.has(item.entry.entryId)) continue;
-    chosen.push(item);
-  }
+  if (!chosen.length) return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
   return chosen;
 }
 
@@ -626,19 +627,6 @@ function collectCandidatesForScopes(
   return selected.sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
 
-function backfillSupportingEntries(selected: ScoredEntry[], deterministic: ScoredEntry[], maxResults: number): ScoredEntry[] {
-  if (selected.length >= maxResults) return selected.slice(0, maxResults);
-  const next = [...selected];
-  const seen = new Set(selected.map((item) => item.entry.entryId));
-  for (const item of deterministic) {
-    if (next.length >= maxResults) break;
-    if (seen.has(item.entry.entryId)) continue;
-    next.push(item);
-    seen.add(item.entry.entryId);
-  }
-  return next;
-}
-
 function collectEntriesByIds(entryIds: string[], deterministicById: Map<string, ScoredEntry>): ScoredEntry[] {
   const selected: ScoredEntry[] = [];
   const seen = new Set<string>();
@@ -671,6 +659,23 @@ function rescoreEntries(
     .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
 
+function describeScopeMatches(
+  book: RuntimeBook,
+  nodeId: string,
+  deterministicById: Map<string, ScoredEntry>,
+): { relevance: number; matchHints: string[] } {
+  const matches = getScopedEntryIds(book, nodeId, true)
+    .map((entryId) => deterministicById.get(entryId))
+    .filter((item): item is ScoredEntry => !!item)
+    .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
+    .slice(0, 3);
+
+  return {
+    relevance: matches.reduce((total, item, index) => total + item.score / (index + 1), 0),
+    matchHints: matches.map((item) => item.entry.label),
+  };
+}
+
 function buildTraversalFrontier(
   scopes: TraversalScope[],
   deterministicById: Map<string, ScoredEntry>,
@@ -693,6 +698,7 @@ function buildTraversalFrontier(
         const choiceId = makeCategoryChoiceId(scope.book.summary.id, child.id);
         if (seenCategories.has(choiceId)) continue;
         seenCategories.add(choiceId);
+        const matchMeta = describeScopeMatches(scope.book, child.id, deterministicById);
         categories.push({
           choiceId,
           book: scope.book,
@@ -702,6 +708,8 @@ function buildTraversalFrontier(
           depth: getNodeDepth(scope.book.tree, child.id),
           childCount: child.childIds.length,
           entryCount: getScopedEntryIds(scope.book, child.id, true).length,
+          relevance: matchMeta.relevance,
+          matchHints: matchMeta.matchHints,
         });
       }
     }
@@ -731,7 +739,7 @@ function buildTraversalFrontier(
       })
       .join(" | "),
     categories: categories
-      .sort((left, right) => left.depth - right.depth || left.label.localeCompare(right.label))
+      .sort((left, right) => right.relevance - left.relevance || left.depth - right.depth || left.label.localeCompare(right.label))
       .slice(0, TRAVERSAL_CATEGORY_LIMIT),
     entries: entries
       .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
@@ -749,12 +757,15 @@ function buildTraversalPrompt(
     "You are the Lore Recall traversal controller.",
     'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","choiceIds":["..."],"query":"optional search query","reason":"short reason"}.',
     "Rules:",
-    "- Use action navigate to drill into category choiceIds from the current frontier.",
+    "- Use action navigate only when a category is still too broad to retrieve directly.",
     "- Use action retrieve to pull content from one or more category or entry choiceIds in the current frontier.",
     "- Retrieving a category choice pulls ALL descendant entries under that branch, then Lore Recall narrows to the best matching entries.",
     "- Use action search to narrow the current scope with a short search query.",
     "- Use action finish only when the current scope already contains enough relevant context to resolve entries without another retrieval choice.",
-    "- Prefer specific nodes over root-wide branches, but retrieve multiple sibling/supporting nodes when the scene clearly involves multiple people, factions, locations, or rules.",
+    "- Prefer specific nodes over root-wide branches, but retrieve multiple sibling/supporting nodes when the scene clearly involves multiple people, factions, locations, organizations, incidents, rules, or powers.",
+    "- Do not default to character profiles only when the scene also depends on world state, places, systems, laws, factions, or supernatural mechanics.",
+    "- At broad/root levels, prefer a small cross-domain set of useful nodes instead of tunneling into one character branch immediately.",
+    "- It is fine to retrieve fewer nodes or fewer entries than the configured limit if that gives a cleaner result.",
     `- Stay within ${config.traversalStepLimit} total steps and retrieve 1-5 useful nodes maximum.`,
     "",
     `Original query: ${queryText}`,
@@ -764,7 +775,7 @@ function buildTraversalPrompt(
     "Category choices:",
     ...(frontier.categories.length
       ? frontier.categories.map((category) =>
-          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
+          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
         )
       : ["- none"]),
     "",
@@ -800,8 +811,9 @@ function buildScopeRefinementPrompt(
     `Choose 1-${Math.min(5, Math.max(2, config.maxResults))} more specific category or entry choiceIds from the current frontier.`,
     "Rules:",
     "- Prefer leaf categories and direct entry choices over broad branches.",
-    "- Pick the smallest set of specific nodes that still covers the people, factions, places, and rules needed for the reply.",
+    "- Pick the smallest set of specific nodes that still covers the people, factions, places, rules, incidents, and world state needed for the reply.",
     "- If a broad branch contains many unrelated descendants, narrow it before retrieval.",
+    "- Do not pad the result. It is fine to keep this very small.",
     "",
     `Original query: ${queryText}`,
     `Current broad scopes: ${frontier.scopeLabel || "Selected branches"}`,
@@ -809,7 +821,7 @@ function buildScopeRefinementPrompt(
     "Category choices:",
     ...(frontier.categories.length
       ? frontier.categories.map((category) =>
-          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
+          `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; relevance=${category.relevance.toFixed(2)}; topMatches=${category.matchHints.join(" | ") || "none"}; summary=${category.summary || "No summary."}`,
         )
       : ["- none"]),
     "",
@@ -1055,21 +1067,6 @@ async function selectTraversalEntries(
       let finalSelected = config.selectiveRetrieval
         ? await maybeSelectEntries(queryText, selectedCandidates, config, controller, allowController)
         : selectedCandidates.slice(0, config.maxResults);
-
-      if (finalSelected.length < Math.min(config.maxResults, 4)) {
-        const before = finalSelected.length;
-        finalSelected = backfillSupportingEntries(finalSelected, deterministic, config.maxResults);
-        const added = finalSelected.length - before;
-        if (added > 0) {
-          pushTrace(
-            trace,
-            "retrieve",
-            "Supplement supporting context",
-            `Added ${added} supporting entr${added === 1 ? "y" : "ies"} from the global candidate pool to avoid an over-narrow retrieval.`,
-            { entryCount: finalSelected.length },
-          );
-        }
-      }
 
       pushTrace(
         trace,

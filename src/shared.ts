@@ -225,7 +225,7 @@ export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfi
   const injectedEntryLimit =
     legacyBudget == null
       ? DEFAULT_CHARACTER_CONFIG.tokenBudget
-      : legacyBudget > 64
+      : legacyBudget > 128
         ? typeof next.maxResults === "number" && Number.isFinite(next.maxResults)
           ? Math.floor(next.maxResults)
           : DEFAULT_CHARACTER_CONFIG.tokenBudget
@@ -238,33 +238,33 @@ export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfi
     collapsedDepth: clampInt(
       typeof next.collapsedDepth === "number" ? next.collapsedDepth : DEFAULT_CHARACTER_CONFIG.collapsedDepth,
       1,
-      6,
+      12,
     ),
     maxResults: clampInt(
       typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults,
       1,
-      16,
+      64,
     ),
     maxTraversalDepth: clampInt(
       typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth,
       1,
-      8,
+      16,
     ),
     traversalStepLimit: clampInt(
       typeof next.traversalStepLimit === "number"
         ? next.traversalStepLimit
         : DEFAULT_CHARACTER_CONFIG.traversalStepLimit,
       1,
-      12,
+      24,
     ),
-    tokenBudget: clampInt(injectedEntryLimit, 1, 32),
+    tokenBudget: clampInt(injectedEntryLimit, 1, 64),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
     multiBookMode: next.multiBookMode === "per_book" ? "per_book" : "unified",
     contextMessages: clampInt(
       typeof next.contextMessages === "number" ? next.contextMessages : DEFAULT_CHARACTER_CONFIG.contextMessages,
-      2,
-      60,
+      1,
+      100,
     ),
   };
 }

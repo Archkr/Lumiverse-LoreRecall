@@ -1946,7 +1946,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Pull limit controls how many entries Lore Recall can keep in the retrieved set. Inject limit controls how many of those entries are actually injected into the prompt.",
+        "Pull limit and inject limit are upper bounds, not targets. Lore Recall should keep and inject fewer entries when a smaller set is more relevant.",
       ),
     );
 
