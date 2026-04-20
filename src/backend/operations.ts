@@ -105,6 +105,11 @@ interface ControllerJsonResult {
   usage: Record<string, unknown> | null;
 }
 
+interface ControllerJsonOptions {
+  systemPrompt?: string;
+  maxTokensOverride?: number;
+}
+
 class ControllerJsonError extends Error {
   debugPayload: string;
 
@@ -231,6 +236,7 @@ function buildControllerDebugPayload(input: {
   settings: GlobalLoreRecallSettings;
   prompt: string;
   rawContent: string;
+  rawReasoning?: string;
   entrySample?: Array<{ entryId: string; label: string }>;
 }): string {
   return JSON.stringify(
@@ -263,6 +269,7 @@ function buildControllerDebugPayload(input: {
       responseLength: input.rawContent.length,
       promptPreview: truncateText(input.prompt, 12000),
       responsePreview: truncateText(input.rawContent || "<empty response>", 12000),
+      reasoningPreview: truncateText(input.rawReasoning || "<empty reasoning>", 12000),
       entrySample: input.entrySample ?? [],
       capturedAt: Date.now(),
     },
@@ -278,7 +285,7 @@ async function runControllerJson(
   primaryKey?: string,
   schemaName?: string,
   schema?: Record<string, unknown>,
-  systemPrompt?: string,
+  options: ControllerJsonOptions = {},
 ): Promise<ControllerJsonResult> {
   const connection =
     settings.controllerConnectionId?.trim()
@@ -290,12 +297,12 @@ async function runControllerJson(
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [
-      ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+      ...(options.systemPrompt ? [{ role: "system" as const, content: options.systemPrompt }] : []),
       { role: "user" as const, content: prompt },
     ],
     parameters: {
       temperature: settings.controllerTemperature,
-      max_tokens: settings.controllerMaxTokens,
+      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...structuredParameters,
     },
     ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
@@ -339,6 +346,60 @@ async function runControllerJson(
     `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`,
   );
   return { parsed: null, ...base };
+}
+
+function normalizeAssignmentsPayload(parsed: unknown): Record<string, unknown> | null {
+  const normalized = normalizeArrayPayload(parsed, "assignments");
+  if (normalized && Array.isArray(normalized.assignments)) return normalized;
+
+  const flattenCategories = (
+    categories: unknown[],
+    parentPath: string[] = [],
+    collector: Array<{ entryId: string; path: string[] }> = [],
+  ): Array<{ entryId: string; path: string[] }> => {
+    for (const item of categories) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      const label = typeof record.label === "string" ? record.label.trim() : "";
+      const nextPath = label ? [...parentPath, label] : parentPath;
+
+      const entries = Array.isArray(record.entries)
+        ? record.entries
+            .map((value) => (typeof value === "string" ? value : value != null ? String(value) : ""))
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [];
+
+      for (const entryId of entries) {
+        collector.push({ entryId, path: [...nextPath] });
+      }
+
+      if (Array.isArray(record.children)) {
+        flattenCategories(record.children, nextPath, collector);
+      }
+    }
+    return collector;
+  };
+
+  const source =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).categories
+      : null;
+
+  if (Array.isArray(source)) {
+    return { assignments: flattenCategories(source) };
+  }
+
+  const resultSource =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).result
+      : null;
+
+  if (resultSource && typeof resultSource === "object" && Array.isArray((resultSource as Record<string, unknown>).categories)) {
+    return { assignments: flattenCategories((resultSource as Record<string, unknown>).categories as unknown[]) };
+  }
+
+  return null;
 }
 
 const ASSIGNMENTS_SCHEMA = {
@@ -466,7 +527,10 @@ async function generateCategorySummary(
     "summaries",
     "lore_recall_category_summaries",
     CATEGORY_SUMMARIES_SCHEMA,
-    SUMMARY_SYSTEM_PROMPT,
+    {
+      systemPrompt: SUMMARY_SYSTEM_PROMPT,
+      maxTokensOverride: Math.min(settings.controllerMaxTokens, 700),
+    },
   );
   const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
@@ -515,7 +579,10 @@ async function generateEntrySummaryBatch(
     "entries",
     "lore_recall_entry_summaries",
     ENTRY_SUMMARIES_SCHEMA,
-    SUMMARY_SYSTEM_PROMPT,
+    {
+      systemPrompt: SUMMARY_SYSTEM_PROMPT,
+      maxTokensOverride: Math.min(settings.controllerMaxTokens, 1400),
+    },
   );
   const parsed = controllerResult.parsed;
   if (!parsed || !Array.isArray(parsed.entries)) {
@@ -870,9 +937,14 @@ export async function buildTreeWithLlm(
           "assignments",
           "lore_recall_tree_assignments",
           ASSIGNMENTS_SCHEMA,
-          CATEGORIZATION_SYSTEM_PROMPT,
+          {
+            systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
+            maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200),
+          },
         );
-        const parsed = controllerResult.parsed;
+        const parsed =
+          controllerResult.parsed ??
+          normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
         if (!parsed || !Array.isArray(parsed.assignments)) {
           throw new ControllerJsonError(
             `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
@@ -895,6 +967,7 @@ export async function buildTreeWithLlm(
               settings,
               prompt,
               rawContent: controllerResult.rawContent,
+              rawReasoning: controllerResult.rawReasoning,
               entrySample: chunk.slice(0, 12).map((entry) => ({
                 entryId: entry.entryId,
                 label: entry.label,

@@ -1603,22 +1603,23 @@ function buildControllerDebugPayload(input) {
     responseLength: input.rawContent.length,
     promptPreview: truncateText(input.prompt, 12000),
     responsePreview: truncateText(input.rawContent || "<empty response>", 12000),
+    reasoningPreview: truncateText(input.rawReasoning || "<empty reasoning>", 12000),
     entrySample: input.entrySample ?? [],
     capturedAt: Date.now()
   }, null, 2);
 }
-async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema, systemPrompt) {
+async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
   const connection = settings.controllerConnectionId?.trim() ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null) : null;
   const structuredParameters = primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [
-      ...systemPrompt ? [{ role: "system", content: systemPrompt }] : [],
+      ...options.systemPrompt ? [{ role: "system", content: options.systemPrompt }] : [],
       { role: "user", content: prompt }
     ],
     parameters: {
       temperature: settings.controllerTemperature,
-      max_tokens: settings.controllerMaxTokens,
+      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...structuredParameters
     },
     ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
@@ -1653,6 +1654,37 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     return { parsed: normalized, ...base };
   spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`);
   return { parsed: null, ...base };
+}
+function normalizeAssignmentsPayload(parsed) {
+  const normalized = normalizeArrayPayload(parsed, "assignments");
+  if (normalized && Array.isArray(normalized.assignments))
+    return normalized;
+  const flattenCategories = (categories, parentPath = [], collector = []) => {
+    for (const item of categories) {
+      if (!item || typeof item !== "object")
+        continue;
+      const record = item;
+      const label = typeof record.label === "string" ? record.label.trim() : "";
+      const nextPath = label ? [...parentPath, label] : parentPath;
+      const entries = Array.isArray(record.entries) ? record.entries.map((value) => typeof value === "string" ? value : value != null ? String(value) : "").map((value) => value.trim()).filter(Boolean) : [];
+      for (const entryId of entries) {
+        collector.push({ entryId, path: [...nextPath] });
+      }
+      if (Array.isArray(record.children)) {
+        flattenCategories(record.children, nextPath, collector);
+      }
+    }
+    return collector;
+  };
+  const source = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.categories : null;
+  if (Array.isArray(source)) {
+    return { assignments: flattenCategories(source) };
+  }
+  const resultSource = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.result : null;
+  if (resultSource && typeof resultSource === "object" && Array.isArray(resultSource.categories)) {
+    return { assignments: flattenCategories(resultSource.categories) };
+  }
+  return null;
 }
 var ASSIGNMENTS_SCHEMA = {
   type: "object",
@@ -1740,7 +1772,10 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
     }))
   ].filter(Boolean).join(`
 `);
-  const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, SUMMARY_SYSTEM_PROMPT);
+  const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
+    systemPrompt: SUMMARY_SYSTEM_PROMPT,
+    maxTokensOverride: Math.min(settings.controllerMaxTokens, 700)
+  });
   const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
     throw new Error("The controller did not return usable category summary JSON.");
@@ -1776,7 +1811,10 @@ function buildEntrySummaryPrompt(entries) {
 async function generateEntrySummaryBatch(entries, settings, userId) {
   if (!entries.length)
     return [];
-  const controllerResult = await runControllerJson2(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, SUMMARY_SYSTEM_PROMPT);
+  const controllerResult = await runControllerJson2(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
+    systemPrompt: SUMMARY_SYSTEM_PROMPT,
+    maxTokensOverride: Math.min(settings.controllerMaxTokens, 1400)
+  });
   const parsed = controllerResult.parsed;
   if (!parsed || !Array.isArray(parsed.entries)) {
     throw new Error("The controller did not return usable entry summary JSON.");
@@ -2074,8 +2112,11 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           }))
         ].join(`
 `);
-        const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, CATEGORIZATION_SYSTEM_PROMPT);
-        const parsed = controllerResult.parsed;
+        const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
+          systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
+          maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
+        });
+        const parsed = controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
         if (!parsed || !Array.isArray(parsed.assignments)) {
           throw new ControllerJsonError(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`, buildControllerDebugPayload({
             phase: "build_tree_with_llm.assignments",
@@ -2096,6 +2137,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
             settings,
             prompt,
             rawContent: controllerResult.rawContent,
+            rawReasoning: controllerResult.rawReasoning,
             entrySample: chunk.slice(0, 12).map((entry) => ({
               entryId: entry.entryId,
               label: entry.label
