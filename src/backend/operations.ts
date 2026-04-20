@@ -108,6 +108,7 @@ interface ControllerJsonResult {
 interface ControllerJsonOptions {
   systemPrompt?: string;
   maxTokensOverride?: number;
+  disableReasoning?: boolean;
 }
 
 class ControllerJsonError extends Error {
@@ -217,6 +218,24 @@ function buildStructuredJsonParameters(
   return {};
 }
 
+function buildNoReasoningParameters(provider: string | null): Record<string, unknown> {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+
+  if (normalizedProvider === "openrouter") {
+    return { reasoning: { effort: "none" } };
+  }
+
+  if (normalizedProvider === "nanogpt") {
+    return { reasoning_effort: "none" };
+  }
+
+  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
+    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
+  }
+
+  return { reasoning: { effort: "none" } };
+}
+
 function buildControllerDebugPayload(input: {
   phase: string;
   expectedKey: string;
@@ -293,6 +312,7 @@ async function runControllerJson(
       : null;
   const structuredParameters =
     primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
+  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
 
   const result = await spindle.generate.quiet({
     type: "quiet",
@@ -303,6 +323,7 @@ async function runControllerJson(
     parameters: {
       temperature: settings.controllerTemperature,
       max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
+      ...noReasoningParameters,
       ...structuredParameters,
     },
     ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),

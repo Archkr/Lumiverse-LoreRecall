@@ -1573,6 +1573,19 @@ function buildStructuredJsonParameters(provider, schemaName, schema) {
   }
   return {};
 }
+function buildNoReasoningParameters(provider) {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+  if (normalizedProvider === "openrouter") {
+    return { reasoning: { effort: "none" } };
+  }
+  if (normalizedProvider === "nanogpt") {
+    return { reasoning_effort: "none" };
+  }
+  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
+    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
+  }
+  return { reasoning: { effort: "none" } };
+}
 function buildControllerDebugPayload(input) {
   return JSON.stringify({
     error: input.error,
@@ -1611,6 +1624,7 @@ function buildControllerDebugPayload(input) {
 async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
   const connection = settings.controllerConnectionId?.trim() ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null) : null;
   const structuredParameters = primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
+  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [
@@ -1620,6 +1634,7 @@ async function runControllerJson2(prompt, settings, userId, primaryKey, schemaNa
     parameters: {
       temperature: settings.controllerTemperature,
       max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
+      ...noReasoningParameters,
       ...structuredParameters
     },
     ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
