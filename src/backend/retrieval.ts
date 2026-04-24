@@ -227,6 +227,38 @@ const THREAT_OR_RULE_TERMS = [
   "weapons",
 ];
 
+const PERSON_TERMS = [
+  "ally",
+  "allies",
+  "captain",
+  "character",
+  "child",
+  "commander",
+  "companion",
+  "doctor",
+  "friend",
+  "girl",
+  "guide",
+  "hero",
+  "king",
+  "knight",
+  "leader",
+  "man",
+  "mentor",
+  "officer",
+  "person",
+  "prince",
+  "princess",
+  "queen",
+  "ranger",
+  "scout",
+  "soldier",
+  "teacher",
+  "villager",
+  "warrior",
+  "woman",
+];
+
 function stripCodeFences(content: string): string {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
@@ -483,21 +515,74 @@ function buildSceneSelectionSignals(recentConversation: string): SceneSelectionS
 
 function countPhraseOccurrences(haystack: string, phrase: string): number {
   if (!haystack || !phrase) return 0;
+  const normalizedHaystack = ` ${normalizeSearchText(haystack)} `;
+  const normalizedPhrase = normalizeSearchText(phrase);
+  if (!normalizedPhrase) return 0;
   let count = 0;
   let fromIndex = 0;
-  while (fromIndex < haystack.length) {
-    const matchIndex = haystack.indexOf(phrase, fromIndex);
+  const needle = ` ${normalizedPhrase} `;
+  while (fromIndex < normalizedHaystack.length) {
+    const matchIndex = normalizedHaystack.indexOf(needle, fromIndex);
     if (matchIndex === -1) break;
     count += 1;
-    fromIndex = matchIndex + phrase.length;
+    fromIndex = matchIndex + needle.length;
   }
   return count;
 }
 
-function buildEntryMentionPhrases(entry: RuntimeBook["cache"]["entries"][number]): string[] {
-  return uniqueStrings([entry.label, ...entry.aliases, entry.comment])
+function normalizeVariantList(values: string[]): string[] {
+  return uniqueStrings(values)
     .map((value) => normalizeSearchText(value))
     .filter((value) => value.length >= 3);
+}
+
+function buildEntryRoleDescriptor(entry: RuntimeBook["cache"]["entries"][number]): string {
+  return normalizeSearchText([entry.label, entry.summary, entry.groupName, entry.comment, ...entry.tags].join(" "));
+}
+
+function isLikelyEntityLabel(label: string): boolean {
+  const rawTokens = label
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.replace(/[^A-Za-z0-9'_-]/g, ""))
+    .filter(Boolean);
+  if (!rawTokens.length || rawTokens.length > 3) return false;
+  const normalized = normalizeSearchText(label);
+  if (
+    matchesDescriptorTerm(normalized, GROUP_TERMS) ||
+    matchesDescriptorTerm(normalized, LOCATION_TERMS) ||
+    matchesDescriptorTerm(normalized, EVENT_TERMS) ||
+    matchesDescriptorTerm(normalized, THREAT_OR_RULE_TERMS)
+  ) {
+    return false;
+  }
+  return rawTokens.every((token) => /^[A-Z][A-Za-z0-9'_-]*$/.test(token));
+}
+
+function buildEntityShortVariants(entry: RuntimeBook["cache"]["entries"][number]): string[] {
+  if (!isLikelyEntityLabel(entry.label)) return [];
+  const tokens = normalizeSearchText(entry.label)
+    .split(" ")
+    .filter(Boolean);
+  if (tokens.length < 2 || tokens.length > 3) return [];
+
+  const variants: string[] = [];
+  if (tokens[0] && tokens[0].length >= 4) variants.push(tokens[0]);
+  if (tokens.length >= 2) variants.push(tokens.slice(0, 2).join(" "));
+  const lastToken = tokens[tokens.length - 1];
+  if (lastToken && lastToken.length >= 5 && lastToken !== tokens[0]) {
+    variants.push(lastToken);
+  }
+  return normalizeVariantList(variants);
+}
+
+function buildEntryMentionPhrases(
+  entry: RuntimeBook["cache"]["entries"][number],
+  allowShortVariants = false,
+): string[] {
+  const baseVariants = normalizeVariantList([entry.label, ...entry.aliases, entry.comment]);
+  if (!allowShortVariants) return baseVariants;
+  return normalizeVariantList([...baseVariants, ...buildEntityShortVariants(entry)]);
 }
 
 function matchesDescriptorTerm(descriptor: string, terms: string[]): boolean {
@@ -506,7 +591,6 @@ function matchesDescriptorTerm(descriptor: string, terms: string[]): boolean {
 
 function inferSelectionRole(
   entry: RuntimeBook["cache"]["entries"][number],
-  book: RuntimeBook | undefined,
   signals: SceneSelectionSignals,
 ): {
   role: NonNullable<PreviewNode["selectionRole"]>;
@@ -515,7 +599,44 @@ function inferSelectionRole(
   overallMention: boolean;
   mentionCount: number;
 } {
-  const mentionPhrases = buildEntryMentionPhrases(entry);
+  const labelDescriptor = normalizeSearchText(entry.label);
+  const commentDescriptor = normalizeSearchText(entry.comment);
+  const groupNameDescriptor = normalizeSearchText(entry.groupName);
+  const summaryDescriptor = normalizeSearchText(entry.summary);
+  const descriptor = buildEntryRoleDescriptor(entry);
+  const personCue =
+    isLikelyEntityLabel(entry.label) &&
+    (matchesDescriptorTerm(labelDescriptor, PERSON_TERMS) ||
+      matchesDescriptorTerm(commentDescriptor, PERSON_TERMS) ||
+      matchesDescriptorTerm(summaryDescriptor, PERSON_TERMS));
+
+  const explicitGroupCue =
+    matchesDescriptorTerm(labelDescriptor, GROUP_TERMS) ||
+    matchesDescriptorTerm(commentDescriptor, GROUP_TERMS) ||
+    matchesDescriptorTerm(groupNameDescriptor, GROUP_TERMS);
+  const summaryGroupSupport =
+    !personCue &&
+    matchesDescriptorTerm(summaryDescriptor, GROUP_TERMS) &&
+    (summaryDescriptor.includes("act as a group") ||
+      summaryDescriptor.includes("serve as a group") ||
+      summaryDescriptor.includes("work as a team") ||
+      summaryDescriptor.includes("collective") ||
+      summaryDescriptor.includes("relationship"));
+  const groupCue = explicitGroupCue || summaryGroupSupport;
+  const threatCue =
+    matchesDescriptorTerm(labelDescriptor, THREAT_OR_RULE_TERMS) ||
+    (!personCue &&
+      (matchesDescriptorTerm(summaryDescriptor, THREAT_OR_RULE_TERMS) ||
+        matchesDescriptorTerm(descriptor, THREAT_OR_RULE_TERMS)));
+  const eventCue =
+    matchesDescriptorTerm(labelDescriptor, EVENT_TERMS) ||
+    (!personCue &&
+      (matchesDescriptorTerm(summaryDescriptor, EVENT_TERMS) || matchesDescriptorTerm(descriptor, EVENT_TERMS)));
+  const locationCue =
+    matchesDescriptorTerm(labelDescriptor, LOCATION_TERMS) ||
+    (!personCue && matchesDescriptorTerm(summaryDescriptor, LOCATION_TERMS));
+
+  const mentionPhrases = buildEntryMentionPhrases(entry, !groupCue && !locationCue && !eventCue && !threatCue);
   const latestMentionCount = mentionPhrases.reduce(
     (total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase),
     0,
@@ -526,19 +647,6 @@ function inferSelectionRole(
   );
   const latestMention = latestMentionCount > 0;
   const overallMention = overallMentionCount > 0;
-
-  const breadcrumb = book ? getEntryBreadcrumb(entry, book.tree) : entry.label;
-  const labelDescriptor = normalizeSearchText([entry.label, breadcrumb].join(" "));
-  const descriptor = normalizeSearchText(
-    [entry.label, entry.summary, entry.groupName, entry.comment, breadcrumb, ...entry.tags].join(" "),
-  );
-
-  const groupCue = matchesDescriptorTerm(labelDescriptor, GROUP_TERMS) || matchesDescriptorTerm(descriptor, GROUP_TERMS);
-  const threatCue =
-    matchesDescriptorTerm(labelDescriptor, THREAT_OR_RULE_TERMS) || matchesDescriptorTerm(normalizeSearchText(entry.summary), THREAT_OR_RULE_TERMS);
-  const eventCue =
-    matchesDescriptorTerm(labelDescriptor, EVENT_TERMS) || matchesDescriptorTerm(normalizeSearchText(entry.summary), EVENT_TERMS);
-  const locationCue = matchesDescriptorTerm(labelDescriptor, LOCATION_TERMS);
 
   if (groupCue) {
     return {
@@ -611,7 +719,6 @@ function rankSelectionCandidates(
   scopes: TraversalScope[],
 ): RankedSelectionCandidate[] {
   const signals = buildSceneSelectionSignals(recentConversation);
-  const booksById = new Map(scopes.map((scope) => [scope.book.summary.id, scope.book]));
   const roleWeight: Record<NonNullable<PreviewNode["selectionRole"]>, number> = {
     present_entity: 600,
     mentioned_entity: 500,
@@ -624,11 +731,10 @@ function rankSelectionCandidates(
 
   return candidates
     .map((candidate) => {
-      const book = booksById.get(candidate.entry.worldBookId);
       const scope = scopes.find((item) =>
         getScopedEntryIds(item.book, item.nodeId, true).includes(candidate.entry.entryId),
       );
-      const inferred = inferSelectionRole(candidate.entry, book, signals);
+      const inferred = inferSelectionRole(candidate.entry, signals);
       let priority = roleWeight[inferred.role] + candidate.score * 10 + inferred.mentionCount * 20;
       if (inferred.latestMention) priority += 60;
       if (inferred.overallMention) priority += 20;
@@ -711,20 +817,29 @@ function buildDeterministicSelection(
   return results.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
 }
 
-function summarizeSelection(selection: ScoredEntry[]): string {
+function summarizeSelection(selection: ScoredEntry[], availableCandidates: ScoredEntry[] = selection): string {
   if (!selection.length) return "No entries selected.";
+  const presentCount = selection.filter((item) => item.selectionRole === "present_entity").length;
+  const groupCount = selection.filter((item) => item.selectionRole === "group_cover").length;
+  const availablePresentCount = availableCandidates.filter((item) => item.selectionRole === "present_entity").length;
   const roles = new Set(selection.map((item) => item.selectionRole).filter(Boolean));
-  if (roles.has("present_entity") && roles.has("group_cover")) {
-    return "Scene-first selection prioritized focal present entities with compact group coverage and minimal helper context.";
+  if (groupCount > selection.length / 2 && availablePresentCount > presentCount) {
+    return "Warning: group-style coverage dominated even though present entities were available; role tagging or selection may still need adjustment.";
   }
-  if (roles.has("present_entity")) {
-    return "Scene-first selection prioritized focal present entities before secondary context.";
+  if (presentCount > 0 && groupCount > 0) {
+    return "Present entities plus group coverage.";
+  }
+  if (presentCount > 0) {
+    return "Present-entity focused.";
   }
   if (roles.has("mentioned_entity")) {
     return "Scene-first selection prioritized explicitly mentioned entities before helper context.";
   }
+  if (groupCount > selection.length / 2) {
+    return "Helper-heavy fallback: group-style coverage dominated because direct focal entities were not confidently detected.";
+  }
   if (roles.has("location_context") || roles.has("event_context") || roles.has("threat_or_rule_context")) {
-    return "Scene-first selection favored helper context because explicit focal entities were limited.";
+    return "Helper-heavy fallback: helper context outweighed explicit focal entities.";
   }
   return "Scene-first selection kept a small generic context set.";
 }
@@ -1032,6 +1147,9 @@ async function maybeSelectEntries(
     "Choose the best overall set for the scene, not a representative sample of scopes.",
     "Multiple entries may come from the same scope. Some scopes may contribute zero entries.",
     "Prioritize focal present or explicitly mentioned entities first.",
+    "Role hints are advisory for each entry only, not a signal to prefer many entries with the same role.",
+    "Choose named focal entities before relationship or collective entries when both are available.",
+    "Use a group or relationship entry to compress coverage, not to replace clearly named present entities.",
     "When several related entities are active, one strong group or relationship entry may cover the ensemble better than many weak individuals.",
     "Add place, event, threat, rule, or power context only when it materially changes how the next reply should be written.",
     "Do not pad the list with loosely related helper entries just because they are available.",
@@ -2635,7 +2753,7 @@ export async function buildRetrievalPreview(
   const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
   const injectedNodes = buildPreviewNodes(included, booksById);
   const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
-  const selectionSummary = summarizeSelection(selected);
+  const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
   const manifestCounts = new Map<string, number>(
     manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]),
   );

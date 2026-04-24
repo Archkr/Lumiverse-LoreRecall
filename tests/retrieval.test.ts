@@ -153,8 +153,8 @@ function makeHarborBook(): RuntimeBook {
     description: "People, places, emergencies, and local groups around a busy port settlement.",
     categories: [
       {
-        id: "people",
-        label: "People",
+        id: "trusted-allies",
+        label: "Trusted Allies",
         summary: "Named individuals and collective relationships in the harbor.",
         entries: [
           {
@@ -174,6 +174,19 @@ function makeHarborBook(): RuntimeBook {
             label: "Harbor Collective",
             summary: "The harbor crew, couriers, and watch coordinators act as a group when the port is under pressure.",
             text: "The Harbor Collective is a group entry covering how the harbor crew coordinate as a team.",
+          },
+        ],
+      },
+      {
+        id: "events",
+        label: "Events",
+        summary: "Current and recent incidents affecting the harbor.",
+        entries: [
+          {
+            id: "floodfront-evacuation",
+            label: "Floodfront Evacuation",
+            summary: "An evacuation operation triggered when the floodfront pushes civilians inland.",
+            text: "Floodfront Evacuation is an event entry covering the harbor's emergency withdrawal route.",
           },
         ],
       },
@@ -302,12 +315,38 @@ describe("Lore Recall retrieval helpers", () => {
     expect(manifests[0]?.candidates).toHaveLength(11);
   });
 
+  it("classifies short-name mentions as present entities for person-like entries", () => {
+    const book = makeHarborBook();
+    const recentConversation = "User: Rowan leaned on the rail and watched the floodlights come on.";
+    const scopes = [{ book, nodeId: "trusted-allies" }];
+
+    const candidates = __testing.collectCandidatesForScopes(recentConversation, scopes);
+    const ranked = __testing.rankSelectionCandidates(recentConversation, candidates, scopes);
+
+    expect(ranked.find((item) => item.candidate.entry.entryId === "captain-rowan")?.selectionRole).toBe(
+      "present_entity",
+    );
+  });
+
+  it("does not infer group coverage from breadcrumb-like category names", () => {
+    const book = makeHarborBook();
+    const recentConversation = "User: The square was quiet and nobody moved.";
+    const scopes = [{ book, nodeId: "trusted-allies" }];
+
+    const candidates = __testing.collectCandidatesForScopes(recentConversation, scopes);
+    const ranked = __testing.rankSelectionCandidates(recentConversation, candidates, scopes);
+
+    expect(ranked.find((item) => item.candidate.entry.entryId === "captain-rowan")?.selectionRole).toBe("background");
+    expect(ranked.find((item) => item.candidate.entry.entryId === "mira-vale")?.selectionRole).toBe("background");
+  });
+
   it("prefers focal entities and compact group coverage over one-per-scope spreading", () => {
     const book = makeHarborBook();
     const recentConversation =
       "User: Captain Rowan and Mira Vale stood on North Pier while everyone in the harbor crew gathered together as the Red Tide rolled closer.";
     const scopes = [
-      { book, nodeId: "people" },
+      { book, nodeId: "trusted-allies" },
+      { book, nodeId: "events" },
       { book, nodeId: "places" },
       { book, nodeId: "threats" },
     ];
@@ -319,6 +358,9 @@ describe("Lore Recall retrieval helpers", () => {
     expect(ranked.find((item) => item.candidate.entry.entryId === "north-pier")?.selectionRole).toBe("location_context");
     expect(ranked.find((item) => item.candidate.entry.entryId === "red-tide")?.selectionRole).toBe(
       "threat_or_rule_context",
+    );
+    expect(ranked.find((item) => item.candidate.entry.entryId === "floodfront-evacuation")?.selectionRole).toBe(
+      "event_context",
     );
     expect(ranked.find((item) => item.candidate.entry.entryId === "harbor-collective")?.selectionRole).toBe(
       "group_cover",
@@ -337,7 +379,8 @@ describe("Lore Recall retrieval helpers", () => {
     const recentConversation =
       "User: Captain Rowan and Mira Vale stood on North Pier while everyone in the harbor crew gathered together as the Red Tide rolled closer.";
     const scopes = [
-      { book, nodeId: "people" },
+      { book, nodeId: "trusted-allies" },
+      { book, nodeId: "events" },
       { book, nodeId: "places" },
       { book, nodeId: "threats" },
     ];
@@ -378,9 +421,10 @@ describe("Lore Recall retrieval helpers", () => {
     );
     expect(preview?.recentConversation).not.toContain("Important note:");
     expect(preview?.fallbackPath[0]).toContain("top-level deterministic scope fallback");
-    expect(preview?.selectionSummary).toContain("Scene-first selection");
+    expect(preview?.selectionSummary?.toLowerCase()).toContain("present");
     expect(preview?.scopeManifestCounts.some((scope) => scope.manifestEntryCount >= 1)).toBeTrue();
     expect(preview?.manifestSelectedEntries.some((node) => !!node.selectionRole)).toBeTrue();
+    expect(preview?.manifestSelectedEntries.some((node) => node.entryId === "captain-rowan" && node.selectionRole === "present_entity")).toBeTrue();
     expect(preview?.manifestSelectedEntries.every((node) => node.worldBookName === "Harbor Chronicle")).toBeTrue();
   });
 });
