@@ -7,7 +7,7 @@ Lore Recall is a Lumiverse-native Spindle extension for tree-aware world book re
 Lore Recall is currently packaged as an early testing release.
 
 - Version: `0.1.1`
-- Minimum Lumiverse version: `0.1.0`
+- Minimum Lumiverse version: `0.9.0`
 - Status: usable for testing, but retrieval behavior, diagnostics, and UI polish are still evolving
 
 This release is meant to make real-world testing easier, not to claim that every workflow is final.
