@@ -139,22 +139,6 @@ The extension currently requests these Spindle permissions in [`spindle.json`](.
 7. Verify that `Lore Recall` now appears in your extension list.
 8. Open a character chat and access Lore Recall through the Extensions drawer.
 
-That is the recommended path for testers.
-
-### Local Developer Install
-
-1. Clone the repository and move into the project folder.
-2. Install dependencies and build the extension bundles with your local toolchain.
-3. Confirm the repo contains the extension artifacts Lumiverse expects:
-
-- `spindle.json`
-- `dist/backend.js`
-- `dist/frontend.js`
-
-4. Install or load the checked-out folder as a local Spindle extension in Lumiverse.
-
-If you are iterating locally, rebuild after source changes so Lumiverse sees fresh `dist` output.
-
 ## Quick Start
 
 1. Open a character chat in Lumiverse.
