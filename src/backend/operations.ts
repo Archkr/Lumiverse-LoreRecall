@@ -32,6 +32,13 @@ import type {
 } from "../types";
 import type { IndexedEntry, RuntimeBook } from "./contracts";
 import {
+  normalizeArrayPayload,
+  parseJsonValue,
+  runControllerJson as runSharedControllerJson,
+  type ControllerJsonOptions,
+  type ControllerJsonResult,
+} from "./controller-json";
+import {
   BOOK_CONFIG_DIR,
   CHARACTER_CONFIG_DIR,
   GLOBAL_SETTINGS_PATH,
@@ -82,38 +89,10 @@ export interface OperationOutcome<T = void> {
   total: number;
 }
 
-const THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
 const CATEGORIZATION_SYSTEM_PROMPT =
   "You are a categorization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
 const SUMMARY_SYSTEM_PROMPT =
   "You are a summarization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
-
-function sanitizeControllerText(value: string): string {
-  return value
-    .replace(THINK_BLOCK_RE, "")
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-}
-
-interface ControllerJsonResult {
-  parsed: Record<string, unknown> | null;
-  rawContent: string;
-  rawReasoning: string;
-  parsedFrom: "content" | "reasoning" | null;
-  provider: string | null;
-  model: string | null;
-  connectionId: string | null;
-  finishReason: string | null;
-  toolCallsCount: number | null;
-  usage: Record<string, unknown> | null;
-}
-
-interface ControllerJsonOptions {
-  systemPrompt?: string;
-  maxTokensOverride?: number;
-  disableReasoning?: boolean;
-}
 
 function buildAssignmentEntryPayload(entry: IndexedEntry, detail: GlobalLoreRecallSettings["buildDetail"]): Record<string, unknown> {
   const base: Record<string, unknown> = {
@@ -417,117 +396,6 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function extractGenerationContent(result: unknown): string {
-  return result && typeof result === "object" && typeof (result as { content?: unknown }).content === "string"
-    ? (result as { content: string }).content
-    : "";
-}
-
-function extractGenerationUsage(result: unknown): Record<string, unknown> | null {
-  if (!result || typeof result !== "object") return null;
-  const usage = (result as { usage?: unknown }).usage;
-  return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
-}
-
-function extractGenerationReasoning(result: unknown): string {
-  return result && typeof result === "object" && typeof (result as { reasoning?: unknown }).reasoning === "string"
-    ? (result as { reasoning: string }).reasoning
-    : "";
-}
-
-function parseJsonValue(content: string): unknown {
-  const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  if (!cleaned) return null;
-
-  try {
-    return JSON.parse(cleaned) as unknown;
-  } catch {
-    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      try {
-        return JSON.parse(objectMatch[0]) as unknown;
-      } catch {
-        // Fall through and try array extraction below.
-      }
-    }
-
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      try {
-        return JSON.parse(arrayMatch[0]) as unknown;
-      } catch {
-        return null;
-      }
-    }
-
-    return null;
-  }
-}
-
-function normalizeArrayPayload(parsed: unknown, primaryKey: string): Record<string, unknown> | null {
-  if (Array.isArray(parsed)) return { [primaryKey]: parsed };
-  if (!parsed || typeof parsed !== "object") return null;
-
-  const record = parsed as Record<string, unknown>;
-  if (Array.isArray(record[primaryKey])) return record;
-  if (Array.isArray(record.data)) return { [primaryKey]: record.data };
-  if (Array.isArray(record.items)) return { [primaryKey]: record.items };
-
-  const result = record.result;
-  if (result && typeof result === "object" && Array.isArray((result as Record<string, unknown>)[primaryKey])) {
-    return { [primaryKey]: (result as Record<string, unknown>)[primaryKey] };
-  }
-
-  return null;
-}
-
-function buildStructuredJsonParameters(
-  provider: string | null,
-  schemaName: string,
-  schema: Record<string, unknown>,
-): Record<string, unknown> {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-
-  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
-    return {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-    };
-  }
-
-  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
-    return {
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: schemaName,
-          schema,
-        },
-      },
-    };
-  }
-
-  return {};
-}
-
-function buildNoReasoningParameters(provider: string | null): Record<string, unknown> {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-
-  if (normalizedProvider === "openrouter") {
-    return { reasoning: { effort: "none" } };
-  }
-
-  if (normalizedProvider === "nanogpt") {
-    return { reasoning_effort: "none" };
-  }
-
-  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
-    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
-  }
-
-  return { reasoning: { effort: "none" } };
-}
-
 function buildControllerDebugPayload(input: {
   phase: string;
   expectedKey: string;
@@ -598,67 +466,18 @@ async function runControllerJson(
   schema?: Record<string, unknown>,
   options: ControllerJsonOptions = {},
 ): Promise<ControllerJsonResult> {
-  const connection =
-    settings.controllerConnectionId?.trim()
-      ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null)
-      : null;
-  const structuredParameters =
-    primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
-  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
-
-  const result = await spindle.generate.quiet({
-    type: "quiet",
-    messages: [
-      ...(options.systemPrompt ? [{ role: "system" as const, content: options.systemPrompt }] : []),
-      { role: "user" as const, content: prompt },
-    ],
-    parameters: {
-      temperature: settings.controllerTemperature,
-      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
-      ...noReasoningParameters,
-      ...structuredParameters,
-    },
-    ...(settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {}),
-    userId,
+  const result = await runSharedControllerJson(prompt, settings, userId, {
+    ...options,
+    primaryKey,
+    schemaName,
+    schema,
   });
-  const content = sanitizeControllerText(extractGenerationContent(result));
-  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
-  const parseSource = content || reasoning;
-  const parsedFrom: "content" | "reasoning" | null = content ? "content" : reasoning ? "reasoning" : null;
-  const base = {
-    rawContent: content,
-    rawReasoning: reasoning,
-    parsedFrom,
-    provider: connection?.provider ?? null,
-    model: connection?.model ?? null,
-    connectionId: settings.controllerConnectionId?.trim() || null,
-    finishReason:
-      result && typeof result === "object" && typeof (result as { finish_reason?: unknown }).finish_reason === "string"
-        ? ((result as { finish_reason: string }).finish_reason ?? null)
-        : null,
-    toolCallsCount:
-      result && typeof result === "object" && Array.isArray((result as { tool_calls?: unknown }).tool_calls)
-        ? ((result as { tool_calls: unknown[] }).tool_calls?.length ?? 0)
-        : null,
-    usage: extractGenerationUsage(result),
-  };
-  if (!parseSource) return { parsed: null, ...base };
-
-  const parsed = parseJsonValue(parseSource);
-  if (!primaryKey) {
-    return {
-      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null,
-      ...base,
-    };
-  }
-
-  const normalized = normalizeArrayPayload(parsed, primaryKey);
-  if (normalized) return { parsed: normalized, ...base };
+  if (result.parsed || !primaryKey) return result;
 
   spindle.log.warn(
-    `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`,
+    `Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${result.provider ?? "default"} parsedFrom=${result.parsedFrom ?? "none"} content=${result.rawContent.slice(0, 180)} reasoning=${result.rawReasoning.slice(0, 180)}`,
   );
-  return { parsed: null, ...base };
+  return result;
 }
 
 function normalizeAssignmentsPayload(parsed: unknown): Record<string, unknown> | null {

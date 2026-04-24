@@ -1175,18 +1175,28 @@ var LORE_RECALL_CSS = `
 .lore-feed {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+
+.lore-feed-filters {
+  gap: 6px;
+}
+
+.lore-feed-filters .lore-chip {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11px;
 }
 
 .lore-feed-session {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 8px;
+  padding: 0;
   border: 1px solid var(--lr-line);
   border-radius: var(--lr-r);
   background: var(--lr-bg-0);
-  border-left: 3px solid var(--lr-line-2);
+  border-left: 2px solid var(--lr-line-2);
 }
 
 .lore-feed-session.info { border-left-color: var(--lr-acc); }
@@ -1195,35 +1205,84 @@ var LORE_RECALL_CSS = `
 .lore-feed-session.error { border-left-color: var(--lr-warn); }
 
 .lore-feed-session-head {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lore-feed-session-head:hover {
+  background: color-mix(in srgb, var(--lr-text) 2.5%, transparent);
+}
+
+.lore-feed-session-copy {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.lore-feed-session-caret {
+  color: var(--lr-dim);
+  font-size: 0;
+  flex-shrink: 0;
+}
+
+.lore-feed-session-caret::before {
+  content: ">";
+  font-size: 11px;
+}
+
+.lore-feed-session-toggle[aria-expanded="true"] .lore-feed-session-caret::before {
+  content: "v";
 }
 
 .lore-feed-session-title {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--lr-text);
+  min-width: 0;
 }
 
-.lore-feed-session-subtitle {
-  font-size: 11px;
-  color: var(--lr-dim);
+.lore-feed-session-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.lore-feed-session-meta .lore-tag,
+.lore-feed-session-meta .lore-status,
+.lore-feed-item-stamps .lore-tag,
+.lore-feed-item-meta .lore-tag,
+.lore-feed-chip-row .lore-tag {
+  font-size: 10px;
 }
 
 .lore-feed-session-items {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--lr-line);
-  margin: 0 -12px -12px;
+}
+
+.lore-feed-session-items[hidden] {
+  display: none;
 }
 
 .lore-feed-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 8px 11px;
   border-bottom: 1px solid var(--lr-line);
 }
 
@@ -1232,18 +1291,18 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-item-icon {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   background: color-mix(in srgb, var(--lr-text) 8%, transparent);
   color: var(--lr-text);
   flex-shrink: 0;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .lore-feed-item.info .lore-feed-item-icon {
@@ -1265,46 +1324,53 @@ var LORE_RECALL_CSS = `
 .lore-feed-item-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 
 .lore-feed-item-top {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: baseline;
   justify-content: space-between;
 }
 
 .lore-feed-item-label {
-  font-size: 12.5px;
+  font-size: 11.75px;
   font-weight: 600;
   color: var(--lr-text);
   min-width: 0;
 }
 
+.lore-feed-item-stamps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .lore-feed-item-time {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--lr-dim);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .lore-feed-item-summary {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--lr-muted);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .lore-feed-item-meta {
-  gap: 6px;
+  gap: 5px;
 }
 
 .lore-feed-details {
+  margin-top: 2px;
   border: 1px solid var(--lr-line);
-  border-radius: var(--lr-r);
-  background: color-mix(in srgb, var(--lr-text) 2%, transparent);
-  overflow: hidden;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lr-text) 1.5%, transparent);
 }
 
 .lore-feed-details-summary {
@@ -1313,7 +1379,7 @@ var LORE_RECALL_CSS = `
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   cursor: pointer;
 }
 
@@ -1322,44 +1388,72 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-details-toggle {
-  font-size: 11.5px;
+  font-size: 10.5px;
   color: var(--lr-muted);
-  font-weight: 500;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .lore-feed-details-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 0 10px 10px;
+  gap: 8px;
+  padding: 0 9px 9px;
 }
 
 .lore-feed-detail-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .lore-feed-detail-title {
-  font-size: 10.5px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--lr-dim);
   font-weight: 600;
 }
 
+.lore-feed-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .lore-feed-scope-list,
 .lore-feed-entry-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
-.lore-feed-scope-card,
-.lore-feed-entry-row {
-  padding: 10px 11px;
+.lore-feed-detail-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 9px;
   border: 1px solid var(--lr-line);
-  border-radius: var(--lr-r);
-  background: var(--lr-panel);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lr-panel) 85%, transparent);
+}
+
+.lore-feed-detail-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+
+.lore-feed-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 
 .lore-feed-card-head {
@@ -1370,33 +1464,31 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-card-title {
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--lr-text);
   min-width: 0;
 }
 
 .lore-feed-card-meta {
-  margin-top: 5px;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--lr-dim);
 }
 
 .lore-feed-card-summary {
-  margin-top: 6px;
-  font-size: 12px;
+  font-size: 10.75px;
   color: var(--lr-muted);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .lore-feed-note {
-  padding: 8px 10px;
-  border-radius: var(--lr-r-sm);
-  background: var(--lr-panel);
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lr-panel) 88%, transparent);
   border-left: 2px solid var(--lr-line-2);
-  font-size: 12px;
+  font-size: 10.75px;
   color: var(--lr-muted);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .lore-retrieval-card-index {
@@ -1888,6 +1980,7 @@ function setup(ctx) {
   let refreshTimer = null;
   let pendingChatId = null;
   let drawerFeedFilter = "all";
+  const drawerSessionExpansion = new Map;
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection = "sources";
@@ -2820,6 +2913,31 @@ function setup(ctx) {
       second: "2-digit"
     });
   }
+  function formatDurationShort(durationMs) {
+    if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0)
+      return "";
+    if (durationMs < 1000)
+      return `${Math.round(durationMs)} ms`;
+    if (durationMs < 1e4)
+      return `${(durationMs / 1000).toFixed(1)} s`;
+    if (durationMs < 60000)
+      return `${Math.round(durationMs / 1000)} s`;
+    const minutes = Math.floor(durationMs / 60000);
+    const seconds = Math.round(durationMs % 60000 / 1000);
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  function getSessionElapsedMs(session) {
+    if (!session.startedAt || !Number.isFinite(session.startedAt))
+      return null;
+    const end = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : Date.now();
+    return Math.max(0, end - session.startedAt);
+  }
+  function isSessionExpanded(session, index) {
+    const saved = drawerSessionExpansion.get(session.id);
+    if (typeof saved === "boolean")
+      return saved;
+    return session.status === "running" || index === 0;
+  }
   function formatSelectionRoleLabel(role) {
     if (!role)
       return "entry";
@@ -2828,7 +2946,7 @@ function setup(ctx) {
   function createFeedChipRow(labels, limit = 3) {
     if (!labels.length)
       return null;
-    const wrap = createElement("div", "lore-cluster");
+    const wrap = createElement("div", "lore-feed-chip-row");
     const shown = labels.slice(0, limit);
     for (const label of shown) {
       wrap.appendChild(createTag(clipText(label, 30), "accent"));
@@ -2841,16 +2959,18 @@ function setup(ctx) {
   function renderFeedScopeCards(scopes) {
     const list = createElement("div", "lore-feed-scope-list");
     for (const scope of scopes) {
-      const card = createElement("div", "lore-feed-scope-card");
-      const head = createElement("div", "lore-feed-card-head");
+      const card = createElement("div", "lore-feed-detail-row");
+      const body = createElement("div", "lore-feed-detail-main");
+      const head = createElement("div", "lore-feed-detail-head");
       head.append(createElement("div", "lore-feed-card-title", scope.label), createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"));
-      card.append(head, createElement("div", "lore-feed-card-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`));
+      body.append(head, createElement("div", "lore-feed-card-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`));
       if (scope.summary?.trim()) {
-        card.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 220)));
+        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 180)));
       }
       if (scope.selectionReason?.trim()) {
-        card.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 220)}`));
+        body.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 180)}`));
       }
+      card.appendChild(body);
       list.appendChild(card);
     }
     return list;
@@ -2858,20 +2978,25 @@ function setup(ctx) {
   function renderFeedEntryRows(entries) {
     const list = createElement("div", "lore-feed-entry-list");
     for (const entry of entries) {
-      const row = createElement("div", "lore-feed-entry-row");
-      const head = createElement("div", "lore-feed-card-head");
+      const row = createElement("div", "lore-feed-detail-row");
+      const body = createElement("div", "lore-feed-detail-main");
+      const head = createElement("div", "lore-feed-detail-head");
       head.append(createElement("div", "lore-feed-card-title", entry.label), createTag(formatSelectionRoleLabel(entry.selectionRole), entry.selectionRole === "background" ? "neutral" : "good"));
-      row.append(head, createElement("div", "lore-feed-card-meta", `${entry.worldBookName} | ${entry.breadcrumb || "Root"}`));
+      body.append(head, createElement("div", "lore-feed-card-meta", `${entry.worldBookName} | ${entry.breadcrumb || "Root"}`));
       if (entry.previewText?.trim()) {
-        row.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 220)));
+        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 180)));
       }
       if (entry.reasons?.length) {
-        const reasons = createElement("div", "lore-cluster");
-        for (const reason of entry.reasons.slice(0, 4)) {
+        const reasons = createElement("div", "lore-feed-chip-row");
+        for (const reason of entry.reasons.slice(0, 3)) {
           reasons.appendChild(createTag(reason));
         }
-        row.appendChild(reasons);
+        if (entry.reasons.length > 3) {
+          reasons.appendChild(createTag(`+${entry.reasons.length - 3} more`));
+        }
+        body.appendChild(reasons);
       }
+      row.appendChild(body);
       list.appendChild(row);
     }
     return list;
@@ -2884,8 +3009,8 @@ function setup(ctx) {
       return null;
     const details = createElement("details", "lore-feed-details");
     const summary = createElement("summary", "lore-feed-details-summary");
-    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Show details"));
-    const chips = createElement("div", "lore-cluster");
+    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Details"));
+    const chips = createElement("div", "lore-feed-chip-row");
     if (hasScopes) {
       const row = createFeedChipRow(item.scopes.map((scope) => scope.label));
       if (row)
@@ -2931,7 +3056,12 @@ function setup(ctx) {
     const icon = createElement("div", "lore-feed-item-icon", getFeedItemGlyph(item));
     const body = createElement("div", "lore-feed-item-body");
     const top = createElement("div", "lore-feed-item-top");
-    top.append(createElement("div", "lore-feed-item-label", item.label), createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
+    const stamps = createElement("div", "lore-feed-item-stamps");
+    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
+      stamps.appendChild(createTag(formatDurationShort(item.durationMs)));
+    }
+    stamps.appendChild(createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
+    top.append(createElement("div", "lore-feed-item-label", item.label), stamps);
     body.append(top, createElement("div", "lore-feed-item-summary", item.summary));
     const meta = createElement("div", "lore-cluster");
     meta.classList.add("lore-feed-item-meta");
@@ -2949,18 +3079,28 @@ function setup(ctx) {
     row.append(icon, body);
     return row;
   }
-  function renderFeedSession(session) {
+  function renderFeedSession(session, index) {
     const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
     if (drawerFeedFilter !== "all" && !visibleItems.length)
       return null;
+    const expanded = isSessionExpanded(session, index);
+    const elapsedMs = getSessionElapsedMs(session);
     const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}`);
-    const head = createElement("div", "lore-feed-session-head");
-    const copy = createElement("div", "lore-stack");
-    copy.style.gap = "4px";
-    copy.append(createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"), createElement("div", "lore-feed-session-subtitle", `${formatCapturedAt(session.startedAt)}${session.endedAt ? ` -> ${formatTimeOnly(session.endedAt)}` : " -> live"}`));
+    const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle");
+    head.type = "button";
+    head.setAttribute("aria-expanded", expanded ? "true" : "false");
+    head.addEventListener("click", () => {
+      drawerSessionExpansion.set(session.id, !expanded);
+      render();
+    });
+    const copy = createElement("div", "lore-feed-session-copy");
+    copy.append(createElement("span", "lore-feed-session-caret", expanded ? "▾" : "▸"), createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"));
     head.appendChild(copy);
-    const tags = createElement("div", "lore-cluster");
-    tags.append(createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"), createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"), createTag(`${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`));
+    const tags = createElement("div", "lore-feed-session-meta");
+    tags.append(createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"), createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"), createTag(`${session.items.length} event${session.items.length === 1 ? "" : "s"}`), createTag(formatCapturedAt(session.startedAt)));
+    if (typeof elapsedMs === "number") {
+      tags.appendChild(createTag(formatDurationShort(elapsedMs)));
+    }
     if (session.resolvedConnectionId) {
       tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
     }
@@ -2969,10 +3109,11 @@ function setup(ctx) {
     }
     head.appendChild(tags);
     wrap.appendChild(head);
-    if (session.fallbackReason) {
+    if (expanded && session.fallbackReason) {
       wrap.appendChild(createBanner(session.status === "failed" ? "error" : "warn", session.status === "failed" ? "Retrieval failed" : "Fallback path active", session.fallbackReason));
     }
     const items = createElement("div", "lore-feed-session-items");
+    items.hidden = !expanded;
     for (const item of visibleItems) {
       items.appendChild(renderFeedItem(item));
     }
@@ -2986,7 +3127,7 @@ function setup(ctx) {
       actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview)));
     }
     section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
-    const filters = createElement("div", "lore-cluster");
+    const filters = createElement("div", "lore-cluster lore-feed-filters");
     for (const [value, label] of [
       ["all", "All"],
       ["scope", "Scopes"],
@@ -3009,13 +3150,13 @@ function setup(ctx) {
       return section;
     }
     let rendered = 0;
-    for (const session of sessions) {
-      const sessionNode = renderFeedSession(session);
+    sessions.forEach((session, index) => {
+      const sessionNode = renderFeedSession(session, index);
       if (!sessionNode)
-        continue;
+        return;
       feed.appendChild(sessionNode);
       rendered += 1;
-    }
+    });
     if (!rendered) {
       feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
     }

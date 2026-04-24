@@ -225,6 +225,7 @@ export interface RetrievalFeedItem {
   label: string;
   summary: string;
   timestamp: number;
+  durationMs?: number | null;
   phase?: TraversalTracePhase | "controller" | "session" | null;
   count?: number | null;
   scopes?: PreviewScope[];

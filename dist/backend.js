@@ -438,6 +438,157 @@ function createAutoDetectRegex(pattern) {
   }
 }
 
+// src/backend/controller-json.ts
+var THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
+function sanitizeControllerText(value) {
+  return value.replace(THINK_BLOCK_RE, "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+function extractGenerationContent(result) {
+  return result && typeof result === "object" && typeof result.content === "string" ? result.content : "";
+}
+function extractGenerationUsage(result) {
+  if (!result || typeof result !== "object")
+    return null;
+  const usage = result.usage;
+  return usage && typeof usage === "object" ? usage : null;
+}
+function extractGenerationReasoning(result) {
+  return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
+}
+function parseJsonValue(content) {
+  const cleaned = sanitizeControllerText(content);
+  if (!cleaned)
+    return null;
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      try {
+        return JSON.parse(objectMatch[0]);
+      } catch {}
+    }
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      try {
+        return JSON.parse(arrayMatch[0]);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+function normalizeArrayPayload(parsed, primaryKey) {
+  if (Array.isArray(parsed))
+    return { [primaryKey]: parsed };
+  if (!parsed || typeof parsed !== "object")
+    return null;
+  const record = parsed;
+  if (Array.isArray(record[primaryKey]))
+    return record;
+  if (Array.isArray(record.data))
+    return { [primaryKey]: record.data };
+  if (Array.isArray(record.items))
+    return { [primaryKey]: record.items };
+  const result = record.result;
+  if (result && typeof result === "object" && Array.isArray(result[primaryKey])) {
+    return { [primaryKey]: result[primaryKey] };
+  }
+  return null;
+}
+function buildStructuredJsonParameters(provider, schemaName, schema) {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
+    return {
+      responseMimeType: "application/json",
+      responseSchema: schema
+    };
+  }
+  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
+    return {
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: schemaName,
+          schema
+        }
+      }
+    };
+  }
+  return {};
+}
+function buildNoReasoningParameters(provider) {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+  if (normalizedProvider === "openrouter") {
+    return { reasoning: { effort: "none" } };
+  }
+  if (normalizedProvider === "nanogpt") {
+    return { reasoning_effort: "none" };
+  }
+  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
+    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
+  }
+  return { reasoning: { effort: "none" } };
+}
+function resolveControllerConnectionId(settings, fallbackConnectionId) {
+  if (settings.controllerConnectionId?.trim())
+    return settings.controllerConnectionId.trim();
+  if (fallbackConnectionId?.trim())
+    return fallbackConnectionId.trim();
+  return null;
+}
+async function runControllerJson(prompt, settings, userId, options = {}) {
+  const connectionId = resolveControllerConnectionId(settings, options.connectionId);
+  const connection = connectionId ? await spindle.connections.get(connectionId, userId).catch(() => null) : null;
+  const structuredParameters = options.primaryKey && options.schemaName && options.schema ? buildStructuredJsonParameters(connection?.provider ?? null, options.schemaName, options.schema) : {};
+  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
+  const result = await spindle.generate.quiet({
+    type: "quiet",
+    messages: [
+      ...options.systemPrompt ? [{ role: "system", content: options.systemPrompt }] : [],
+      { role: "user", content: prompt }
+    ],
+    parameters: {
+      temperature: settings.controllerTemperature,
+      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
+      ...noReasoningParameters,
+      ...structuredParameters
+    },
+    ...connectionId ? { connection_id: connectionId } : {},
+    userId,
+    signal: options.signal
+  });
+  const content = sanitizeControllerText(extractGenerationContent(result));
+  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
+  const parseSource = content || reasoning;
+  const parsedFrom = content ? "content" : reasoning ? "reasoning" : null;
+  const base = {
+    rawContent: content,
+    rawReasoning: reasoning,
+    parsedFrom,
+    provider: connection?.provider ?? null,
+    model: connection?.model ?? null,
+    connectionId,
+    finishReason: result && typeof result === "object" && typeof result.finish_reason === "string" ? result.finish_reason ?? null : null,
+    toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
+    usage: extractGenerationUsage(result)
+  };
+  if (!parseSource)
+    return { parsed: null, ...base };
+  const parsed = parseJsonValue(parseSource);
+  if (!options.primaryKey) {
+    return {
+      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
+      ...base
+    };
+  }
+  const normalized = normalizeArrayPayload(parsed, options.primaryKey);
+  if (normalized)
+    return { parsed: normalized, ...base };
+  return { parsed: null, ...base };
+}
+
 // src/backend/runtime.ts
 var GLOBAL_SETTINGS_PATH = "global/settings.json";
 var CHARACTER_CONFIG_DIR = "characters";
@@ -946,44 +1097,6 @@ var PERSON_TERMS = [
   "warrior",
   "woman"
 ];
-function stripCodeFences(content) {
-  return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-}
-function parseJsonObject(content) {
-  const trimmed = stripCodeFences(content);
-  if (!trimmed)
-    return null;
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-      return parsed;
-  } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (!match)
-      return null;
-    try {
-      const parsed = JSON.parse(match[0]);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-        return parsed;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-function getGenerationContent(result) {
-  if (!result || typeof result !== "object")
-    return "";
-  const content = result.content;
-  return typeof content === "string" ? content : "";
-}
-function resolveControllerConnectionId(settings, fallbackConnectionId) {
-  if (settings.controllerConnectionId?.trim())
-    return settings.controllerConnectionId.trim();
-  if (fallbackConnectionId?.trim())
-    return fallbackConnectionId.trim();
-  return null;
-}
 function createTraceBuffer(reporter) {
   const trace = [];
   trace[TRACE_REPORTER] = reporter;
@@ -1014,7 +1127,8 @@ function createFeedItem(kind, label, summary, options = {}) {
     scopes: options.scopes?.map((scope) => ({ ...scope })),
     entries: options.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
     details: options.details ? [...options.details] : undefined,
-    tone: options.tone
+    tone: options.tone,
+    durationMs: typeof options.durationMs === "number" ? options.durationMs : null
   };
 }
 function emitTraceFeedItem(trace, label, summary, options = {}) {
@@ -1039,7 +1153,8 @@ function pushTrace(trace, phase, label, summary, extra = {}) {
   emitTraceFeedItem(trace, label, summary, {
     phase,
     count: typeof extra.entryCount === "number" ? extra.entryCount : null,
-    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info"
+    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info",
+    durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null
   });
 }
 function stripSearchMarkup(value) {
@@ -1463,15 +1578,16 @@ function scoreEntries(queryText, books) {
     return [];
   return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
-async function runControllerJson(prompt, controller, systemPrompt, requestLabel = "Controller request") {
+async function runControllerJson2(prompt, controller, systemPrompt, requestLabel = "Controller request") {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
-    return { parsed: null, error: "Traversal controller hit its call limit." };
+    return { parsed: null, error: "Traversal controller hit its call limit.", durationMs: null };
   }
   const remainingMs = controller.deadlineAt - Date.now();
   if (remainingMs <= 1000) {
-    return { parsed: null, error: "Traversal controller ran out of time." };
+    return { parsed: null, error: "Traversal controller ran out of time.", durationMs: null };
   }
   controller.callCount += 1;
+  const requestStartedAt = Date.now();
   emitProgress(controller.reportProgress, {
     type: "item",
     item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
@@ -1484,41 +1600,57 @@ async function runControllerJson(prompt, controller, systemPrompt, requestLabel 
   let timer = null;
   let timeoutHandled = false;
   try {
-    const requestPromise = spindle.generate.quiet({
-      type: "quiet",
-      messages: [
-        ...systemPrompt ? [{ role: "system", content: systemPrompt }] : [],
-        { role: "user", content: prompt }
-      ],
-      parameters: {
-        temperature: controller.settings.controllerTemperature,
-        max_tokens: controller.settings.controllerMaxTokens
-      },
-      ...controller.connectionId ? { connection_id: controller.connectionId } : {},
-      userId: controller.userId,
+    const requestPromise = runControllerJson(prompt, controller.settings, controller.userId, {
+      systemPrompt,
+      connectionId: controller.connectionId,
       signal: abortController.signal
     }).then((result) => {
-      const parsed = parseJsonObject(getGenerationContent(result));
-      if (parsed) {
+      const durationMs = Date.now() - requestStartedAt;
+      if (result.parsed) {
         controller.controllerUsed = true;
-        return { parsed, error: null };
+        if (result.parsedFrom === "reasoning") {
+          emitProgress(controller.reportProgress, {
+            type: "item",
+            item: createFeedItem("issue", `Controller parse fallback: ${requestLabel}`, "Controller JSON was recovered from reasoning text because the main content channel was unusable.", {
+              phase: "controller",
+              tone: "warn",
+              durationMs
+            })
+          });
+        }
+        emitProgress(controller.reportProgress, {
+          type: "item",
+          item: createFeedItem("trace", `Controller finished: ${requestLabel}`, `Parsed JSON from ${result.parsedFrom === "reasoning" ? "reasoning" : "content"} response.`, {
+            phase: "controller",
+            tone: "info",
+            durationMs
+          })
+        });
+        return { parsed: result.parsed, error: null, durationMs };
       }
       spindle.log.warn("Lore Recall controller call returned invalid JSON.");
       emitProgress(controller.reportProgress, {
         type: "item",
         item: createFeedItem("issue", `Controller issue: ${requestLabel}`, "Controller returned invalid JSON, so Lore Recall will fall back where it can.", {
           phase: "controller",
-          tone: "warn"
+          tone: "warn",
+          durationMs,
+          details: [
+            `parsedFrom=${result.parsedFrom ?? "none"}`,
+            `finishReason=${result.finishReason ?? "unknown"}`
+          ]
         })
       });
-      return { parsed: null, error: "Traversal controller returned invalid JSON." };
+      return { parsed: null, error: "Traversal controller returned invalid JSON.", durationMs };
     }).catch((error) => {
+      const durationMs = Date.now() - requestStartedAt;
       const message = error instanceof Error ? error.message : String(error);
       const isAbort = error instanceof Error && error.name === "AbortError";
       if (isAbort && timeoutHandled) {
         return {
           parsed: null,
-          error: "Traversal controller timed out before the interceptor budget was exhausted."
+          error: "Traversal controller timed out before the interceptor budget was exhausted.",
+          durationMs
         };
       }
       spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
@@ -1527,30 +1659,35 @@ async function runControllerJson(prompt, controller, systemPrompt, requestLabel 
         item: createFeedItem("issue", `${isAbort ? "Controller timeout" : "Controller error"}: ${requestLabel}`, isAbort ? "Controller request timed out and Lore Recall will keep going with fallback behavior when possible." : `Controller request failed: ${message}`, {
           phase: "controller",
           tone: isAbort ? "warn" : "error",
+          durationMs,
           details: isAbort ? [`Timeout after ${timeoutMs} ms.`] : [message]
         })
       });
       return {
         parsed: null,
-        error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`
+        error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
+        durationMs
       };
     });
     const timeoutPromise = new Promise((resolve) => {
       timer = setTimeout(() => {
         timeoutHandled = true;
         abortController.abort();
+        const durationMs = Date.now() - requestStartedAt;
         spindle.log.warn("Lore Recall controller call failed: request timed out");
         emitProgress(controller.reportProgress, {
           type: "item",
           item: createFeedItem("issue", `Controller timeout: ${requestLabel}`, "Controller request timed out before Lore Recall finished retrieval.", {
             phase: "controller",
             tone: "warn",
+            durationMs,
             details: [`Timeout after ${timeoutMs} ms.`]
           })
         });
         resolve({
           parsed: null,
-          error: "Traversal controller timed out before the interceptor budget was exhausted."
+          error: "Traversal controller timed out before the interceptor budget was exhausted.",
+          durationMs
         });
       }, timeoutMs);
     });
@@ -1580,7 +1717,7 @@ async function maybeChooseBooks(recentConversation, books, config, controller, a
     ...books.map((book) => `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(book.config.description || book.tree.nodes[book.tree.rootId]?.summary || book.summary.description, 140)}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`)
   ].join(`
 `);
-  const { parsed } = await runControllerJson(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT, "Choose books");
+  const { parsed } = await runControllerJson2(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT, "Choose books");
   const ids = Array.isArray(parsed?.bookIds) ? parsed.bookIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return { books, trace: [] };
@@ -1622,7 +1759,7 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     ...rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; role=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
   ].join(`
 `);
-  const { parsed } = await runControllerJson(prompt, controller, undefined, "Select manifest entries");
+  const { parsed } = await runControllerJson2(prompt, controller, undefined, "Select manifest entries");
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return buildScopedFallbackSelection();
@@ -1970,7 +2107,7 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
   let scopes = [];
   let selectionReason = "Controller selected retrieval scopes.";
   if (allowController) {
-    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
+    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
     scopes = resolveScopeChoices(requestedNodeIds, books);
     const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected retrieval scopes.";
@@ -1997,7 +2134,7 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
       let refinedScopes = [];
       let refinedReason = "Refined broad scopes.";
       if (allowController) {
-        const refinement = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine collapsed scopes");
+        const refinement = await runControllerJson2(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine collapsed scopes");
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds) ? refinement.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
         refinedScopes = resolveScopeChoices(requestedNodeIds, books);
         refinedReason = typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim() ? refinement.parsed.reason.trim() : "Refined broad scopes.";
@@ -2030,7 +2167,7 @@ async function chooseTraversalScopes(recentConversation, books, config, controll
   let scopes = [];
   let selectionReason = "Controller selected traversal scopes.";
   if (allowController) {
-    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose traversal scopes");
+    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose traversal scopes");
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
     scopes = resolveScopeChoices(requestedNodeIds, books);
     const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected traversal scopes.";
@@ -2061,7 +2198,7 @@ async function chooseTraversalScopes(recentConversation, books, config, controll
     let nextReason = "Traversal scope refinement narrowed the current scopes.";
     let shouldContinue = false;
     if (allowController) {
-      const response = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine traversal scopes");
+      const response = await runControllerJson2(buildChildScopePrompt(recentConversation, scopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine traversal scopes");
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
       nextScopes = resolveScopeChoices(requestedNodeIds, books);
       nextReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Traversal scope refinement narrowed the current scopes.";
@@ -2131,7 +2268,7 @@ async function refineScopesForManifest(recentConversation, scopes, config, contr
     let refinedScopes = [];
     let refinedReason = "Refined broad scopes again before manifest selection.";
     if (allowController) {
-      const response = await runControllerJson(buildChildScopePrompt(recentConversation, broadScopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine manifest scopes");
+      const response = await runControllerJson2(buildChildScopePrompt(recentConversation, broadScopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine manifest scopes");
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
       refinedScopes = resolveScopeChoices(requestedNodeIds, uniqueStrings(activeScopes.map((scope) => scope.book.summary.id)).map((bookId) => activeScopes.find((scope) => scope.book.summary.id === bookId).book));
       refinedReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : refinedReason;
@@ -2364,11 +2501,13 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     callCount: 0,
     reportProgress
   };
+  const chooseBooksStartedAt = Date.now();
   const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
+  const chooseBooksDurationMs = Date.now() - chooseBooksStartedAt;
   const chosenBooks = chosenBooksResult.books;
   const steps = [
     `${books.length} managed book(s) loaded.`,
-    `${chosenBooks.length} readable book(s) selected for search.`
+    `${chosenBooks.length} readable book(s) selected for search in ${chooseBooksDurationMs} ms.`
   ];
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const trace = createTraceBuffer(reportProgress);
@@ -2380,12 +2519,15 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   let selected = [];
   let manifests = [];
   let selectionReason = "";
+  let entrySelectionDurationMs = null;
   const fallbackPath = [];
   if (!deterministic.length) {
     fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
+    const scopeSelectionStartedAt = Date.now();
     const scopeSelection = config.searchMode === "traversal" ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace) : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
+    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
     const initiallySelectedScopes = scopeSelection.scopes;
     selectedScopes = scopeSelection.scopes;
     selectionReason = scopeSelection.selectionReason;
@@ -2401,11 +2543,14 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
           count: initialScopePreviews.length,
           scopes: initialScopePreviews,
           details: selectionReason ? [selectionReason] : undefined,
-          tone: "info"
+          tone: "info",
+          durationMs: scopeSelectionDurationMs
         })
       });
     }
+    const entrySelectionStartedAt = Date.now();
     const entrySelection = await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace);
+    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
     selectedScopes = entrySelection.scopes;
     pulledCandidates = entrySelection.candidates;
     selected = entrySelection.selected;
@@ -2427,7 +2572,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
             count: refinedScopePreviews.length,
             scopes: refinedScopePreviews,
             details: selectionReason ? [selectionReason] : undefined,
-            tone: "info"
+            tone: "info",
+            durationMs: scopeSelectionDurationMs
           })
         });
       }
@@ -2441,7 +2587,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
         phase: "retrieve",
         count: pulledNodes.length,
         entries: pulledNodes,
-        tone: "info"
+        tone: "info",
+        durationMs: entrySelectionDurationMs
       })
     });
   }
@@ -2458,23 +2605,27 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
         count: manifestSelectedEntries.length,
         scopes: selectedScopePreviews,
         entries: manifestSelectedEntries,
-        tone: "info"
+        tone: "info",
+        durationMs: entrySelectionDurationMs
       })
     });
   }
+  const injectionStartedAt = Date.now();
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const injectionDurationMs = Date.now() - injectionStartedAt;
   const included = injection?.included ?? selected;
   const injectedNodes = buildPreviewNodes(included, booksById);
   const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
   if (injection?.included.length) {
-    pushTrace(trace, "inject", "Inject entries", `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`, { entryCount: injection.included.length });
+    pushTrace(trace, "inject", "Inject entries", `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`, { entryCount: injection.included.length, durationMs: injectionDurationMs });
     emitProgress(reportProgress, {
       type: "item",
       item: createFeedItem("injected", "Injected entries", `Prepared ${injectedNodes.length} entr${injectedNodes.length === 1 ? "y" : "ies"} for prompt injection.`, {
         phase: "inject",
         count: injectedNodes.length,
         entries: injectedNodes,
-        tone: "success"
+        tone: "success",
+        durationMs: injectionDurationMs
       })
     });
   } else {
@@ -2483,7 +2634,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
       item: createFeedItem("injected", "Injection skipped", "No retrieved entries were injected for this turn.", {
         phase: "inject",
         count: 0,
-        tone: selected.length ? "warn" : "info"
+        tone: selected.length ? "warn" : "info",
+        durationMs: injectionDurationMs
       })
     });
   }
@@ -2534,12 +2686,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
 }
 
 // src/backend/operations.ts
-var THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
 var CATEGORIZATION_SYSTEM_PROMPT = "You are a categorization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
 var SUMMARY_SYSTEM_PROMPT = "You are a summarization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
-function sanitizeControllerText(value) {
-  return value.replace(THINK_BLOCK_RE, "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-}
 function buildAssignmentEntryPayload(entry, detail) {
   const base = {
     entryId: entry.entryId,
@@ -2705,7 +2853,7 @@ async function subdivideLargeLeafNodes(tree, entries, granularity, settings, use
         ...nodeEntries.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)))
       ].join(`
 `);
-      const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_subdivide", ASSIGNMENTS_SCHEMA, {
+      const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_subdivide", ASSIGNMENTS_SCHEMA, {
         systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
         maxTokensOverride: Math.min(settings.controllerMaxTokens, 900)
       });
@@ -2755,94 +2903,6 @@ class ControllerJsonError extends Error {
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function extractGenerationContent(result) {
-  return result && typeof result === "object" && typeof result.content === "string" ? result.content : "";
-}
-function extractGenerationUsage(result) {
-  if (!result || typeof result !== "object")
-    return null;
-  const usage = result.usage;
-  return usage && typeof usage === "object" ? usage : null;
-}
-function extractGenerationReasoning(result) {
-  return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
-}
-function parseJsonValue(content) {
-  const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  if (!cleaned)
-    return null;
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      try {
-        return JSON.parse(objectMatch[0]);
-      } catch {}
-    }
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      try {
-        return JSON.parse(arrayMatch[0]);
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
-function normalizeArrayPayload(parsed, primaryKey) {
-  if (Array.isArray(parsed))
-    return { [primaryKey]: parsed };
-  if (!parsed || typeof parsed !== "object")
-    return null;
-  const record = parsed;
-  if (Array.isArray(record[primaryKey]))
-    return record;
-  if (Array.isArray(record.data))
-    return { [primaryKey]: record.data };
-  if (Array.isArray(record.items))
-    return { [primaryKey]: record.items };
-  const result = record.result;
-  if (result && typeof result === "object" && Array.isArray(result[primaryKey])) {
-    return { [primaryKey]: result[primaryKey] };
-  }
-  return null;
-}
-function buildStructuredJsonParameters(provider, schemaName, schema) {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
-    return {
-      responseMimeType: "application/json",
-      responseSchema: schema
-    };
-  }
-  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
-    return {
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: schemaName,
-          schema
-        }
-      }
-    };
-  }
-  return {};
-}
-function buildNoReasoningParameters(provider) {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-  if (normalizedProvider === "openrouter") {
-    return { reasoning: { effort: "none" } };
-  }
-  if (normalizedProvider === "nanogpt") {
-    return { reasoning_effort: "none" };
-  }
-  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
-    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
-  }
-  return { reasoning: { effort: "none" } };
-}
 function buildControllerDebugPayload(input) {
   return JSON.stringify({
     error: input.error,
@@ -2878,54 +2938,17 @@ function buildControllerDebugPayload(input) {
     capturedAt: Date.now()
   }, null, 2);
 }
-async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
-  const connection = settings.controllerConnectionId?.trim() ? await spindle.connections.get(settings.controllerConnectionId.trim(), userId).catch(() => null) : null;
-  const structuredParameters = primaryKey && schemaName && schema ? buildStructuredJsonParameters(connection?.provider ?? null, schemaName, schema) : {};
-  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
-  const result = await spindle.generate.quiet({
-    type: "quiet",
-    messages: [
-      ...options.systemPrompt ? [{ role: "system", content: options.systemPrompt }] : [],
-      { role: "user", content: prompt }
-    ],
-    parameters: {
-      temperature: settings.controllerTemperature,
-      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
-      ...noReasoningParameters,
-      ...structuredParameters
-    },
-    ...settings.controllerConnectionId ? { connection_id: settings.controllerConnectionId } : {},
-    userId
+async function runControllerJson3(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
+  const result = await runControllerJson(prompt, settings, userId, {
+    ...options,
+    primaryKey,
+    schemaName,
+    schema
   });
-  const content = sanitizeControllerText(extractGenerationContent(result));
-  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
-  const parseSource = content || reasoning;
-  const parsedFrom = content ? "content" : reasoning ? "reasoning" : null;
-  const base = {
-    rawContent: content,
-    rawReasoning: reasoning,
-    parsedFrom,
-    provider: connection?.provider ?? null,
-    model: connection?.model ?? null,
-    connectionId: settings.controllerConnectionId?.trim() || null,
-    finishReason: result && typeof result === "object" && typeof result.finish_reason === "string" ? result.finish_reason ?? null : null,
-    toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
-    usage: extractGenerationUsage(result)
-  };
-  if (!parseSource)
-    return { parsed: null, ...base };
-  const parsed = parseJsonValue(parseSource);
-  if (!primaryKey) {
-    return {
-      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
-      ...base
-    };
-  }
-  const normalized = normalizeArrayPayload(parsed, primaryKey);
-  if (normalized)
-    return { parsed: normalized, ...base };
-  spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${connection?.provider ?? "default"} parsedFrom=${parsedFrom ?? "none"} content=${content.slice(0, 180)} reasoning=${reasoning.slice(0, 180)}`);
-  return { parsed: null, ...base };
+  if (result.parsed || !primaryKey)
+    return result;
+  spindle.log.warn(`Lore Recall controller returned unusable ${primaryKey} JSON. Provider=${result.provider ?? "default"} parsedFrom=${result.parsedFrom ?? "none"} content=${result.rawContent.slice(0, 180)} reasoning=${result.rawReasoning.slice(0, 180)}`);
+  return result;
 }
 function normalizeAssignmentsPayload(parsed) {
   const normalized = normalizeArrayPayload(parsed, "assignments");
@@ -3044,7 +3067,7 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
     }))
   ].filter(Boolean).join(`
 `);
-  const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
+  const controllerResult = await runControllerJson3(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
     systemPrompt: SUMMARY_SYSTEM_PROMPT,
     maxTokensOverride: Math.min(settings.controllerMaxTokens, 700)
   });
@@ -3083,7 +3106,7 @@ function buildEntrySummaryPrompt(entries) {
 async function generateEntrySummaryBatch(entries, settings, userId) {
   if (!entries.length)
     return [];
-  const controllerResult = await runControllerJson2(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
+  const controllerResult = await runControllerJson3(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
     systemPrompt: SUMMARY_SYSTEM_PROMPT,
     maxTokensOverride: Math.min(settings.controllerMaxTokens, 1400)
   });
@@ -3385,7 +3408,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)))
         ].join(`
 `);
-        const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
+        const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
           systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
           maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
         });

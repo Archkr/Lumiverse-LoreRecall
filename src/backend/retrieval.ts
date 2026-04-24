@@ -15,6 +15,10 @@ import type {
   TraversalTraceStep,
 } from "../types";
 import type { ChatLikeMessage, RuntimeBook, ScoredEntry } from "./contracts";
+import {
+  resolveControllerConnectionId,
+  runControllerJson as runSharedControllerJson,
+} from "./controller-json";
 import { isReadableBook } from "./storage";
 
 interface RetrievalPreviewOptions {
@@ -38,6 +42,7 @@ interface ControllerSession {
 interface ControllerResponse {
   parsed: Record<string, unknown> | null;
   error: string | null;
+  durationMs: number | null;
 }
 
 interface TraversalScope {
@@ -91,6 +96,17 @@ interface RankedSelectionCandidate {
   helperType: "location" | "event" | "threat_or_rule" | null;
   latestMention: boolean;
   overallMention: boolean;
+}
+
+interface FeedItemOptions {
+  timestamp?: number;
+  phase?: RetrievalFeedItem["phase"];
+  count?: number | null;
+  scopes?: PreviewScope[];
+  entries?: PreviewNode[];
+  details?: string[];
+  tone?: RetrievalFeedItemTone;
+  durationMs?: number | null;
 }
 
 interface EntrySelectionResult {
@@ -268,44 +284,6 @@ const PERSON_TERMS = [
   "woman",
 ];
 
-function stripCodeFences(content: string): string {
-  return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-}
-
-function parseJsonObject(content: string): Record<string, unknown> | null {
-  const trimmed = stripCodeFences(content);
-  if (!trimmed) return null;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-  } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    try {
-      const parsed = JSON.parse(match[0]) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function getGenerationContent(result: unknown): string {
-  if (!result || typeof result !== "object") return "";
-  const content = (result as { content?: unknown }).content;
-  return typeof content === "string" ? content : "";
-}
-
-function resolveControllerConnectionId(
-  settings: GlobalLoreRecallSettings,
-  fallbackConnectionId?: string | null,
-): string | null {
-  if (settings.controllerConnectionId?.trim()) return settings.controllerConnectionId.trim();
-  if (fallbackConnectionId?.trim()) return fallbackConnectionId.trim();
-  return null;
-}
-
 function createTraceBuffer(reporter?: RetrievalProgressReporter): TraceCollection {
   const trace = [] as TraceCollection;
   trace[TRACE_REPORTER] = reporter;
@@ -332,15 +310,7 @@ function createFeedItem(
   kind: RetrievalFeedItem["kind"],
   label: string,
   summary: string,
-  options: {
-    timestamp?: number;
-    phase?: RetrievalFeedItem["phase"];
-    count?: number | null;
-    scopes?: PreviewScope[];
-    entries?: PreviewNode[];
-    details?: string[];
-    tone?: RetrievalFeedItemTone;
-  } = {},
+  options: FeedItemOptions = {},
 ): RetrievalFeedItem {
   const timestamp = options.timestamp ?? Date.now();
   return {
@@ -355,6 +325,7 @@ function createFeedItem(
     entries: options.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
     details: options.details ? [...options.details] : undefined,
     tone: options.tone,
+    durationMs: typeof options.durationMs === "number" ? options.durationMs : null,
   };
 }
 
@@ -362,15 +333,7 @@ function emitTraceFeedItem(
   trace: TraversalTraceStep[],
   label: string,
   summary: string,
-  options: {
-    timestamp?: number;
-    phase?: RetrievalFeedItem["phase"];
-    count?: number | null;
-    scopes?: PreviewScope[];
-    entries?: PreviewNode[];
-    details?: string[];
-    tone?: RetrievalFeedItemTone;
-  } = {},
+  options: FeedItemOptions = {},
 ): void {
   const reporter = getTraceReporter(trace);
   if (!reporter) return;
@@ -385,7 +348,7 @@ function pushTrace(
   phase: TraversalTraceStep["phase"],
   label: string,
   summary: string,
-  extra: Partial<Omit<TraversalTraceStep, "step" | "phase" | "label" | "summary">> = {},
+  extra: Partial<Omit<TraversalTraceStep, "step" | "phase" | "label" | "summary">> & FeedItemOptions = {},
 ): void {
   trace.push({
     step: trace.length + 1,
@@ -400,6 +363,7 @@ function pushTrace(
     phase,
     count: typeof extra.entryCount === "number" ? extra.entryCount : null,
     tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info",
+    durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null,
   });
 }
 
@@ -1047,15 +1011,16 @@ async function runControllerJson(
   requestLabel = "Controller request",
 ): Promise<ControllerResponse> {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
-    return { parsed: null, error: "Traversal controller hit its call limit." };
+    return { parsed: null, error: "Traversal controller hit its call limit.", durationMs: null };
   }
 
   const remainingMs = controller.deadlineAt - Date.now();
   if (remainingMs <= 1_000) {
-    return { parsed: null, error: "Traversal controller ran out of time." };
+    return { parsed: null, error: "Traversal controller ran out of time.", durationMs: null };
   }
 
   controller.callCount += 1;
+  const requestStartedAt = Date.now();
   emitProgress(controller.reportProgress, {
     type: "item",
     item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
@@ -1068,26 +1033,49 @@ async function runControllerJson(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let timeoutHandled = false;
   try {
-    const requestPromise: Promise<ControllerResponse> = spindle.generate
-      .quiet({
-        type: "quiet",
-        messages: [
-          ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-          { role: "user", content: prompt },
-        ],
-        parameters: {
-          temperature: controller.settings.controllerTemperature,
-          max_tokens: controller.settings.controllerMaxTokens,
-        },
-        ...(controller.connectionId ? { connection_id: controller.connectionId } : {}),
-        userId: controller.userId,
+    const requestPromise: Promise<ControllerResponse> = runSharedControllerJson(
+      prompt,
+      controller.settings,
+      controller.userId,
+      {
+        systemPrompt,
+        connectionId: controller.connectionId,
         signal: abortController.signal,
-      } as unknown as Parameters<typeof spindle.generate.quiet>[0])
+      },
+    )
       .then((result) => {
-        const parsed = parseJsonObject(getGenerationContent(result));
-        if (parsed) {
+        const durationMs = Date.now() - requestStartedAt;
+        if (result.parsed) {
           controller.controllerUsed = true;
-          return { parsed, error: null };
+          if (result.parsedFrom === "reasoning") {
+            emitProgress(controller.reportProgress, {
+              type: "item",
+              item: createFeedItem(
+                "issue",
+                `Controller parse fallback: ${requestLabel}`,
+                "Controller JSON was recovered from reasoning text because the main content channel was unusable.",
+                {
+                  phase: "controller",
+                  tone: "warn",
+                  durationMs,
+                },
+              ),
+            });
+          }
+          emitProgress(controller.reportProgress, {
+            type: "item",
+            item: createFeedItem(
+              "trace",
+              `Controller finished: ${requestLabel}`,
+              `Parsed JSON from ${result.parsedFrom === "reasoning" ? "reasoning" : "content"} response.`,
+              {
+                phase: "controller",
+                tone: "info",
+                durationMs,
+              },
+            ),
+          });
+          return { parsed: result.parsed, error: null, durationMs };
         }
         spindle.log.warn("Lore Recall controller call returned invalid JSON.");
         emitProgress(controller.reportProgress, {
@@ -1099,18 +1087,25 @@ async function runControllerJson(
             {
               phase: "controller",
               tone: "warn",
+              durationMs,
+              details: [
+                `parsedFrom=${result.parsedFrom ?? "none"}`,
+                `finishReason=${result.finishReason ?? "unknown"}`,
+              ],
             },
           ),
         });
-        return { parsed: null, error: "Traversal controller returned invalid JSON." };
+        return { parsed: null, error: "Traversal controller returned invalid JSON.", durationMs };
       })
       .catch((error: unknown) => {
+        const durationMs = Date.now() - requestStartedAt;
         const message = error instanceof Error ? error.message : String(error);
         const isAbort = error instanceof Error && error.name === "AbortError";
         if (isAbort && timeoutHandled) {
           return {
             parsed: null,
             error: "Traversal controller timed out before the interceptor budget was exhausted.",
+            durationMs,
           };
         }
         spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
@@ -1125,6 +1120,7 @@ async function runControllerJson(
             {
               phase: "controller",
               tone: isAbort ? "warn" : "error",
+              durationMs,
               details: isAbort ? [`Timeout after ${timeoutMs} ms.`] : [message],
             },
           ),
@@ -1132,6 +1128,7 @@ async function runControllerJson(
         return {
           parsed: null,
           error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
+          durationMs,
         };
       });
 
@@ -1139,6 +1136,7 @@ async function runControllerJson(
       timer = setTimeout(() => {
         timeoutHandled = true;
         abortController.abort();
+        const durationMs = Date.now() - requestStartedAt;
         spindle.log.warn("Lore Recall controller call failed: request timed out");
         emitProgress(controller.reportProgress, {
           type: "item",
@@ -1149,6 +1147,7 @@ async function runControllerJson(
             {
               phase: "controller",
               tone: "warn",
+              durationMs,
               details: [`Timeout after ${timeoutMs} ms.`],
             },
           ),
@@ -1156,6 +1155,7 @@ async function runControllerJson(
         resolve({
           parsed: null,
           error: "Traversal controller timed out before the interceptor budget was exhausted.",
+          durationMs,
         });
       }, timeoutMs);
     });
@@ -2877,11 +2877,13 @@ export async function buildRetrievalPreview(
     callCount: 0,
     reportProgress,
   };
+  const chooseBooksStartedAt = Date.now();
   const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
+  const chooseBooksDurationMs = Date.now() - chooseBooksStartedAt;
   const chosenBooks = chosenBooksResult.books;
   const steps = [
     `${books.length} managed book(s) loaded.`,
-    `${chosenBooks.length} readable book(s) selected for search.`,
+    `${chosenBooks.length} readable book(s) selected for search in ${chooseBooksDurationMs} ms.`,
   ];
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const trace = createTraceBuffer(reportProgress);
@@ -2893,16 +2895,19 @@ export async function buildRetrievalPreview(
   let selected: ScoredEntry[] = [];
   let manifests: ScopedManifest[] = [];
   let selectionReason = "";
+  let entrySelectionDurationMs: number | null = null;
   const fallbackPath: string[] = [];
 
   if (!deterministic.length) {
     fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
+    const scopeSelectionStartedAt = Date.now();
     const scopeSelection =
       config.searchMode === "traversal"
         ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace)
         : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
+    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
     const initiallySelectedScopes = scopeSelection.scopes;
     selectedScopes = scopeSelection.scopes;
     selectionReason = scopeSelection.selectionReason;
@@ -2925,11 +2930,13 @@ export async function buildRetrievalPreview(
             scopes: initialScopePreviews,
             details: selectionReason ? [selectionReason] : undefined,
             tone: "info",
+            durationMs: scopeSelectionDurationMs,
           },
         ),
       });
     }
 
+    const entrySelectionStartedAt = Date.now();
     const entrySelection = await selectEntriesForScopes(
       recentConversation,
       selectedScopes,
@@ -2939,6 +2946,7 @@ export async function buildRetrievalPreview(
       deterministicById,
       trace,
     );
+    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
     selectedScopes = entrySelection.scopes;
     pulledCandidates = entrySelection.candidates;
     selected = entrySelection.selected;
@@ -2965,6 +2973,7 @@ export async function buildRetrievalPreview(
               scopes: refinedScopePreviews,
               details: selectionReason ? [selectionReason] : undefined,
               tone: "info",
+              durationMs: scopeSelectionDurationMs,
             },
           ),
         });
@@ -2985,6 +2994,7 @@ export async function buildRetrievalPreview(
           count: pulledNodes.length,
           entries: pulledNodes,
           tone: "info",
+          durationMs: entrySelectionDurationMs,
         },
       ),
     });
@@ -3016,12 +3026,15 @@ export async function buildRetrievalPreview(
           scopes: selectedScopePreviews,
           entries: manifestSelectedEntries,
           tone: "info",
+          durationMs: entrySelectionDurationMs,
         },
       ),
     });
   }
 
+  const injectionStartedAt = Date.now();
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const injectionDurationMs = Date.now() - injectionStartedAt;
   const included = injection?.included ?? selected;
   const injectedNodes = buildPreviewNodes(included, booksById);
   const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
@@ -3032,7 +3045,7 @@ export async function buildRetrievalPreview(
       "inject",
       "Inject entries",
       `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`,
-      { entryCount: injection.included.length },
+      { entryCount: injection.included.length, durationMs: injectionDurationMs },
     );
     emitProgress(reportProgress, {
       type: "item",
@@ -3045,6 +3058,7 @@ export async function buildRetrievalPreview(
           count: injectedNodes.length,
           entries: injectedNodes,
           tone: "success",
+          durationMs: injectionDurationMs,
         },
       ),
     });
@@ -3059,6 +3073,7 @@ export async function buildRetrievalPreview(
           phase: "inject",
           count: 0,
           tone: selected.length ? "warn" : "info",
+          durationMs: injectionDurationMs,
         },
       ),
     });

@@ -110,6 +110,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
   let drawerFeedFilter: DrawerFeedFilter = "all";
+  const drawerSessionExpansion = new Map<string, boolean>();
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection: WorkspaceSection = "sources";
@@ -1185,6 +1186,28 @@ export function setup(ctx: SpindleFrontendContext) {
     });
   }
 
+  function formatDurationShort(durationMs: number | null | undefined): string {
+    if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return "";
+    if (durationMs < 1_000) return `${Math.round(durationMs)} ms`;
+    if (durationMs < 10_000) return `${(durationMs / 1_000).toFixed(1)} s`;
+    if (durationMs < 60_000) return `${Math.round(durationMs / 1_000)} s`;
+    const minutes = Math.floor(durationMs / 60_000);
+    const seconds = Math.round((durationMs % 60_000) / 1_000);
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+
+  function getSessionElapsedMs(session: RetrievalSession): number | null {
+    if (!session.startedAt || !Number.isFinite(session.startedAt)) return null;
+    const end = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : Date.now();
+    return Math.max(0, end - session.startedAt);
+  }
+
+  function isSessionExpanded(session: RetrievalSession, index: number): boolean {
+    const saved = drawerSessionExpansion.get(session.id);
+    if (typeof saved === "boolean") return saved;
+    return session.status === "running" || index === 0;
+  }
+
   function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
     if (!role) return "entry";
     return role.replace(/_/g, " ");
@@ -1192,7 +1215,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function createFeedChipRow(labels: string[], limit = 3): HTMLElement | null {
     if (!labels.length) return null;
-    const wrap = createElement("div", "lore-cluster");
+    const wrap = createElement("div", "lore-feed-chip-row");
     const shown = labels.slice(0, limit);
     for (const label of shown) {
       wrap.appendChild(createTag(clipText(label, 30), "accent"));
@@ -1206,22 +1229,24 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderFeedScopeCards(scopes: PreviewScope[]): HTMLElement {
     const list = createElement("div", "lore-feed-scope-list");
     for (const scope of scopes) {
-      const card = createElement("div", "lore-feed-scope-card");
-      const head = createElement("div", "lore-feed-card-head");
+      const card = createElement("div", "lore-feed-detail-row");
+      const body = createElement("div", "lore-feed-detail-main");
+      const head = createElement("div", "lore-feed-detail-head");
       head.append(
         createElement("div", "lore-feed-card-title", scope.label),
         createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"),
       );
-      card.append(
+      body.append(
         head,
         createElement("div", "lore-feed-card-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`),
       );
       if (scope.summary?.trim()) {
-        card.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 220)));
+        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 180)));
       }
       if (scope.selectionReason?.trim()) {
-        card.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 220)}`));
+        body.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 180)}`));
       }
+      card.appendChild(body);
       list.appendChild(card);
     }
     return list;
@@ -1230,26 +1255,31 @@ export function setup(ctx: SpindleFrontendContext) {
   function renderFeedEntryRows(entries: PreviewNode[]): HTMLElement {
     const list = createElement("div", "lore-feed-entry-list");
     for (const entry of entries) {
-      const row = createElement("div", "lore-feed-entry-row");
-      const head = createElement("div", "lore-feed-card-head");
+      const row = createElement("div", "lore-feed-detail-row");
+      const body = createElement("div", "lore-feed-detail-main");
+      const head = createElement("div", "lore-feed-detail-head");
       head.append(
         createElement("div", "lore-feed-card-title", entry.label),
         createTag(formatSelectionRoleLabel(entry.selectionRole), entry.selectionRole === "background" ? "neutral" : "good"),
       );
-      row.append(
+      body.append(
         head,
         createElement("div", "lore-feed-card-meta", `${entry.worldBookName} | ${entry.breadcrumb || "Root"}`),
       );
       if (entry.previewText?.trim()) {
-        row.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 220)));
+        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 180)));
       }
       if (entry.reasons?.length) {
-        const reasons = createElement("div", "lore-cluster");
-        for (const reason of entry.reasons.slice(0, 4)) {
+        const reasons = createElement("div", "lore-feed-chip-row");
+        for (const reason of entry.reasons.slice(0, 3)) {
           reasons.appendChild(createTag(reason));
         }
-        row.appendChild(reasons);
+        if (entry.reasons.length > 3) {
+          reasons.appendChild(createTag(`+${entry.reasons.length - 3} more`));
+        }
+        body.appendChild(reasons);
       }
+      row.appendChild(body);
       list.appendChild(row);
     }
     return list;
@@ -1263,9 +1293,9 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const details = createElement("details", "lore-feed-details") as HTMLDetailsElement;
     const summary = createElement("summary", "lore-feed-details-summary");
-    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Show details"));
+    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Details"));
 
-    const chips = createElement("div", "lore-cluster");
+    const chips = createElement("div", "lore-feed-chip-row");
     if (hasScopes) {
       const row = createFeedChipRow(item.scopes!.map((scope) => scope.label));
       if (row) chips.appendChild(row);
@@ -1317,9 +1347,14 @@ export function setup(ctx: SpindleFrontendContext) {
     const icon = createElement("div", "lore-feed-item-icon", getFeedItemGlyph(item));
     const body = createElement("div", "lore-feed-item-body");
     const top = createElement("div", "lore-feed-item-top");
+    const stamps = createElement("div", "lore-feed-item-stamps");
+    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
+      stamps.appendChild(createTag(formatDurationShort(item.durationMs)));
+    }
+    stamps.appendChild(createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
     top.append(
       createElement("div", "lore-feed-item-label", item.label),
-      createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)),
+      stamps,
     );
     body.append(
       top,
@@ -1341,30 +1376,38 @@ export function setup(ctx: SpindleFrontendContext) {
     return row;
   }
 
-  function renderFeedSession(session: RetrievalSession): HTMLElement | null {
+  function renderFeedSession(session: RetrievalSession, index: number): HTMLElement | null {
     const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
     if (drawerFeedFilter !== "all" && !visibleItems.length) return null;
+    const expanded = isSessionExpanded(session, index);
+    const elapsedMs = getSessionElapsedMs(session);
 
     const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}`);
-    const head = createElement("div", "lore-feed-session-head");
-    const copy = createElement("div", "lore-stack");
-    copy.style.gap = "4px";
+    const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle") as HTMLButtonElement;
+    head.type = "button";
+    head.setAttribute("aria-expanded", expanded ? "true" : "false");
+    head.addEventListener("click", () => {
+      drawerSessionExpansion.set(session.id, !expanded);
+      render();
+    });
+
+    const copy = createElement("div", "lore-feed-session-copy");
     copy.append(
+      createElement("span", "lore-feed-session-caret", expanded ? "▾" : "▸"),
       createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"),
-      createElement(
-        "div",
-        "lore-feed-session-subtitle",
-        `${formatCapturedAt(session.startedAt)}${session.endedAt ? ` -> ${formatTimeOnly(session.endedAt)}` : " -> live"}`,
-      ),
     );
     head.appendChild(copy);
 
-    const tags = createElement("div", "lore-cluster");
+    const tags = createElement("div", "lore-feed-session-meta");
     tags.append(
       createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"),
       createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"),
-      createTag(`${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`),
+      createTag(`${session.items.length} event${session.items.length === 1 ? "" : "s"}`),
+      createTag(formatCapturedAt(session.startedAt)),
     );
+    if (typeof elapsedMs === "number") {
+      tags.appendChild(createTag(formatDurationShort(elapsedMs)));
+    }
     if (session.resolvedConnectionId) {
       tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
     }
@@ -1374,7 +1417,7 @@ export function setup(ctx: SpindleFrontendContext) {
     head.appendChild(tags);
     wrap.appendChild(head);
 
-    if (session.fallbackReason) {
+    if (expanded && session.fallbackReason) {
       wrap.appendChild(
         createBanner(
           session.status === "failed" ? "error" : "warn",
@@ -1385,6 +1428,7 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     const items = createElement("div", "lore-feed-session-items");
+    items.hidden = !expanded;
     for (const item of visibleItems) {
       items.appendChild(renderFeedItem(item));
     }
@@ -1400,7 +1444,7 @@ export function setup(ctx: SpindleFrontendContext) {
     }
     section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
 
-    const filters = createElement("div", "lore-cluster");
+    const filters = createElement("div", "lore-cluster lore-feed-filters");
     for (const [value, label] of [
       ["all", "All"],
       ["scope", "Scopes"],
@@ -1432,12 +1476,12 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     let rendered = 0;
-    for (const session of sessions) {
-      const sessionNode = renderFeedSession(session);
-      if (!sessionNode) continue;
+    sessions.forEach((session, index) => {
+      const sessionNode = renderFeedSession(session, index);
+      if (!sessionNode) return;
       feed.appendChild(sessionNode);
       rendered += 1;
-    }
+    });
 
     if (!rendered) {
       feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
