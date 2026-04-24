@@ -1,4 +1,11 @@
-import type { ManagedBookEntryView, BookSummary, BookTreeIndex, BookStatus, BookRetrievalConfig } from "../types";
+import type {
+  ManagedBookEntryView,
+  BookSummary,
+  BookTreeIndex,
+  BookStatus,
+  BookRetrievalConfig,
+  PreviewNode,
+} from "../types";
 
 export type ChatLikeMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -32,6 +39,7 @@ export interface ScoredEntry {
   entry: IndexedEntry;
   score: number;
   reasons: string[];
+  selectionRole?: PreviewNode["selectionRole"];
 }
 
 export interface TreeLoadResult {

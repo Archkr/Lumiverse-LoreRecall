@@ -148,6 +148,14 @@ export interface PreviewNode {
   score: number;
   reasons: string[];
   previewText: string;
+  selectionRole?:
+    | "present_entity"
+    | "mentioned_entity"
+    | "group_cover"
+    | "location_context"
+    | "event_context"
+    | "threat_or_rule_context"
+    | "background";
 }
 
 export interface PreviewScope {
@@ -188,6 +196,7 @@ export interface RetrievalPreview {
   recentConversation: string;
   estimatedTokens: number;
   injectedText: string;
+  selectionSummary?: string;
   selectedScopes: PreviewScope[];
   retrievedScopes: PreviewScope[];
   scopeManifestCounts: PreviewScopeManifest[];

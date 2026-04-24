@@ -2274,6 +2274,7 @@ function setup(ctx) {
       selectedBookIds: preview.selectedBookIds,
       recentConversation: preview.recentConversation,
       queryText: preview.queryText,
+      selectionSummary: preview.selectionSummary ?? null,
       pullLimit: currentState?.characterConfig?.maxResults ?? null,
       injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
       trace: preview.trace,
@@ -2305,6 +2306,7 @@ function setup(ctx) {
         breadcrumb: node.breadcrumb,
         score: node.score,
         reasons: node.reasons,
+        selectionRole: node.selectionRole ?? null,
         previewText: node.previewText
       })),
       injectedNodes: getPreviewInjectedNodes(preview).map((node) => ({
@@ -2315,6 +2317,7 @@ function setup(ctx) {
         breadcrumb: node.breadcrumb,
         score: node.score,
         reasons: node.reasons,
+        selectionRole: node.selectionRole ?? null,
         previewText: node.previewText
       })),
       manifestSelectedEntries: (preview.manifestSelectedEntries ?? []).map((node) => ({
@@ -2325,6 +2328,7 @@ function setup(ctx) {
         breadcrumb: node.breadcrumb,
         score: node.score,
         reasons: node.reasons,
+        selectionRole: node.selectionRole ?? null,
         previewText: node.previewText
       })),
       injectedText: preview.injectedText
