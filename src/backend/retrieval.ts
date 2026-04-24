@@ -7,6 +7,7 @@ import type {
   GlobalLoreRecallSettings,
   PreviewNode,
   PreviewScope,
+  PreviewScopeManifest,
   RetrievalPreview,
   TraversalTraceStep,
 } from "../types";
@@ -66,11 +67,30 @@ interface TraversalFrontier {
   fullTreeOverview: string;
 }
 
+interface ScopedManifest {
+  scope: TraversalScope;
+  candidates: ScoredEntry[];
+}
+
+interface EntrySelectionResult {
+  selected: ScoredEntry[];
+  candidates: ScoredEntry[];
+  manifests: ScopedManifest[];
+  fallbackPath: string[];
+}
+
 const CONTROLLER_TIMEOUT_MS = 45_000;
 const CONTROLLER_TOTAL_BUDGET_MS = 175_000;
 const CONTROLLER_MAX_CALLS = 12;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
 const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
+const RECENT_MESSAGE_LIMIT = 500;
+const MAX_SCOPE_CHOICES = 5;
+
+const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
+  "You are a retrieval assistant. Choose only category node IDs from the provided knowledge tree. Return only the requested JSON with no commentary or markdown.";
+const RETRIEVAL_MANIFEST_SYSTEM_PROMPT =
+  "You are a retrieval assistant. Choose only entry IDs from the provided scoped manifests. Return only the requested JSON with no commentary or markdown.";
 
 function stripCodeFences(content: string): string {
   return content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -154,7 +174,10 @@ function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): s
   return messages
     .filter((message) => message.role !== "system" && message.content.trim())
     .slice(-contextMessages)
-    .map((message) => `${message.role}: ${stripSearchMarkup(message.content)}`)
+    .map((message) => {
+      const role = message.role === "user" ? "User" : "Assistant";
+      return `${role}: ${truncateText(stripSearchMarkup(message.content), RECENT_MESSAGE_LIMIT)}`;
+    })
     .join("\n");
 }
 
@@ -254,14 +277,8 @@ function buildPromptFocusTerms(queryText: string, scored: ScoredEntry[] = []): s
 }
 
 function buildPromptContext(queryText: string, scored: ScoredEntry[] = []): string {
-  const summary = buildCompactSceneSummary(queryText);
-  const focusTerms = buildPromptFocusTerms(queryText, scored);
-  return [
-    summary ? `Scene summary:\n${summary}` : "",
-    focusTerms.length ? `Focus terms: ${focusTerms.join(", ")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  if (!queryText.trim()) return "";
+  return `RECENT CONVERSATION:\n${queryText}`;
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
@@ -375,6 +392,7 @@ function scoreEntries(queryText: string, books: RuntimeBook[]): ScoredEntry[] {
 async function runControllerJson(
   prompt: string,
   controller: ControllerSession,
+  systemPrompt?: string,
 ): Promise<ControllerResponse> {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
     return { parsed: null, error: "Traversal controller hit its call limit." };
@@ -393,7 +411,10 @@ async function runControllerJson(
     const requestPromise: Promise<ControllerResponse> = spindle.generate
       .quiet({
         type: "quiet",
-        messages: [{ role: "user", content: prompt }],
+        messages: [
+          ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+          { role: "user", content: prompt },
+        ],
         parameters: {
           temperature: controller.settings.controllerTemperature,
           max_tokens: controller.settings.controllerMaxTokens,
@@ -464,13 +485,13 @@ async function maybeChooseBooks(
     "Books:",
     ...books.map((book) =>
       `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(
-        book.config.description || book.summary.description,
+        book.config.description || book.tree.nodes[book.tree.rootId]?.summary || book.summary.description,
         140,
       )}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`,
     ),
   ].join("\n");
 
-  const { parsed } = await runControllerJson(prompt, controller);
+  const { parsed } = await runControllerJson(prompt, controller, RETRIEVAL_MANIFEST_SYSTEM_PROMPT);
   const ids = Array.isArray(parsed?.bookIds)
     ? parsed.bookIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -545,21 +566,7 @@ async function maybeSelectEntries(
 ): Promise<ScoredEntry[]> {
   if (!allowController || !config.selectiveRetrieval || !candidates.length) return candidates.slice(0, config.maxResults);
 
-  const candidatesById = new Map(candidates.map((item) => [item.entry.entryId, item]));
-  const scopedManifests = scopes
-    .map((scope) => {
-      const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true)
-        .map((entryId) => candidatesById.get(entryId))
-        .filter((item): item is ScoredEntry => !!item)
-        .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
-        .slice(0, 8);
-      if (!scopeCandidates.length) return null;
-      return {
-        scope,
-        candidates: scopeCandidates,
-      };
-    })
-    .filter((item): item is { scope: TraversalScope; candidates: ScoredEntry[] } => !!item);
+  const scopedManifests = buildScopedManifests(candidates, scopes, 8);
   const buildScopedFallbackSelection = (): ScoredEntry[] => {
     if (!scopedManifests.length) {
       return candidates.slice(0, Math.min(candidates.length, Math.min(config.maxResults, 4)));
@@ -708,7 +715,11 @@ function getScopeBreadcrumb(book: RuntimeBook, nodeId: string): string {
   return labels.reverse().join(" > ") || "Root";
 }
 
-function buildPreviewScopes(scopes: TraversalScope[]): PreviewScope[] {
+function buildPreviewScopes(
+  scopes: TraversalScope[],
+  manifestCounts: Map<string, number> = new Map(),
+  selectionReasons: Map<string, string> = new Map(),
+): PreviewScope[] {
   const seen = new Set<string>();
   const previews: PreviewScope[] = [];
   for (const scope of scopes) {
@@ -717,17 +728,57 @@ function buildPreviewScopes(scopes: TraversalScope[]): PreviewScope[] {
     seen.add(key);
     const node = scope.book.tree.nodes[scope.nodeId];
     if (!node) continue;
+    const isRootScope = scope.nodeId === scope.book.tree.rootId;
     previews.push({
       nodeId: node.id,
-      label: node.label || scope.book.summary.name,
+      label: isRootScope ? scope.book.summary.name : node.label || scope.book.summary.name,
       worldBookId: scope.book.summary.id,
       worldBookName: scope.book.summary.name,
       breadcrumb: getScopeBreadcrumb(scope.book, scope.nodeId),
       summary: truncateText(node.summary || "", 220),
       descendantEntryCount: getScopedEntryIds(scope.book, scope.nodeId, true).length,
+      manifestEntryCount: manifestCounts.get(key),
+      selectionReason: selectionReasons.get(key),
     });
   }
   return previews;
+}
+
+function buildPreviewScopeManifests(manifests: ScopedManifest[]): PreviewScopeManifest[] {
+  return manifests.map((item) => ({
+    nodeId: item.scope.nodeId,
+    label:
+      item.scope.nodeId === item.scope.book.tree.rootId
+        ? item.scope.book.summary.name
+        : item.scope.book.tree.nodes[item.scope.nodeId]?.label || item.scope.book.summary.name,
+    worldBookId: item.scope.book.summary.id,
+    worldBookName: item.scope.book.summary.name,
+    breadcrumb: getScopeBreadcrumb(item.scope.book, item.scope.nodeId),
+    manifestEntryCount: item.candidates.length,
+    selectedEntryIds: [],
+  }));
+}
+
+function buildScopedManifests(
+  candidates: ScoredEntry[],
+  scopes: TraversalScope[],
+  maxPerScope = 8,
+): ScopedManifest[] {
+  const candidatesById = new Map(candidates.map((item) => [item.entry.entryId, item]));
+  return scopes
+    .map((scope) => {
+      const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true)
+        .map((entryId) => candidatesById.get(entryId))
+        .filter((item): item is ScoredEntry => !!item)
+        .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label))
+        .slice(0, maxPerScope);
+      if (!scopeCandidates.length) return null;
+      return {
+        scope,
+        candidates: scopeCandidates,
+      };
+    })
+    .filter((item): item is ScopedManifest => !!item);
 }
 
 function collectCandidatesForScopes(
@@ -803,6 +854,517 @@ function collectEntriesByIds(entryIds: string[], deterministicById: Map<string, 
     selected.push(match);
   }
   return selected;
+}
+
+function makeScopeKey(scope: TraversalScope): string {
+  return `${scope.book.summary.id}:${scope.nodeId}`;
+}
+
+function isNodeAncestor(tree: BookTreeIndex, ancestorId: string, nodeId: string): boolean {
+  if (ancestorId === nodeId) return true;
+  const visited = new Set<string>();
+  let cursor = tree.nodes[nodeId];
+  while (cursor?.parentId && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
+    if (cursor.parentId === ancestorId) return true;
+    cursor = tree.nodes[cursor.parentId];
+  }
+  return false;
+}
+
+function collectChildScopeChoices(
+  scopes: TraversalScope[],
+  deterministicById: Map<string, ScoredEntry>,
+  config: CharacterRetrievalConfig,
+): TraversalCategoryChoice[] {
+  const categories: TraversalCategoryChoice[] = [];
+  const seen = new Set<string>();
+
+  for (const scope of scopes) {
+    const node = scope.book.tree.nodes[scope.nodeId];
+    if (!node || getNodeDepth(scope.book.tree, scope.nodeId) >= config.maxTraversalDepth) continue;
+
+    for (const childId of node.childIds) {
+      const child = scope.book.tree.nodes[childId];
+      if (!child) continue;
+      const choiceId = makeCategoryChoiceId(scope.book.summary.id, child.id);
+      if (seen.has(choiceId)) continue;
+      seen.add(choiceId);
+      const matchMeta = describeScopeMatches(scope.book, child.id, deterministicById);
+      categories.push({
+        choiceId,
+        book: scope.book,
+        nodeId: child.id,
+        label: `${scope.book.summary.name} :: ${child.label}`,
+        summary: truncateText(child.summary || "", 160),
+        depth: getNodeDepth(scope.book.tree, child.id),
+        childCount: child.childIds.length,
+        entryCount: getScopedEntryIds(scope.book, child.id, true).length,
+        relevance: matchMeta.relevance,
+        matchHints: [],
+      });
+    }
+  }
+
+  return categories;
+}
+
+function collectRecursiveScopeChoices(
+  scopes: TraversalScope[],
+  deterministicById: Map<string, ScoredEntry>,
+): TraversalCategoryChoice[] {
+  const categories: TraversalCategoryChoice[] = [];
+  const seen = new Set<string>();
+
+  const pushNode = (book: RuntimeBook, nodeId: string, depth: number): void => {
+    const node = book.tree.nodes[nodeId];
+    if (!node) return;
+    const choiceId = makeCategoryChoiceId(book.summary.id, node.id);
+    if (!seen.has(choiceId)) {
+      seen.add(choiceId);
+      const matchMeta = describeScopeMatches(book, node.id, deterministicById);
+      categories.push({
+        choiceId,
+        book,
+        nodeId: node.id,
+        label: `${book.summary.name} :: ${getScopeBreadcrumb(book, node.id)}`,
+        summary: truncateText(node.summary || "", 160),
+        depth,
+        childCount: node.childIds.length,
+        entryCount: getScopedEntryIds(book, node.id, true).length,
+        relevance: matchMeta.relevance,
+        matchHints: [],
+      });
+    }
+    for (const childId of node.childIds) {
+      pushNode(book, childId, depth + 1);
+    }
+  };
+
+  for (const scope of scopes) {
+    const node = scope.book.tree.nodes[scope.nodeId];
+    if (!node) continue;
+    if (scope.nodeId === scope.book.tree.rootId) {
+      for (const childId of node.childIds) {
+        pushNode(scope.book, childId, 0);
+      }
+      continue;
+    }
+    pushNode(scope.book, scope.nodeId, 0);
+  }
+
+  return categories;
+}
+
+function sortScopeChoices(choices: TraversalCategoryChoice[]): TraversalCategoryChoice[] {
+  return choices
+    .slice()
+    .sort(
+      (left, right) =>
+        right.relevance - left.relevance ||
+        right.depth - left.depth ||
+        left.entryCount - right.entryCount ||
+        left.label.localeCompare(right.label),
+    );
+}
+
+function resolveScopeChoices(
+  nodeIds: string[],
+  booksById: Map<string, RuntimeBook>,
+): TraversalScope[] {
+  const scopes = new Map<string, TraversalScope>();
+  for (const nodeId of nodeIds) {
+    const choice = parseCategoryChoiceId(nodeId);
+    if (!choice) continue;
+    const book = booksById.get(choice.bookId);
+    if (!book || !book.tree.nodes[choice.nodeId]) continue;
+    scopes.set(`${book.summary.id}:${choice.nodeId}`, { book, nodeId: choice.nodeId });
+  }
+  return Array.from(scopes.values());
+}
+
+function chooseDeterministicScopes(
+  currentScopes: TraversalScope[],
+  deterministicById: Map<string, ScoredEntry>,
+  config: CharacterRetrievalConfig,
+  recursive: boolean,
+): TraversalScope[] {
+  const choices = recursive
+    ? collectRecursiveScopeChoices(currentScopes, deterministicById)
+    : collectChildScopeChoices(currentScopes, deterministicById, config);
+  const ranked = sortScopeChoices(choices).filter((choice) => choice.entryCount > 0);
+  if (!ranked.length) return currentScopes;
+
+  const selected: TraversalScope[] = [];
+  for (const choice of ranked) {
+    const scope = { book: choice.book, nodeId: choice.nodeId };
+    const overlaps = selected.some(
+      (existing) =>
+        existing.book.summary.id === scope.book.summary.id &&
+        (isNodeAncestor(scope.book.tree, existing.nodeId, scope.nodeId) ||
+          isNodeAncestor(scope.book.tree, scope.nodeId, existing.nodeId)),
+    );
+    if (overlaps) continue;
+    selected.push(scope);
+    if (selected.length >= MAX_SCOPE_CHOICES) break;
+  }
+
+  return selected.length ? selected : currentScopes;
+}
+
+function buildInitialScopePrompt(queryText: string, treeOverview: string): string {
+  return [
+    'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
+    `Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum.`,
+    "Rules:",
+    "- Prefer specific leaves over broad branches.",
+    "- Pick only category nodeIds from the knowledge tree index.",
+    "- Pick nodes whose content would be most useful for the next reply.",
+    "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
+    "- If nothing seems relevant, return an empty nodeIds array.",
+    "",
+    "KNOWLEDGE TREE INDEX:",
+    treeOverview || "- none",
+    "",
+    buildPromptContext(queryText),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildChildScopePrompt(
+  queryText: string,
+  scopes: TraversalScope[],
+  categories: TraversalCategoryChoice[],
+  step: number,
+  config: CharacterRetrievalConfig,
+): string {
+  return [
+    'Return ONLY JSON in this exact shape: {"action":"refine|retrieve","nodeIds":["node-id-1"],"reason":"brief explanation"}.',
+    `Traversal step ${step + 1} of ${config.traversalStepLimit}.`,
+    "Rules:",
+    `- Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum from the choices below.`,
+    "- Use action \"refine\" when child categories should be opened before retrieval.",
+    "- Use action \"retrieve\" when the chosen nodeIds are already specific enough to resolve entries.",
+    "- Prefer specific leaves over broad branches.",
+    "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
+    "- Keep the result small instead of padding it.",
+    "",
+    buildPromptContext(queryText),
+    `Current scopes: ${scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ")}`,
+    "",
+    "CATEGORY CHOICES:",
+    ...(categories.length
+      ? categories.map(
+          (category) =>
+            `- nodeId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`,
+        )
+      : ["- none"]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildTraceScopeSummary(scopes: TraversalScope[]): string {
+  if (!scopes.length) return "No scopes selected.";
+  return scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ");
+}
+
+function buildFallbackReason(fallbackPath: string[]): string | null {
+  return fallbackPath.length ? fallbackPath.join(" ") : null;
+}
+
+async function chooseCollapsedScopes(
+  queryText: string,
+  books: RuntimeBook[],
+  config: CharacterRetrievalConfig,
+  controller: ControllerSession,
+  allowController: boolean,
+  deterministicById: Map<string, ScoredEntry>,
+  trace: TraversalTraceStep[],
+): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
+  const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const booksById = new Map(books.map((book) => [book.summary.id, book]));
+  const fallbackPath: string[] = [];
+  let scopes: TraversalScope[] = [];
+  let selectionReason = "Controller selected retrieval scopes.";
+
+  if (allowController) {
+    const response = await runControllerJson(
+      buildInitialScopePrompt(queryText, buildFullTraversalTreeOverview(rootScopes)),
+      controller,
+      RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+    );
+    scopes = resolveScopeChoices(
+      Array.isArray(response.parsed?.nodeIds)
+        ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [],
+      booksById,
+    );
+    const controllerReason =
+      typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
+        ? response.parsed.reason.trim()
+        : "Controller selected retrieval scopes.";
+    if (scopes.length) {
+      selectionReason = controllerReason;
+    } else {
+      fallbackPath.push(response.error ?? "Collapsed node selection returned no valid nodeIds; used deterministic node fallback.");
+      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config, true);
+      selectionReason = fallbackPath[fallbackPath.length - 1];
+    }
+  } else {
+    fallbackPath.push("Collapsed node selection skipped the controller and used deterministic scope fallback.");
+    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config, true);
+    selectionReason = fallbackPath[fallbackPath.length - 1];
+  }
+
+  pushTrace(
+    trace,
+    "choose_scope",
+    "Choose scopes",
+    `${selectionReason} Selected ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`,
+    {
+      bookId: scopes[0]?.book.summary.id ?? null,
+      nodeId: scopes[0]?.nodeId ?? null,
+      entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+    },
+  );
+
+  if (shouldRefineRetrievedScopes(scopes, config)) {
+    const categories = collectChildScopeChoices(scopes, deterministicById, config);
+    if (categories.length) {
+      let refinedScopes: TraversalScope[] = [];
+      let refinedReason = "Refined broad scopes.";
+      if (allowController) {
+        const refinement = await runControllerJson(
+          buildChildScopePrompt(queryText, scopes, categories, 1, config),
+          controller,
+          RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+        );
+        refinedScopes = resolveScopeChoices(
+          Array.isArray(refinement.parsed?.nodeIds)
+            ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          booksById,
+        );
+        refinedReason =
+          typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim()
+            ? refinement.parsed.reason.trim()
+            : "Refined broad scopes.";
+        if (!refinedScopes.length) {
+          fallbackPath.push(refinement.error ?? "Collapsed scope refinement returned no valid child nodes; used deterministic narrowing.");
+          refinedScopes = chooseDeterministicScopes(scopes, deterministicById, config, false);
+          refinedReason = fallbackPath[fallbackPath.length - 1];
+        }
+      } else {
+        fallbackPath.push("Collapsed scope refinement skipped the controller and used deterministic child scopes.");
+        refinedScopes = chooseDeterministicScopes(scopes, deterministicById, config, false);
+        refinedReason = fallbackPath[fallbackPath.length - 1];
+      }
+
+      if (refinedScopes.length) {
+        scopes = refinedScopes;
+        selectionReason = refinedReason;
+        pushTrace(
+          trace,
+          "refine_scope",
+          "Refine scopes",
+          `${refinedReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`,
+          {
+            bookId: scopes[0]?.book.summary.id ?? null,
+            nodeId: scopes[0]?.nodeId ?? null,
+            entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+          },
+        );
+      }
+    }
+  }
+
+  return { scopes, fallbackPath, selectionReason };
+}
+
+async function chooseTraversalScopes(
+  queryText: string,
+  books: RuntimeBook[],
+  config: CharacterRetrievalConfig,
+  controller: ControllerSession,
+  allowController: boolean,
+  deterministicById: Map<string, ScoredEntry>,
+  trace: TraversalTraceStep[],
+): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
+  const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const booksById = new Map(books.map((book) => [book.summary.id, book]));
+  const fallbackPath: string[] = [];
+  let scopes: TraversalScope[] = [];
+  let selectionReason = "Controller selected traversal scopes.";
+
+  if (allowController) {
+    const response = await runControllerJson(
+      buildInitialScopePrompt(queryText, buildFullTraversalTreeOverview(rootScopes)),
+      controller,
+      RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+    );
+    scopes = resolveScopeChoices(
+      Array.isArray(response.parsed?.nodeIds)
+        ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [],
+      booksById,
+    );
+    const controllerReason =
+      typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
+        ? response.parsed.reason.trim()
+        : "Controller selected traversal scopes.";
+    if (scopes.length) {
+      selectionReason = controllerReason;
+    } else {
+      fallbackPath.push(response.error ?? "Traversal scope selection returned no valid nodeIds; used deterministic node fallback.");
+      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config, true);
+      selectionReason = fallbackPath[fallbackPath.length - 1];
+    }
+  } else {
+    fallbackPath.push("Traversal scope selection skipped the controller and used deterministic scope fallback.");
+    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config, true);
+    selectionReason = fallbackPath[fallbackPath.length - 1];
+  }
+
+  pushTrace(
+    trace,
+    "choose_scope",
+    "Choose scopes",
+    `${selectionReason} Selected ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`,
+    {
+      bookId: scopes[0]?.book.summary.id ?? null,
+      nodeId: scopes[0]?.nodeId ?? null,
+      entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+    },
+  );
+
+  for (let step = 1; step < config.traversalStepLimit; step += 1) {
+    if (!shouldRefineRetrievedScopes(scopes, config)) break;
+    const categories = collectChildScopeChoices(scopes, deterministicById, config);
+    if (!categories.length) break;
+
+    let nextScopes: TraversalScope[] = [];
+    let nextReason = "Traversal scope refinement narrowed the current scopes.";
+    let shouldContinue = false;
+
+    if (allowController) {
+      const response = await runControllerJson(
+        buildChildScopePrompt(queryText, scopes, categories, step, config),
+        controller,
+        RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+      );
+      nextScopes = resolveScopeChoices(
+        Array.isArray(response.parsed?.nodeIds)
+          ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          : [],
+        booksById,
+      );
+      nextReason =
+        typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
+          ? response.parsed.reason.trim()
+          : "Traversal scope refinement narrowed the current scopes.";
+      const action = typeof response.parsed?.action === "string" ? response.parsed.action.trim().toLowerCase() : "retrieve";
+      if (!nextScopes.length) {
+        fallbackPath.push(response.error ?? "Traversal refinement returned no valid child nodes; used deterministic child-scope fallback.");
+        nextScopes = chooseDeterministicScopes(scopes, deterministicById, config, false);
+        nextReason = fallbackPath[fallbackPath.length - 1];
+      }
+      shouldContinue = action === "refine" && nextScopes.length > 0;
+    } else {
+      fallbackPath.push("Traversal refinement skipped the controller and used deterministic child scopes.");
+      nextScopes = chooseDeterministicScopes(scopes, deterministicById, config, false);
+      nextReason = fallbackPath[fallbackPath.length - 1];
+      shouldContinue = false;
+    }
+
+    if (!nextScopes.length) break;
+    scopes = nextScopes;
+    selectionReason = nextReason;
+    pushTrace(
+      trace,
+      "refine_scope",
+      "Refine scopes",
+      `${nextReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`,
+      {
+        bookId: scopes[0]?.book.summary.id ?? null,
+        nodeId: scopes[0]?.nodeId ?? null,
+        entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+      },
+    );
+
+    if (!shouldContinue) break;
+  }
+
+  return { scopes, fallbackPath, selectionReason };
+}
+
+function populateScopeManifestSelections(
+  scopeManifestCounts: PreviewScopeManifest[],
+  selected: ScoredEntry[],
+  scopes: TraversalScope[],
+): PreviewScopeManifest[] {
+  const previews = scopeManifestCounts.map((item) => ({ ...item, selectedEntryIds: [...item.selectedEntryIds] }));
+  for (const item of selected) {
+    for (const scope of scopes) {
+      const scopeEntryIds = getScopedEntryIds(scope.book, scope.nodeId, true);
+      if (!scopeEntryIds.includes(item.entry.entryId)) continue;
+      const key = `${scope.book.summary.id}:${scope.nodeId}`;
+      const preview = previews.find((candidate) => `${candidate.worldBookId}:${candidate.nodeId}` === key);
+      if (!preview) continue;
+      if (!preview.selectedEntryIds.includes(item.entry.entryId)) {
+        preview.selectedEntryIds.push(item.entry.entryId);
+      }
+      break;
+    }
+  }
+  return previews;
+}
+
+async function selectEntriesForScopes(
+  queryText: string,
+  scopes: TraversalScope[],
+  config: CharacterRetrievalConfig,
+  controller: ControllerSession,
+  allowController: boolean,
+  deterministicById: Map<string, ScoredEntry>,
+  trace: TraversalTraceStep[],
+): Promise<EntrySelectionResult> {
+  const candidates = collectCandidatesForScopes(queryText, scopes, [], deterministicById);
+  const manifests = buildScopedManifests(candidates, scopes, 8);
+  const fallbackPath: string[] = [];
+
+  if (!candidates.length) {
+    pushTrace(trace, "fallback", "No scoped entries", "The chosen scopes did not resolve any candidate entries.");
+    return { selected: [], candidates, manifests, fallbackPath: ["Chosen scopes did not resolve any candidate entries."] };
+  }
+
+  let selected: ScoredEntry[];
+  if (config.selectiveRetrieval) {
+    const beforeCalls = controller.callCount;
+    selected = await maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes);
+    if (controller.callCount === beforeCalls && !allowController) {
+      fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
+    }
+    pushTrace(
+      trace,
+      "manifest_select",
+      "Select manifest entries",
+      `Scoped manifests exposed ${candidates.length} candidate entries across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} entry candidate(s) were kept for injection.`,
+      { entryCount: selected.length },
+    );
+  } else {
+    selected = candidates.slice(0, config.maxResults);
+    pushTrace(
+      trace,
+      "retrieve",
+      "Resolve scoped entries",
+      `Selected ${selected.length} entry candidate(s) directly from ${Math.max(scopes.length, 1)} chosen scope(s).`,
+      { entryCount: selected.length },
+    );
+  }
+
+  return { selected, candidates, manifests, fallbackPath };
 }
 
 function rescoreEntries(
@@ -1429,54 +1991,91 @@ export async function buildRetrievalPreview(
     `${books.length} managed book(s) loaded.`,
     `${chosenBooks.length} readable book(s) selected for search.`,
   ];
-    const trace: TraversalTraceStep[] = [...chosenBooksResult.trace];
-  let retrievedScopes: TraversalScope[] = [];
-
+  const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
+  const trace: TraversalTraceStep[] = [...chosenBooksResult.trace];
+  const deterministic = scoreEntries(queryText, chosenBooks);
+  const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
+  let selectedScopes: TraversalScope[] = [];
+  let pulledCandidates: ScoredEntry[] = [];
   let selected: ScoredEntry[] = [];
-  let fallbackReason: string | null = null;
+  let manifests: ScopedManifest[] = [];
+  let selectionReason = "";
+  const fallbackPath: string[] = [];
 
-  if (config.searchMode === "traversal") {
-    const traversal = await selectTraversalEntries(queryText, chosenBooks, config, controller, allowController);
-    selected = traversal.selected;
-    retrievedScopes = traversal.retrievedScopes;
-    fallbackReason = traversal.fallbackReason;
-    steps.push(...traversal.steps);
-    trace.push(...traversal.trace);
+  if (!deterministic.length) {
+    fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
+    pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
-    let collapsed = scoreEntries(queryText, chosenBooks);
-    if (config.rerankEnabled && allowController) {
-      collapsed = await maybeRerankEntries(queryText, collapsed, controller, allowController);
-      steps.push("Collapsed retrieval reranked top candidates.");
-    }
-    selected = config.selectiveRetrieval
-      ? await maybeSelectEntries(queryText, collapsed, config, controller, allowController)
-      : collapsed.slice(0, config.maxResults);
-    steps.push(`Collapsed retrieval selected ${selected.length} candidate(s).`);
+    const scopeSelection =
+      config.searchMode === "traversal"
+        ? await chooseTraversalScopes(queryText, chosenBooks, config, controller, allowController, deterministicById, trace)
+        : await chooseCollapsedScopes(queryText, chosenBooks, config, controller, allowController, deterministicById, trace);
+    selectedScopes = scopeSelection.scopes;
+    selectionReason = scopeSelection.selectionReason;
+    fallbackPath.push(...scopeSelection.fallbackPath);
+    steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+
+    const entrySelection = await selectEntriesForScopes(
+      queryText,
+      selectedScopes,
+      config,
+      controller,
+      allowController,
+      deterministicById,
+      trace,
+    );
+    pulledCandidates = entrySelection.candidates;
+    selected = entrySelection.selected;
+    manifests = entrySelection.manifests;
+    fallbackPath.push(...entrySelection.fallbackPath);
+    steps.push(`Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
+    steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
+  }
+
+  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const included = injection?.included ?? selected;
+  const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
+  const injectedNodes = buildPreviewNodes(included, booksById);
+  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
+  const manifestCounts = new Map<string, number>(
+    manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]),
+  );
+  const selectionReasons = new Map<string, string>(
+    selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
+  );
+  const scopeManifestCounts = populateScopeManifestSelections(
+    buildPreviewScopeManifests(manifests),
+    selected,
+    selectedScopes,
+  );
+
+  if (injection?.included.length) {
     pushTrace(
       trace,
-      "retrieve",
-      "Collapsed retrieval",
-      `Collapsed mode resolved ${selected.length} entry candidate(s).`,
-      { entryCount: selected.length },
+      "inject",
+      "Inject entries",
+      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`,
+      { entryCount: injection.included.length },
     );
   }
 
-  const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
-  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
-  const included = injection?.included ?? selected;
-  const pulledNodes = buildPreviewNodes(selected, booksById);
-  const injectedNodes = buildPreviewNodes(included, booksById);
+  const fallbackReason = buildFallbackReason(fallbackPath);
 
   return {
     mode: config.searchMode,
     queryText,
+    recentConversation: queryText,
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
-    retrievedScopes: buildPreviewScopes(retrievedScopes),
+    selectedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    retrievedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    scopeManifestCounts,
     pulledNodes,
     injectedNodes,
-    selectedNodes: injectedNodes,
+    manifestSelectedEntries,
+    selectedNodes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
     fallbackReason,
+    fallbackPath,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
     steps,
     trace,

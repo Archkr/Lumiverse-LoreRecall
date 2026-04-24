@@ -218,6 +218,191 @@ function buildExistingTreeGuidance(
   return guidance;
 }
 
+function ensureCategoryPathFromParent(
+  tree: BookTreeIndex,
+  parentId: string,
+  labels: string[],
+  createdBy: BookTreeNode["createdBy"],
+): string {
+  let currentParentId = parentId;
+  for (const rawLabel of labels) {
+    const label = rawLabel.trim();
+    if (!label) continue;
+    const parent = tree.nodes[currentParentId];
+    if (!parent) break;
+    const existingId = parent.childIds.find((childId) => tree.nodes[childId]?.label.toLowerCase() === label.toLowerCase());
+    if (existingId) {
+      currentParentId = existingId;
+      continue;
+    }
+    const nodeId = makeNodeId("cat", label);
+    tree.nodes[nodeId] = {
+      id: nodeId,
+      kind: "category",
+      label,
+      summary: "",
+      parentId: currentParentId,
+      childIds: [],
+      entryIds: [],
+      collapsed: false,
+      createdBy,
+    };
+    parent.childIds.push(nodeId);
+    currentParentId = nodeId;
+  }
+  return currentParentId;
+}
+
+function collectNodeKeywordHints(tree: BookTreeIndex, nodeId: string, entries: IndexedEntry[]): string[] {
+  const entryIds = getDescendantCategoryIds(tree, nodeId, Number.MAX_SAFE_INTEGER).flatMap(
+    (currentNodeId) => tree.nodes[currentNodeId]?.entryIds ?? [],
+  );
+  if (nodeId === tree.rootId) {
+    entryIds.push(...tree.unassignedEntryIds);
+  }
+  const entriesById = new Map(entries.map((entry) => [entry.entryId, entry]));
+  return uniqueStrings(
+    uniqueStrings(entryIds)
+      .map((entryId) => entriesById.get(entryId))
+      .filter((entry): entry is IndexedEntry => !!entry)
+      .flatMap((entry) => [...entry.key, ...entry.keysecondary])
+      .map((value) => value.trim())
+      .filter((value) => value && !value.startsWith("[") && value.length <= 32),
+  ).slice(0, 8);
+}
+
+function appendKeywordHints(summary: string, keywords: string[]): string {
+  const trimmed = summary.trim();
+  if (!trimmed || !keywords.length || /\[Keywords:/i.test(trimmed)) return trimmed;
+  return `${trimmed} [Keywords: ${keywords.join(", ")}]`;
+}
+
+function buildRootSummary(tree: BookTreeIndex, bookName: string): string {
+  const root = tree.nodes[tree.rootId];
+  if (!root) return `Top-level index for ${bookName}.`;
+  const topLevel = root.childIds
+    .map((childId) => tree.nodes[childId])
+    .filter((node): node is BookTreeNode => !!node);
+  if (!topLevel.length) {
+    return `Top-level index for ${bookName}.`;
+  }
+
+  const labels = topLevel.map((node) => node.label.trim()).filter(Boolean);
+  const summarySnippets = topLevel
+    .map((node) => node.summary.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((value) => truncateText(value, 90));
+
+  const parts = [`Top-level index for ${bookName}.`];
+  if (labels.length) {
+    parts.push(`Categories: ${labels.slice(0, 8).join(", ")}${labels.length > 8 ? ` (+${labels.length - 8} more)` : ""}.`);
+  }
+  if (summarySnippets.length) {
+    parts.push(summarySnippets.join(" | "));
+  }
+  return parts.join(" ");
+}
+
+async function subdivideLargeLeafNodes(
+  tree: BookTreeIndex,
+  entries: IndexedEntry[],
+  granularity: ReturnType<typeof getEffectiveTreeGranularity>,
+  settings: GlobalLoreRecallSettings,
+  userId: string,
+): Promise<void> {
+  const entriesById = new Map(entries.map((entry) => [entry.entryId, entry]));
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    const oversizedLeafIds = Object.values(tree.nodes)
+      .filter(
+        (node) =>
+          node.id !== tree.rootId &&
+          node.childIds.length === 0 &&
+          node.entryIds.length > granularity.maxEntries &&
+          node.entryIds.length >= 4,
+      )
+      .sort((left, right) => right.entryIds.length - left.entryIds.length || left.label.localeCompare(right.label))
+      .map((node) => node.id);
+
+    if (!oversizedLeafIds.length) break;
+
+    let subdividedAny = false;
+
+    for (const nodeId of oversizedLeafIds) {
+      const node = tree.nodes[nodeId];
+      if (!node || node.childIds.length > 0 || node.entryIds.length <= granularity.maxEntries) continue;
+
+      const nodeEntries = node.entryIds
+        .map((entryId) => entriesById.get(entryId))
+        .filter((entry): entry is IndexedEntry => !!entry);
+      if (nodeEntries.length <= granularity.maxEntries) continue;
+
+      const prompt = [
+        "Split this oversized lore category into smaller sibling subcategories.",
+        'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Subcategory"]}]}',
+        `Current category: ${getCategoryLabelPath(tree, nodeId).join(" > ") || node.label}`,
+        `Target: keep subcategories around ${granularity.maxEntries} entries or fewer when practical.`,
+        "Rules:",
+        "- Use short reusable subcategory labels.",
+        "- The path should be relative to the current category, not the full tree.",
+        "- Create at least 2 useful subcategories when a split is possible.",
+        "- Leave path [] only if an entry truly belongs directly on the current category.",
+        "",
+        "Entries:",
+        ...nodeEntries.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail))),
+      ].join("\n");
+
+      const controllerResult = await runControllerJson(
+        prompt,
+        settings,
+        userId,
+        "assignments",
+        "lore_recall_tree_subdivide",
+        ASSIGNMENTS_SCHEMA,
+        {
+          systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
+          maxTokensOverride: Math.min(settings.controllerMaxTokens, 900),
+        },
+      );
+      const parsed =
+        controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
+      if (!parsed || !Array.isArray(parsed.assignments)) continue;
+
+      const grouped = new Map<string, string[]>();
+      for (const assignment of parsed.assignments) {
+        if (!assignment || typeof assignment !== "object") continue;
+        const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
+        const path = Array.isArray(assignment.path)
+          ? assignment.path.filter((value: unknown): value is string => typeof value === "string" && value.trim().length > 0)
+          : [];
+        if (!entryId || !path.length) continue;
+        const key = path.join(" > ");
+        const list = grouped.get(key) ?? [];
+        list.push(entryId);
+        grouped.set(key, list);
+      }
+
+      if (grouped.size < 2) continue;
+
+      for (const assignment of parsed.assignments) {
+        if (!assignment || typeof assignment !== "object") continue;
+        const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
+        const path = Array.isArray(assignment.path)
+          ? assignment.path.filter((value: unknown): value is string => typeof value === "string" && value.trim().length > 0)
+          : [];
+        if (!entryId || !path.length) continue;
+        const categoryId = ensureCategoryPathFromParent(tree, nodeId, path, "llm");
+        assignEntryToTarget(tree, entryId, { categoryId });
+      }
+
+      subdividedAny = true;
+    }
+
+    if (!subdividedAny) break;
+  }
+}
+
 class ControllerJsonError extends Error {
   debugPayload: string;
 
@@ -1141,6 +1326,8 @@ export async function buildTreeWithLlm(
         completedUnits += 1;
       }
 
+      await subdivideLargeLeafNodes(tree, cache.entries, granularity, settings, userId);
+
       const categoryNodeIds = Object.keys(tree.nodes).filter((nodeId) => {
         if (nodeId === tree.rootId) return false;
         const node = tree.nodes[nodeId];
@@ -1172,7 +1359,7 @@ export async function buildTreeWithLlm(
             if (!node) continue;
             const summary = summaries[nodeId];
             if (summary) {
-              node.summary = summary;
+              node.summary = appendKeywordHints(summary, collectNodeKeywordHints(tree, nodeId, cache.entries));
               continue;
             }
             const issue: OperationIssue = {
@@ -1219,6 +1406,10 @@ export async function buildTreeWithLlm(
         if (!assigned) assignEntryToTarget(tree, entry.entryId, "unassigned");
       }
 
+      tree.nodes[tree.rootId].summary = appendKeywordHints(
+        buildRootSummary(tree, bookName),
+        collectNodeKeywordHints(tree, tree.rootId, cache.entries),
+      );
       tree.lastBuiltAt = Date.now();
       tree.buildSource = "llm";
       await saveTreeIndex(bookId, tree, cache.entries.map((entry) => entry.entryId), userId);
@@ -1586,7 +1777,7 @@ export async function regenerateSummaries(
         if (!node) continue;
         const summary = summaries[nodeId];
         if (summary) {
-          node.summary = summary;
+          node.summary = appendKeywordHints(summary, collectNodeKeywordHints(loaded.tree, nodeId, cache.entries));
           completed += 1;
           continue;
         }
@@ -1628,6 +1819,10 @@ export async function regenerateSummaries(
   }
 
   if (targetNodeIds.length) {
+    loaded.tree.nodes[loaded.tree.rootId].summary = appendKeywordHints(
+      buildRootSummary(loaded.tree, bookName),
+      collectNodeKeywordHints(loaded.tree, loaded.tree.rootId, cache.entries),
+    );
     loaded.tree.lastBuiltAt = Date.now();
     loaded.tree.buildSource = "manual";
     await saveTreeIndex(bookId, loaded.tree, cache.entries.map((entry) => entry.entryId), userId);
@@ -1643,11 +1838,67 @@ export async function regenerateSummaries(
 export function buildDiagnostics(
   runtimeBooks: RuntimeBook[],
   staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }>,
+  settings?: Pick<GlobalLoreRecallSettings, "controllerConnectionId">,
+  characterConfig?: CharacterRetrievalConfig | null,
+  availableConnections: Array<{ id: string }> = [],
 ): DiagnosticFinding[] {
   const diagnostics: DiagnosticFinding[] = [];
+  const multiBookMode = !!characterConfig && runtimeBooks.length > 1;
+  const readableBooks = runtimeBooks.filter((book) => book.config.enabled && book.config.permission !== "write_only");
+
+  if (characterConfig?.searchMode === "traversal" && characterConfig.selectiveRetrieval && characterConfig.traversalStepLimit < 3) {
+    diagnostics.push({
+      id: "selective-traversal-limit",
+      severity: "warn",
+      bookId: null,
+      title: "Traversal step limit is low for selective retrieval",
+      detail:
+        "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose scopes, refine them, and then pick exact entries from scoped manifests.",
+    });
+  }
+
+  if (!readableBooks.length && runtimeBooks.length) {
+    diagnostics.push({
+      id: "no-readable-books",
+      severity: "warn",
+      bookId: null,
+      title: "No readable managed books",
+      detail: "All managed books are currently disabled or write-only, so Lore Recall has nothing it can search during retrieval.",
+    });
+  }
+
+  if (settings?.controllerConnectionId?.trim()) {
+    const expectedId = settings.controllerConnectionId.trim();
+    if (!availableConnections.some((connection) => connection.id === expectedId)) {
+      diagnostics.push({
+        id: "controller-connection-missing",
+        severity: "warn",
+        bookId: null,
+        title: "Configured controller connection is missing",
+        detail: "The controller connection selected in Lore Recall settings is no longer available, so controller-guided retrieval may silently fall back.",
+      });
+    }
+  } else if (!availableConnections.length && runtimeBooks.length) {
+    diagnostics.push({
+      id: "controller-unavailable",
+      severity: "warn",
+      bookId: null,
+      title: "No controller connections are available",
+      detail: "No connection profiles are currently available for controller-guided retrieval, tree building, or summary generation.",
+    });
+  }
 
   for (const book of runtimeBooks) {
     const issues = staleIssues[book.summary.id];
+    const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
+    const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
+    const oversizedLeafNodes = categoryNodes.filter((node) => node.childIds.length === 0 && node.entryIds.length >= 20);
+    const overviewEstimate = categoryNodes.reduce(
+      (total, node) => total + 48 + node.label.length + Math.min(node.summary.length, 120),
+      0,
+    );
+    const rootSummary = book.tree.nodes[book.tree.rootId]?.summary?.trim() ?? "";
+
     if (book.status.attachedToCharacter) {
       diagnostics.push({
         id: `attached:${book.summary.id}`,
@@ -1702,6 +1953,42 @@ export function buildDiagnostics(
         bookId: book.summary.id,
         title: "Book metadata is incomplete",
         detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s) and ${missingCollapsedCount} collapsed-text gap(s).`,
+      });
+    }
+    if (categoryNodes.length && categorySummaryCount < categoryNodes.length) {
+      diagnostics.push({
+        id: `category-summary:${book.summary.id}`,
+        severity: categorySummaryCount === 0 ? "warn" : "info",
+        bookId: book.summary.id,
+        title: "Category summary coverage is incomplete",
+        detail: `${book.summary.name} has ${categorySummaryCount}/${categoryNodes.length} category summaries. Tree navigation works better when categories have short summaries.`,
+      });
+    }
+    if (oversizedLeafNodes.length) {
+      diagnostics.push({
+        id: `oversized-leaf:${book.summary.id}`,
+        severity: "warn",
+        bookId: book.summary.id,
+        title: "Some leaf categories are oversized",
+        detail: `${book.summary.name} has ${oversizedLeafNodes.length} leaf categor${oversizedLeafNodes.length === 1 ? "y" : "ies"} with 20 or more direct entries. Rebuild with LLM to split oversized leaves into more specific branches.`,
+      });
+    }
+    if (overviewEstimate > 10_000) {
+      diagnostics.push({
+        id: `overview-size:${book.summary.id}`,
+        severity: "info",
+        bookId: book.summary.id,
+        title: "Tree overview is large",
+        detail: `${book.summary.name} has a large category index, so collapsed or full-tree traversal prompts may need tighter categories and stronger summaries to stay readable.`,
+      });
+    }
+    if (multiBookMode && !book.config.description.trim() && !rootSummary) {
+      diagnostics.push({
+        id: `multibook-description:${book.summary.id}`,
+        severity: "info",
+        bookId: book.summary.id,
+        title: "Book lacks a disambiguating description",
+        detail: `${book.summary.name} has no Lore Recall book description and no root summary yet, which makes multi-book retrieval harder to disambiguate.`,
       });
     }
   }

@@ -2270,19 +2270,32 @@ function setup(ctx) {
       controllerUsed: preview.controllerUsed,
       resolvedConnectionId: preview.resolvedConnectionId ?? null,
       fallbackReason: preview.fallbackReason,
+      fallbackPath: preview.fallbackPath ?? [],
       selectedBookIds: preview.selectedBookIds,
+      recentConversation: preview.recentConversation,
       queryText: preview.queryText,
       pullLimit: currentState?.characterConfig?.maxResults ?? null,
       injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
       trace: preview.trace,
-      retrievedScopes: preview.retrievedScopes.map((scope) => ({
+      selectedScopes: preview.selectedScopes.map((scope) => ({
         nodeId: scope.nodeId,
         label: scope.label,
         worldBookId: scope.worldBookId,
         worldBookName: scope.worldBookName,
         breadcrumb: scope.breadcrumb,
         summary: scope.summary,
-        descendantEntryCount: scope.descendantEntryCount
+        descendantEntryCount: scope.descendantEntryCount,
+        manifestEntryCount: scope.manifestEntryCount ?? null,
+        selectionReason: scope.selectionReason ?? null
+      })),
+      scopeManifestCounts: preview.scopeManifestCounts.map((scope) => ({
+        nodeId: scope.nodeId,
+        label: scope.label,
+        worldBookId: scope.worldBookId,
+        worldBookName: scope.worldBookName,
+        breadcrumb: scope.breadcrumb,
+        manifestEntryCount: scope.manifestEntryCount,
+        selectedEntryIds: scope.selectedEntryIds
       })),
       pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
         entryId: node.entryId,
@@ -2295,6 +2308,16 @@ function setup(ctx) {
         previewText: node.previewText
       })),
       injectedNodes: getPreviewInjectedNodes(preview).map((node) => ({
+        entryId: node.entryId,
+        label: node.label,
+        worldBookId: node.worldBookId,
+        worldBookName: node.worldBookName,
+        breadcrumb: node.breadcrumb,
+        score: node.score,
+        reasons: node.reasons,
+        previewText: node.previewText
+      })),
+      manifestSelectedEntries: (preview.manifestSelectedEntries ?? []).map((node) => ({
         entryId: node.entryId,
         label: node.label,
         worldBookId: node.worldBookId,
@@ -2378,15 +2401,15 @@ function setup(ctx) {
   function getPreviewPulledNodes(preview) {
     if (!preview)
       return [];
-    return preview.pulledNodes?.length ? preview.pulledNodes : preview.selectedNodes;
+    return preview.pulledNodes ?? [];
   }
   function getPreviewInjectedNodes(preview) {
     if (!preview)
       return [];
     if (preview.injectedNodes?.length)
       return preview.injectedNodes;
-    if (preview.injectedText?.trim())
-      return preview.selectedNodes;
+    if (preview.manifestSelectedEntries?.length)
+      return preview.manifestSelectedEntries;
     return [];
   }
   function renderRetrievedScopes(scopes) {
@@ -2401,6 +2424,25 @@ function setup(ctx) {
       if (scope.summary?.trim()) {
         item.appendChild(createElement("div", "lore-search-scope-summary", scope.summary));
       }
+      if (scope.selectionReason?.trim()) {
+        item.appendChild(createElement("div", "lore-search-scope-summary", `Why: ${scope.selectionReason}`));
+      }
+      list.appendChild(item);
+    }
+    return list;
+  }
+  function renderScopeManifestCounts(scopes) {
+    if (!scopes.length)
+      return null;
+    const list = createElement("div", "lore-search-scopes");
+    for (const scope of scopes) {
+      const item = createElement("div", "lore-search-scope");
+      const head = createElement("div", "lore-search-scope-head");
+      head.append(createElement("div", "lore-search-scope-title", scope.label), createTag(`${scope.manifestEntryCount} manifest entr${scope.manifestEntryCount === 1 ? "y" : "ies"}`, "neutral"));
+      item.append(head, createElement("div", "lore-search-scope-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`));
+      if (scope.selectedEntryIds.length) {
+        item.appendChild(createElement("div", "lore-search-scope-summary", `Selected entry IDs: ${scope.selectedEntryIds.join(", ")}`));
+      }
       list.appendChild(item);
     }
     return list;
@@ -2409,11 +2451,14 @@ function setup(ctx) {
     if (!preview)
       return null;
     const wrap = createElement("div", "lore-search-log");
-    const scopes = renderRetrievedScopes(preview.retrievedScopes ?? []);
+    const scopes = renderRetrievedScopes(preview.selectedScopes ?? []);
     if (scopes)
       wrap.appendChild(scopes);
+    const manifestCounts = renderScopeManifestCounts(preview.scopeManifestCounts ?? []);
+    if (manifestCounts)
+      wrap.appendChild(manifestCounts);
     if (!preview.trace?.length) {
-      wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
+      wrap.appendChild(createEmpty("No selection activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;
     }
     const trace = createElement("div", "lore-search-steps");
@@ -2469,7 +2514,7 @@ function setup(ctx) {
     }
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
-    searches.append(createElement("div", "lore-last-panel-title", "Searches"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
+    searches.append(createElement("div", "lore-last-panel-title", "Selected nodes"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
     const pulled = createElement("div", "lore-last-panel");
     pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
     const injected = createElement("div", "lore-last-panel");
@@ -2597,7 +2642,7 @@ function setup(ctx) {
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
-      ["searches", "Searches"],
+      ["searches", "Selected nodes"],
       ["pulled", "Pulled"],
       ["injected", "Injected"]
     ]) {

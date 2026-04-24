@@ -772,12 +772,14 @@ export function setup(ctx: SpindleFrontendContext) {
         controllerUsed: preview.controllerUsed,
         resolvedConnectionId: preview.resolvedConnectionId ?? null,
         fallbackReason: preview.fallbackReason,
+        fallbackPath: preview.fallbackPath ?? [],
         selectedBookIds: preview.selectedBookIds,
+        recentConversation: preview.recentConversation,
         queryText: preview.queryText,
         pullLimit: currentState?.characterConfig?.maxResults ?? null,
         injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
         trace: preview.trace,
-        retrievedScopes: preview.retrievedScopes.map((scope) => ({
+        selectedScopes: preview.selectedScopes.map((scope) => ({
           nodeId: scope.nodeId,
           label: scope.label,
           worldBookId: scope.worldBookId,
@@ -785,6 +787,17 @@ export function setup(ctx: SpindleFrontendContext) {
           breadcrumb: scope.breadcrumb,
           summary: scope.summary,
           descendantEntryCount: scope.descendantEntryCount,
+          manifestEntryCount: scope.manifestEntryCount ?? null,
+          selectionReason: scope.selectionReason ?? null,
+        })),
+        scopeManifestCounts: preview.scopeManifestCounts.map((scope) => ({
+          nodeId: scope.nodeId,
+          label: scope.label,
+          worldBookId: scope.worldBookId,
+          worldBookName: scope.worldBookName,
+          breadcrumb: scope.breadcrumb,
+          manifestEntryCount: scope.manifestEntryCount,
+          selectedEntryIds: scope.selectedEntryIds,
         })),
         pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
           entryId: node.entryId,
@@ -797,6 +810,16 @@ export function setup(ctx: SpindleFrontendContext) {
           previewText: node.previewText,
         })),
         injectedNodes: getPreviewInjectedNodes(preview).map((node) => ({
+          entryId: node.entryId,
+          label: node.label,
+          worldBookId: node.worldBookId,
+          worldBookName: node.worldBookName,
+          breadcrumb: node.breadcrumb,
+          score: node.score,
+          reasons: node.reasons,
+            previewText: node.previewText,
+          })),
+        manifestSelectedEntries: (preview.manifestSelectedEntries ?? []).map((node) => ({
           entryId: node.entryId,
           label: node.label,
           worldBookId: node.worldBookId,
@@ -894,13 +917,13 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function getPreviewPulledNodes(preview: FrontendState["preview"]): PreviewNode[] {
     if (!preview) return [];
-    return preview.pulledNodes?.length ? preview.pulledNodes : preview.selectedNodes;
+    return preview.pulledNodes ?? [];
   }
 
   function getPreviewInjectedNodes(preview: FrontendState["preview"]): PreviewNode[] {
     if (!preview) return [];
     if (preview.injectedNodes?.length) return preview.injectedNodes;
-    if (preview.injectedText?.trim()) return preview.selectedNodes;
+    if (preview.manifestSelectedEntries?.length) return preview.manifestSelectedEntries;
     return [];
   }
 
@@ -921,6 +944,35 @@ export function setup(ctx: SpindleFrontendContext) {
       if (scope.summary?.trim()) {
         item.appendChild(createElement("div", "lore-search-scope-summary", scope.summary));
       }
+      if (scope.selectionReason?.trim()) {
+        item.appendChild(createElement("div", "lore-search-scope-summary", `Why: ${scope.selectionReason}`));
+      }
+      list.appendChild(item);
+    }
+    return list;
+  }
+
+  function renderScopeManifestCounts(
+    scopes: NonNullable<FrontendState["preview"]>["scopeManifestCounts"],
+  ): HTMLElement | null {
+    if (!scopes.length) return null;
+    const list = createElement("div", "lore-search-scopes");
+    for (const scope of scopes) {
+      const item = createElement("div", "lore-search-scope");
+      const head = createElement("div", "lore-search-scope-head");
+      head.append(
+        createElement("div", "lore-search-scope-title", scope.label),
+        createTag(`${scope.manifestEntryCount} manifest entr${scope.manifestEntryCount === 1 ? "y" : "ies"}`, "neutral"),
+      );
+      item.append(
+        head,
+        createElement("div", "lore-search-scope-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`),
+      );
+      if (scope.selectedEntryIds.length) {
+        item.appendChild(
+          createElement("div", "lore-search-scope-summary", `Selected entry IDs: ${scope.selectedEntryIds.join(", ")}`),
+        );
+      }
       list.appendChild(item);
     }
     return list;
@@ -930,10 +982,12 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!preview) return null;
 
     const wrap = createElement("div", "lore-search-log");
-    const scopes = renderRetrievedScopes(preview.retrievedScopes ?? []);
+    const scopes = renderRetrievedScopes(preview.selectedScopes ?? []);
     if (scopes) wrap.appendChild(scopes);
+    const manifestCounts = renderScopeManifestCounts(preview.scopeManifestCounts ?? []);
+    if (manifestCounts) wrap.appendChild(manifestCounts);
     if (!preview.trace?.length) {
-      wrap.appendChild(createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
+      wrap.appendChild(createEmpty("No selection activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;
     }
 
@@ -960,7 +1014,7 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function createRetrievalEntryCard(
-    node: NonNullable<FrontendState["preview"]>["selectedNodes"][number],
+    node: PreviewNode,
     index: number,
     emphasis: "pulled" | "injected",
   ): HTMLElement {
@@ -988,7 +1042,7 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function renderRetrievalEntries(
-    nodes: NonNullable<FrontendState["preview"]>["selectedNodes"],
+    nodes: PreviewNode[],
     emphasis: "pulled" | "injected",
     emptyTitle: string,
     emptyBody: string,
@@ -1023,7 +1077,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
     searches.append(
-      createElement("div", "lore-last-panel-title", "Searches"),
+      createElement("div", "lore-last-panel-title", "Selected nodes"),
       renderSearchActivity(preview) ?? createEmpty("No search activity"),
     );
 
@@ -1215,7 +1269,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const preview = createElement("section", "lore-section");
     const tabs = createElement("div", "lore-tabs");
     for (const [value, label] of [
-      ["searches", "Searches"],
+      ["searches", "Selected nodes"],
       ["pulled", "Pulled"],
       ["injected", "Injected"],
     ] as const) {

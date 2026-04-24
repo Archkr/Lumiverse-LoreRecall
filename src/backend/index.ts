@@ -146,7 +146,31 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
-  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues);
+  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(
+    cachedPreview?.fallbackPath?.length
+      ? [
+          {
+            id: "preview-fallback",
+            severity: "info" as const,
+            bookId: null,
+            title: "Last retrieval used fallback behavior",
+            detail: cachedPreview.fallbackPath.join(" "),
+          },
+        ]
+      : [],
+    cachedPreview && cachedPreview.selectedScopes.length > 0 && cachedPreview.pulledNodes.length === 0
+      ? [
+          {
+            id: "preview-empty-scopes",
+            severity: "warn" as const,
+            bookId: null,
+            title: "Last retrieval scopes resolved no entries",
+            detail:
+              "The most recent retrieval chose one or more scopes but resolved no pulled entries. This usually points to overly broad or poorly summarized categories.",
+          },
+        ]
+      : [],
+  );
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
 
   const nextState: FrontendState = {

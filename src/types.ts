@@ -6,7 +6,17 @@ export type DedupMode = "none" | "lexical" | "llm";
 export type TreeBuildSource = "metadata" | "llm" | "migration" | "manual" | null;
 export type TreeNodeKind = "root" | "category";
 export type DiagnosticSeverity = "info" | "warn" | "error";
-export type TraversalTracePhase = "choose_book" | "navigate" | "search" | "retrieve" | "finish" | "fallback";
+export type TraversalTracePhase =
+  | "choose_book"
+  | "choose_scope"
+  | "refine_scope"
+  | "navigate"
+  | "search"
+  | "retrieve"
+  | "manifest_select"
+  | "inject"
+  | "finish"
+  | "fallback";
 
 export interface GlobalLoreRecallSettings {
   enabled: boolean;
@@ -148,6 +158,18 @@ export interface PreviewScope {
   breadcrumb: string;
   summary: string;
   descendantEntryCount: number;
+  manifestEntryCount?: number;
+  selectionReason?: string;
+}
+
+export interface PreviewScopeManifest {
+  nodeId: string;
+  label: string;
+  worldBookId: string;
+  worldBookName: string;
+  breadcrumb: string;
+  manifestEntryCount: number;
+  selectedEntryIds: string[];
 }
 
 export interface TraversalTraceStep {
@@ -163,13 +185,18 @@ export interface TraversalTraceStep {
 export interface RetrievalPreview {
   mode: SearchMode;
   queryText: string;
+  recentConversation: string;
   estimatedTokens: number;
   injectedText: string;
+  selectedScopes: PreviewScope[];
   retrievedScopes: PreviewScope[];
+  scopeManifestCounts: PreviewScopeManifest[];
   pulledNodes: PreviewNode[];
   injectedNodes: PreviewNode[];
-  selectedNodes: PreviewNode[];
+  manifestSelectedEntries: PreviewNode[];
+  selectedNodes: PreviewScope[];
   fallbackReason: string | null;
+  fallbackPath: string[];
   selectedBookIds: string[];
   steps: string[];
   trace: TraversalTraceStep[];
