@@ -7,7 +7,11 @@ import type {
   OperationIssue,
   OperationKind,
   OperationUpdate,
+  RetrievalFeedItem,
+  RetrievalFeedState,
   RetrievalPreview,
+  RetrievalProgressEvent,
+  RetrievalSession,
 } from "../types";
 import { buildRetrievalPreview } from "./retrieval";
 import {
@@ -49,9 +53,13 @@ import {
 } from "./storage";
 
 const CONNECTION_CACHE_TTL_MS = 5000;
+const RETRIEVAL_FEED_SESSION_LIMIT = 25;
+const RETRIEVAL_FEED_PUSH_DELAY_MS = 180;
 const connectionCache = new Map<string, { expiresAt: number; connections: ConnectionProfileDTO[] }>();
 const latestStateSequence = new Map<string, number>();
 const previewCache = new Map<string, RetrievalPreview | null>();
+const retrievalFeedCache = new Map<string, RetrievalFeedState>();
+const scheduledStatePushes = new Map<string, ReturnType<typeof setTimeout>>();
 
 interface StateBuildEnvelope {
   state: FrontendState;
@@ -80,6 +88,133 @@ function getPreviewCacheKey(userId: string, chatId: string): string {
   return `${userId}:${chatId}`;
 }
 
+function cloneRetrievalFeedItem(item: RetrievalFeedItem): RetrievalFeedItem {
+  return {
+    ...item,
+    scopes: item.scopes?.map((scope) => ({ ...scope })),
+    entries: item.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
+    details: item.details ? [...item.details] : undefined,
+  };
+}
+
+function cloneRetrievalSession(session: RetrievalSession): RetrievalSession {
+  return {
+    ...session,
+    items: session.items.map(cloneRetrievalFeedItem),
+  };
+}
+
+function cloneRetrievalFeedState(state: RetrievalFeedState | null | undefined): RetrievalFeedState {
+  return {
+    sessions: (state?.sessions ?? []).map(cloneRetrievalSession),
+  };
+}
+
+function createSessionStartItem(event: Extract<RetrievalProgressEvent, { type: "start" }>): RetrievalFeedItem {
+  return {
+    id: `session:${event.timestamp}:${Math.random().toString(36).slice(2, 8)}`,
+    kind: "trace",
+    label: event.label,
+    summary: event.summary,
+    timestamp: event.timestamp,
+    phase: "session",
+    details: event.details ? [...event.details] : undefined,
+    tone: "info",
+  };
+}
+
+function sortAndTrimRetrievalSessions(sessions: RetrievalSession[]): RetrievalSession[] {
+  return sessions
+    .slice()
+    .sort((left, right) => {
+      if (left.status === "running" && right.status !== "running") return -1;
+      if (right.status === "running" && left.status !== "running") return 1;
+      return right.startedAt - left.startedAt;
+    })
+    .slice(0, RETRIEVAL_FEED_SESSION_LIMIT);
+}
+
+function getOrCreateRetrievalFeed(userId: string, chatId: string): RetrievalFeedState {
+  const key = getPreviewCacheKey(userId, chatId);
+  const cached = retrievalFeedCache.get(key);
+  if (cached) return cached;
+  const next: RetrievalFeedState = { sessions: [] };
+  retrievalFeedCache.set(key, next);
+  return next;
+}
+
+function beginRetrievalSession(
+  userId: string,
+  chatId: string,
+  sessionId: string,
+  event: Extract<RetrievalProgressEvent, { type: "start" }>,
+): void {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session: RetrievalSession = {
+    id: sessionId,
+    chatId,
+    mode: event.mode,
+    startedAt: event.timestamp,
+    endedAt: null,
+    status: "running",
+    controllerUsed: false,
+    resolvedConnectionId: null,
+    fallbackReason: null,
+    items: [createSessionStartItem(event)],
+  };
+  feed.sessions = sortAndTrimRetrievalSessions([session, ...feed.sessions.filter((item) => item.id !== sessionId)]);
+}
+
+function appendRetrievalSessionItem(
+  userId: string,
+  chatId: string,
+  sessionId: string,
+  item: RetrievalFeedItem,
+): void {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session = feed.sessions.find((candidate) => candidate.id === sessionId);
+  if (!session) return;
+  session.items = [...session.items, cloneRetrievalFeedItem(item)];
+  feed.sessions = sortAndTrimRetrievalSessions(feed.sessions);
+}
+
+function finishRetrievalSession(
+  userId: string,
+  chatId: string,
+  sessionId: string,
+  event: Extract<RetrievalProgressEvent, { type: "finish" }>,
+): void {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session = feed.sessions.find((candidate) => candidate.id === sessionId);
+  if (!session) return;
+  session.status = event.status;
+  session.endedAt = event.timestamp;
+  session.controllerUsed = event.controllerUsed;
+  session.resolvedConnectionId = event.resolvedConnectionId;
+  session.fallbackReason = event.fallbackReason;
+  feed.sessions = sortAndTrimRetrievalSessions(feed.sessions);
+}
+
+function scheduleLiveStatePush(userId: string, chatId: string): void {
+  const key = getPreviewCacheKey(userId, chatId);
+  const existing = scheduledStatePushes.get(key);
+  if (existing) clearTimeout(existing);
+  const handle = setTimeout(() => {
+    scheduledStatePushes.delete(key);
+    void resolveActiveChat(userId)
+      .then((activeChat) => {
+        if (activeChat?.id !== chatId) return;
+        return pushState(userId, chatId);
+      })
+      .catch((error) => {
+        spindle.log.warn(
+          `Lore Recall state push failed for chat ${chatId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  }, RETRIEVAL_FEED_PUSH_DELAY_MS);
+  scheduledStatePushes.set(key, handle);
+}
+
 function summarizeTrace(preview: RetrievalPreview): string {
   if (!preview.trace.length) return "no traversal trace";
   return preview.trace
@@ -102,6 +237,9 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     .map(toBookSummary);
 
   const cachedPreview = activeChat?.id ? (previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null) : null;
+  const cachedRetrievalFeed = activeChat?.id
+    ? cloneRetrievalFeedState(retrievalFeedCache.get(getPreviewCacheKey(userId, activeChat.id)))
+    : { sessions: [] };
 
   const baseState: FrontendState = {
     activeChatId: activeChat?.id ?? null,
@@ -118,6 +256,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
     diagnosticsResults: [],
     suggestedBookIds: [],
+    retrievalFeed: cachedRetrievalFeed,
     preview: cachedPreview,
   };
 
@@ -427,6 +566,11 @@ async function runTrackedOperation<T>(
 }
 
 spindle.registerInterceptor(async (messages, context) => {
+  let liveChatId: string | null = null;
+  let liveUserId: string | null = null;
+  let retrievalSessionId: string | null = null;
+  let retrievalSessionStarted = false;
+  let retrievalSessionFinished = false;
   try {
     const chatId =
       context && typeof context === "object" && typeof (context as { chatId?: unknown }).chatId === "string"
@@ -437,12 +581,14 @@ spindle.registerInterceptor(async (messages, context) => {
         ? ((context as { connectionId?: unknown }).connectionId as string)
         : null;
     if (!chatId) return messages;
+    liveChatId = chatId;
 
     const userId = resolveUserId(chatId);
     if (!userId) {
       spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
       return messages;
     }
+    liveUserId = userId;
 
     await ensureStorageFolders(userId);
     const settings = await loadGlobalSettings(userId);
@@ -464,6 +610,29 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length) return messages;
 
+    retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const handleProgress = (event: RetrievalProgressEvent) => {
+      if (!retrievalSessionId) return;
+      switch (event.type) {
+        case "start":
+          retrievalSessionStarted = true;
+          beginRetrievalSession(userId, chatId, retrievalSessionId, event);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+        case "item":
+          if (!retrievalSessionStarted) return;
+          appendRetrievalSessionItem(userId, chatId, retrievalSessionId, event.item);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+        case "finish":
+          if (!retrievalSessionStarted) return;
+          retrievalSessionFinished = true;
+          finishRetrievalSession(userId, chatId, retrievalSessionId, event);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+      }
+    };
+
     const preview = await buildRetrievalPreview(
       messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
       settings,
@@ -474,9 +643,11 @@ spindle.registerInterceptor(async (messages, context) => {
         connectionId,
         isActual: true,
         capturedAt: Date.now(),
+        reportProgress: handleProgress,
       },
     );
     previewCache.set(getPreviewCacheKey(userId, chatId), preview);
+    scheduleLiveStatePush(userId, chatId);
     if (preview) {
       if (preview.mode === "traversal" && preview.fallbackReason) {
         spindle.log.info(
@@ -496,6 +667,29 @@ spindle.registerInterceptor(async (messages, context) => {
 
     return [{ role: "system", content: preview.injectedText }, ...messages] satisfies LlmMessageDTO[];
   } catch (error: unknown) {
+    if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
+      const activeSession = retrievalFeedCache
+        .get(getPreviewCacheKey(liveUserId, liveChatId))
+        ?.sessions.find((session) => session.id === retrievalSessionId);
+      appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
+        id: `issue:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        kind: "issue",
+        label: "Retrieval failed",
+        summary: error instanceof Error ? error.message : String(error),
+        timestamp: Date.now(),
+        phase: "fallback",
+        tone: "error",
+      });
+      finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
+        type: "finish",
+        timestamp: Date.now(),
+        status: "failed",
+        controllerUsed: activeSession?.controllerUsed ?? false,
+        resolvedConnectionId: activeSession?.resolvedConnectionId ?? null,
+        fallbackReason: error instanceof Error ? error.message : String(error),
+      });
+      scheduleLiveStatePush(liveUserId, liveChatId);
+    }
     spindle.log.warn(`Lore Recall interceptor failed: ${error instanceof Error ? error.message : String(error)}`);
     return messages;
   }

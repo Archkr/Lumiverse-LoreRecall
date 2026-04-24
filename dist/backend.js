@@ -795,6 +795,7 @@ function canEditBook(config) {
 }
 
 // src/backend/retrieval.ts
+var TRACE_REPORTER = Symbol("traceReporter");
 var CONTROLLER_TIMEOUT_MS = 45000;
 var CONTROLLER_TOTAL_BUDGET_MS = 175000;
 var CONTROLLER_MAX_CALLS = 12;
@@ -983,6 +984,48 @@ function resolveControllerConnectionId(settings, fallbackConnectionId) {
     return fallbackConnectionId.trim();
   return null;
 }
+function createTraceBuffer(reporter) {
+  const trace = [];
+  trace[TRACE_REPORTER] = reporter;
+  return trace;
+}
+function getTraceReporter(trace) {
+  return trace[TRACE_REPORTER];
+}
+function emitProgress(reporter, event) {
+  if (!reporter)
+    return;
+  try {
+    reporter(event);
+  } catch (error) {
+    spindle.log.warn(`Lore Recall progress update failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+function createFeedItem(kind, label, summary, options = {}) {
+  const timestamp = options.timestamp ?? Date.now();
+  return {
+    id: `${kind}:${timestamp}:${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    label,
+    summary,
+    timestamp,
+    phase: options.phase ?? null,
+    count: typeof options.count === "number" ? options.count : null,
+    scopes: options.scopes?.map((scope) => ({ ...scope })),
+    entries: options.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
+    details: options.details ? [...options.details] : undefined,
+    tone: options.tone
+  };
+}
+function emitTraceFeedItem(trace, label, summary, options = {}) {
+  const reporter = getTraceReporter(trace);
+  if (!reporter)
+    return;
+  emitProgress(reporter, {
+    type: "item",
+    item: createFeedItem("trace", label, summary, options)
+  });
+}
 function pushTrace(trace, phase, label, summary, extra = {}) {
   trace.push({
     step: trace.length + 1,
@@ -992,6 +1035,11 @@ function pushTrace(trace, phase, label, summary, extra = {}) {
     bookId: extra.bookId ?? null,
     nodeId: extra.nodeId ?? null,
     entryCount: extra.entryCount ?? null
+  });
+  emitTraceFeedItem(trace, label, summary, {
+    phase,
+    count: typeof extra.entryCount === "number" ? extra.entryCount : null,
+    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info"
   });
 }
 function stripSearchMarkup(value) {
@@ -1415,7 +1463,7 @@ function scoreEntries(queryText, books) {
     return [];
   return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
-async function runControllerJson(prompt, controller, systemPrompt) {
+async function runControllerJson(prompt, controller, systemPrompt, requestLabel = "Controller request") {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
     return { parsed: null, error: "Traversal controller hit its call limit." };
   }
@@ -1424,9 +1472,17 @@ async function runControllerJson(prompt, controller, systemPrompt) {
     return { parsed: null, error: "Traversal controller ran out of time." };
   }
   controller.callCount += 1;
+  emitProgress(controller.reportProgress, {
+    type: "item",
+    item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
+      phase: "controller",
+      tone: "info"
+    })
+  });
   const abortController = new AbortController;
   const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
   let timer = null;
+  let timeoutHandled = false;
   try {
     const requestPromise = spindle.generate.quiet({
       type: "quiet",
@@ -1448,11 +1504,32 @@ async function runControllerJson(prompt, controller, systemPrompt) {
         return { parsed, error: null };
       }
       spindle.log.warn("Lore Recall controller call returned invalid JSON.");
+      emitProgress(controller.reportProgress, {
+        type: "item",
+        item: createFeedItem("issue", `Controller issue: ${requestLabel}`, "Controller returned invalid JSON, so Lore Recall will fall back where it can.", {
+          phase: "controller",
+          tone: "warn"
+        })
+      });
       return { parsed: null, error: "Traversal controller returned invalid JSON." };
     }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       const isAbort = error instanceof Error && error.name === "AbortError";
+      if (isAbort && timeoutHandled) {
+        return {
+          parsed: null,
+          error: "Traversal controller timed out before the interceptor budget was exhausted."
+        };
+      }
       spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
+      emitProgress(controller.reportProgress, {
+        type: "item",
+        item: createFeedItem("issue", `${isAbort ? "Controller timeout" : "Controller error"}: ${requestLabel}`, isAbort ? "Controller request timed out and Lore Recall will keep going with fallback behavior when possible." : `Controller request failed: ${message}`, {
+          phase: "controller",
+          tone: isAbort ? "warn" : "error",
+          details: isAbort ? [`Timeout after ${timeoutMs} ms.`] : [message]
+        })
+      });
       return {
         parsed: null,
         error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`
@@ -1460,8 +1537,17 @@ async function runControllerJson(prompt, controller, systemPrompt) {
     });
     const timeoutPromise = new Promise((resolve) => {
       timer = setTimeout(() => {
+        timeoutHandled = true;
         abortController.abort();
         spindle.log.warn("Lore Recall controller call failed: request timed out");
+        emitProgress(controller.reportProgress, {
+          type: "item",
+          item: createFeedItem("issue", `Controller timeout: ${requestLabel}`, "Controller request timed out before Lore Recall finished retrieval.", {
+            phase: "controller",
+            tone: "warn",
+            details: [`Timeout after ${timeoutMs} ms.`]
+          })
+        });
         resolve({
           parsed: null,
           error: "Traversal controller timed out before the interceptor budget was exhausted."
@@ -1494,13 +1580,13 @@ async function maybeChooseBooks(recentConversation, books, config, controller, a
     ...books.map((book) => `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(book.config.description || book.tree.nodes[book.tree.rootId]?.summary || book.summary.description, 140)}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`)
   ].join(`
 `);
-  const { parsed } = await runControllerJson(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT);
+  const { parsed } = await runControllerJson(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT, "Choose books");
   const ids = Array.isArray(parsed?.bookIds) ? parsed.bookIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return { books, trace: [] };
   const chosen = books.filter((book) => ids.includes(book.summary.id));
   const nextBooks = chosen.length ? chosen : books;
-  const trace = [];
+  const trace = createTraceBuffer(controller.reportProgress);
   pushTrace(trace, "choose_book", "Book selection", nextBooks.length ? `Controller selected ${nextBooks.length} book(s): ${nextBooks.map((book) => book.summary.name).join(", ")}.` : "Controller kept all readable books in scope.", { entryCount: nextBooks.reduce((total, book) => total + book.cache.entries.length, 0) });
   return { books: nextBooks, trace };
 }
@@ -1536,7 +1622,7 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     ...rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; role=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
   ].join(`
 `);
-  const { parsed } = await runControllerJson(prompt, controller);
+  const { parsed } = await runControllerJson(prompt, controller, undefined, "Select manifest entries");
   const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
   if (!ids.length)
     return buildScopedFallbackSelection();
@@ -1884,7 +1970,7 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
   let scopes = [];
   let selectionReason = "Controller selected retrieval scopes.";
   if (allowController) {
-    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT);
+    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
     scopes = resolveScopeChoices(requestedNodeIds, books);
     const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected retrieval scopes.";
@@ -1911,7 +1997,7 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
       let refinedScopes = [];
       let refinedReason = "Refined broad scopes.";
       if (allowController) {
-        const refinement = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT);
+        const refinement = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine collapsed scopes");
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds) ? refinement.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
         refinedScopes = resolveScopeChoices(requestedNodeIds, books);
         refinedReason = typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim() ? refinement.parsed.reason.trim() : "Refined broad scopes.";
@@ -1944,7 +2030,7 @@ async function chooseTraversalScopes(recentConversation, books, config, controll
   let scopes = [];
   let selectionReason = "Controller selected traversal scopes.";
   if (allowController) {
-    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT);
+    const response = await runControllerJson(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose traversal scopes");
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
     scopes = resolveScopeChoices(requestedNodeIds, books);
     const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected traversal scopes.";
@@ -1975,7 +2061,7 @@ async function chooseTraversalScopes(recentConversation, books, config, controll
     let nextReason = "Traversal scope refinement narrowed the current scopes.";
     let shouldContinue = false;
     if (allowController) {
-      const response = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT);
+      const response = await runControllerJson(buildChildScopePrompt(recentConversation, scopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine traversal scopes");
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
       nextScopes = resolveScopeChoices(requestedNodeIds, books);
       nextReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Traversal scope refinement narrowed the current scopes.";
@@ -2045,7 +2131,7 @@ async function refineScopesForManifest(recentConversation, scopes, config, contr
     let refinedScopes = [];
     let refinedReason = "Refined broad scopes again before manifest selection.";
     if (allowController) {
-      const response = await runControllerJson(buildChildScopePrompt(recentConversation, broadScopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT);
+      const response = await runControllerJson(buildChildScopePrompt(recentConversation, broadScopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine manifest scopes");
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
       refinedScopes = resolveScopeChoices(requestedNodeIds, uniqueStrings(activeScopes.map((scope) => scope.book.summary.id)).map((bookId) => activeScopes.find((scope) => scope.book.summary.id === bookId).book));
       refinedReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : refinedReason;
@@ -2207,6 +2293,13 @@ function buildPreviewNodes(selected, booksById) {
     };
   });
 }
+function areSameScopes(left, right) {
+  const leftKeys = left.map(makeScopeKey);
+  const rightKeys = right.map(makeScopeKey);
+  if (leftKeys.length !== rightKeys.length)
+    return false;
+  return leftKeys.every((key, index) => key === rightKeys[index]);
+}
 function buildInjectionText(selected, booksById, injectedEntryLimit, collapsedDepth) {
   if (!selected.length)
     return null;
@@ -2252,13 +2345,24 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length)
     return null;
+  const reportProgress = options.reportProgress;
+  const startedAt = options.capturedAt ?? Date.now();
+  emitProgress(reportProgress, {
+    type: "start",
+    mode: config.searchMode,
+    timestamp: startedAt,
+    label: "Start retrieval",
+    summary: `Started ${config.searchMode} retrieval across ${readableBooks.length} readable book(s).`,
+    details: [`Recent conversation: ${truncateText(recentConversation, 260)}`]
+  });
   const controller = {
     settings,
     userId,
     connectionId: resolveControllerConnectionId(settings, options.connectionId),
     controllerUsed: false,
     deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
-    callCount: 0
+    callCount: 0,
+    reportProgress
   };
   const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
   const chosenBooks = chosenBooksResult.books;
@@ -2267,7 +2371,8 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     `${chosenBooks.length} readable book(s) selected for search.`
   ];
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
-  const trace = [...chosenBooksResult.trace];
+  const trace = createTraceBuffer(reportProgress);
+  trace.push(...chosenBooksResult.trace);
   const deterministic = scoreEntries(recentConversation, chosenBooks);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes = [];
@@ -2281,10 +2386,25 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
     const scopeSelection = config.searchMode === "traversal" ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace) : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
+    const initiallySelectedScopes = scopeSelection.scopes;
     selectedScopes = scopeSelection.scopes;
     selectionReason = scopeSelection.selectionReason;
     fallbackPath.push(...scopeSelection.fallbackPath);
     steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+    const initialSelectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map, initialSelectionReasons);
+    if (initialScopePreviews.length) {
+      emitProgress(reportProgress, {
+        type: "item",
+        item: createFeedItem("scope", "Selected scopes", `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`, {
+          phase: "choose_scope",
+          count: initialScopePreviews.length,
+          scopes: initialScopePreviews,
+          details: selectionReason ? [selectionReason] : undefined,
+          tone: "info"
+        })
+      });
+    }
     const entrySelection = await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace);
     selectedScopes = entrySelection.scopes;
     pulledCandidates = entrySelection.candidates;
@@ -2296,20 +2416,97 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     }
     steps.push(`Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
     steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
+    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
+      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map, refinedReasons);
+      if (refinedScopePreviews.length) {
+        emitProgress(reportProgress, {
+          type: "item",
+          item: createFeedItem("scope", "Refined scopes", `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`, {
+            phase: "refine_scope",
+            count: refinedScopePreviews.length,
+            scopes: refinedScopePreviews,
+            details: selectionReason ? [selectionReason] : undefined,
+            tone: "info"
+          })
+        });
+      }
+    }
+  }
+  const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
+  if (pulledNodes.length) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("pulled", "Pulled candidates", `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from ${Math.max(selectedScopes.length, 1)} scope(s).`, {
+        phase: "retrieve",
+        count: pulledNodes.length,
+        entries: pulledNodes,
+        tone: "info"
+      })
+    });
+  }
+  const manifestCounts = new Map(manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]));
+  const selectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+  const selectedScopePreviews = buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons);
+  const scopeManifestCounts = populateScopeManifestSelections(buildPreviewScopeManifests(manifests), selected, selectedScopes);
+  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
+  if (config.selectiveRetrieval || manifests.length) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("manifest", "Manifest selection", `Kept ${manifestSelectedEntries.length} of ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} for injection.`, {
+        phase: "manifest_select",
+        count: manifestSelectedEntries.length,
+        scopes: selectedScopePreviews,
+        entries: manifestSelectedEntries,
+        tone: "info"
+      })
+    });
   }
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
   const included = injection?.included ?? selected;
-  const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
   const injectedNodes = buildPreviewNodes(included, booksById);
-  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
   const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
-  const manifestCounts = new Map(manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]));
-  const selectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-  const scopeManifestCounts = populateScopeManifestSelections(buildPreviewScopeManifests(manifests), selected, selectedScopes);
   if (injection?.included.length) {
     pushTrace(trace, "inject", "Inject entries", `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`, { entryCount: injection.included.length });
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("injected", "Injected entries", `Prepared ${injectedNodes.length} entr${injectedNodes.length === 1 ? "y" : "ies"} for prompt injection.`, {
+        phase: "inject",
+        count: injectedNodes.length,
+        entries: injectedNodes,
+        tone: "success"
+      })
+    });
+  } else {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("injected", "Injection skipped", "No retrieved entries were injected for this turn.", {
+        phase: "inject",
+        count: 0,
+        tone: selected.length ? "warn" : "info"
+      })
+    });
   }
   const fallbackReason = buildFallbackReason(fallbackPath);
+  if (fallbackReason) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("issue", "Fallback path active", fallbackReason, {
+        phase: "fallback",
+        tone: "warn",
+        details: fallbackPath
+      })
+    });
+  }
+  const resolvedConnectionId = controller.controllerUsed ? controller.connectionId : null;
+  emitProgress(reportProgress, {
+    type: "finish",
+    timestamp: Date.now(),
+    status: fallbackReason ? "fallback" : "completed",
+    controllerUsed: controller.controllerUsed,
+    resolvedConnectionId,
+    fallbackReason
+  });
   return {
     mode: config.searchMode,
     queryText,
@@ -2317,13 +2514,13 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
     selectionSummary,
-    selectedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
-    retrievedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    selectedScopes: selectedScopePreviews,
+    retrievedScopes: selectedScopePreviews,
     scopeManifestCounts,
     pulledNodes,
     injectedNodes,
     manifestSelectedEntries,
-    selectedNodes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    selectedNodes: selectedScopePreviews,
     fallbackReason,
     fallbackPath,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
@@ -2332,7 +2529,7 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     capturedAt: options.capturedAt ?? Date.now(),
     isActual: options.isActual === true,
     controllerUsed: controller.controllerUsed,
-    resolvedConnectionId: controller.controllerUsed ? controller.connectionId : null
+    resolvedConnectionId
   };
 }
 
@@ -4034,9 +4231,13 @@ async function applySuggestedBooks(characterId, bookIds, mode, userId) {
 
 // src/backend/index.ts
 var CONNECTION_CACHE_TTL_MS = 5000;
+var RETRIEVAL_FEED_SESSION_LIMIT = 25;
+var RETRIEVAL_FEED_PUSH_DELAY_MS = 180;
 var connectionCache = new Map;
 var latestStateSequence = new Map;
 var previewCache = new Map;
+var retrievalFeedCache = new Map;
+var scheduledStatePushes = new Map;
 async function resolveActiveChat(userId, chatId) {
   if (chatId)
     return spindle.chats.get(chatId, userId);
@@ -4057,6 +4258,108 @@ async function listConnectionsCached(userId) {
 function getPreviewCacheKey(userId, chatId) {
   return `${userId}:${chatId}`;
 }
+function cloneRetrievalFeedItem(item) {
+  return {
+    ...item,
+    scopes: item.scopes?.map((scope) => ({ ...scope })),
+    entries: item.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
+    details: item.details ? [...item.details] : undefined
+  };
+}
+function cloneRetrievalSession(session) {
+  return {
+    ...session,
+    items: session.items.map(cloneRetrievalFeedItem)
+  };
+}
+function cloneRetrievalFeedState(state) {
+  return {
+    sessions: (state?.sessions ?? []).map(cloneRetrievalSession)
+  };
+}
+function createSessionStartItem(event) {
+  return {
+    id: `session:${event.timestamp}:${Math.random().toString(36).slice(2, 8)}`,
+    kind: "trace",
+    label: event.label,
+    summary: event.summary,
+    timestamp: event.timestamp,
+    phase: "session",
+    details: event.details ? [...event.details] : undefined,
+    tone: "info"
+  };
+}
+function sortAndTrimRetrievalSessions(sessions) {
+  return sessions.slice().sort((left, right) => {
+    if (left.status === "running" && right.status !== "running")
+      return -1;
+    if (right.status === "running" && left.status !== "running")
+      return 1;
+    return right.startedAt - left.startedAt;
+  }).slice(0, RETRIEVAL_FEED_SESSION_LIMIT);
+}
+function getOrCreateRetrievalFeed(userId, chatId) {
+  const key = getPreviewCacheKey(userId, chatId);
+  const cached = retrievalFeedCache.get(key);
+  if (cached)
+    return cached;
+  const next = { sessions: [] };
+  retrievalFeedCache.set(key, next);
+  return next;
+}
+function beginRetrievalSession(userId, chatId, sessionId, event) {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session = {
+    id: sessionId,
+    chatId,
+    mode: event.mode,
+    startedAt: event.timestamp,
+    endedAt: null,
+    status: "running",
+    controllerUsed: false,
+    resolvedConnectionId: null,
+    fallbackReason: null,
+    items: [createSessionStartItem(event)]
+  };
+  feed.sessions = sortAndTrimRetrievalSessions([session, ...feed.sessions.filter((item) => item.id !== sessionId)]);
+}
+function appendRetrievalSessionItem(userId, chatId, sessionId, item) {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session = feed.sessions.find((candidate) => candidate.id === sessionId);
+  if (!session)
+    return;
+  session.items = [...session.items, cloneRetrievalFeedItem(item)];
+  feed.sessions = sortAndTrimRetrievalSessions(feed.sessions);
+}
+function finishRetrievalSession(userId, chatId, sessionId, event) {
+  const feed = getOrCreateRetrievalFeed(userId, chatId);
+  const session = feed.sessions.find((candidate) => candidate.id === sessionId);
+  if (!session)
+    return;
+  session.status = event.status;
+  session.endedAt = event.timestamp;
+  session.controllerUsed = event.controllerUsed;
+  session.resolvedConnectionId = event.resolvedConnectionId;
+  session.fallbackReason = event.fallbackReason;
+  feed.sessions = sortAndTrimRetrievalSessions(feed.sessions);
+}
+function scheduleLiveStatePush(userId, chatId) {
+  const key = getPreviewCacheKey(userId, chatId);
+  const existing = scheduledStatePushes.get(key);
+  if (existing)
+    clearTimeout(existing);
+  const handle = setTimeout(() => {
+    scheduledStatePushes.delete(key);
+    resolveActiveChat(userId).then((activeChat) => {
+      if (activeChat?.id !== chatId)
+        return;
+      return pushState(userId, chatId);
+    }).catch((error) => {
+      spindle.log.warn(`Lore Recall state push failed for chat ${chatId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, RETRIEVAL_FEED_PUSH_DELAY_MS);
+  scheduledStatePushes.set(key, handle);
+}
 function summarizeTrace(preview) {
   if (!preview.trace.length)
     return "no traversal trace";
@@ -4071,6 +4374,7 @@ async function buildState(userId, chatId) {
   ]);
   const sortedBooks = allBooks.slice().sort((left, right) => left.name.localeCompare(right.name)).map(toBookSummary);
   const cachedPreview = activeChat?.id ? previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null : null;
+  const cachedRetrievalFeed = activeChat?.id ? cloneRetrievalFeedState(retrievalFeedCache.get(getPreviewCacheKey(userId, activeChat.id))) : { sessions: [] };
   const baseState = {
     activeChatId: activeChat?.id ?? null,
     activeCharacterId: activeChat?.character_id ?? null,
@@ -4086,6 +4390,7 @@ async function buildState(userId, chatId) {
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
     diagnosticsResults: [],
     suggestedBookIds: [],
+    retrievalFeed: cachedRetrievalFeed,
     preview: cachedPreview
   };
   if (!activeChat?.character_id) {
@@ -4336,16 +4641,23 @@ async function runTrackedOperation(userId, message, kind, runner, onSuccess) {
   }
 }
 spindle.registerInterceptor(async (messages, context) => {
+  let liveChatId = null;
+  let liveUserId = null;
+  let retrievalSessionId = null;
+  let retrievalSessionStarted = false;
+  let retrievalSessionFinished = false;
   try {
     const chatId = context && typeof context === "object" && typeof context.chatId === "string" ? context.chatId : null;
     const connectionId = context && typeof context === "object" && typeof context.connectionId === "string" ? context.connectionId : null;
     if (!chatId)
       return messages;
+    liveChatId = chatId;
     const userId = resolveUserId(chatId);
     if (!userId) {
       spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
       return messages;
     }
+    liveUserId = userId;
     await ensureStorageFolders(userId);
     const settings = await loadGlobalSettings(userId);
     if (!settings.enabled)
@@ -4361,12 +4673,39 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length)
       return messages;
+    retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const handleProgress = (event) => {
+      if (!retrievalSessionId)
+        return;
+      switch (event.type) {
+        case "start":
+          retrievalSessionStarted = true;
+          beginRetrievalSession(userId, chatId, retrievalSessionId, event);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+        case "item":
+          if (!retrievalSessionStarted)
+            return;
+          appendRetrievalSessionItem(userId, chatId, retrievalSessionId, event.item);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+        case "finish":
+          if (!retrievalSessionStarted)
+            return;
+          retrievalSessionFinished = true;
+          finishRetrievalSession(userId, chatId, retrievalSessionId, event);
+          scheduleLiveStatePush(userId, chatId);
+          return;
+      }
+    };
     const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId, {
       connectionId,
       isActual: true,
-      capturedAt: Date.now()
+      capturedAt: Date.now(),
+      reportProgress: handleProgress
     });
     previewCache.set(getPreviewCacheKey(userId, chatId), preview);
+    scheduleLiveStatePush(userId, chatId);
     if (preview) {
       if (preview.mode === "traversal" && preview.fallbackReason) {
         spindle.log.info(`Lore Recall traversal fell back for chat ${chatId}: ${preview.fallbackReason} [trace=${summarizeTrace(preview)}]`);
@@ -4380,6 +4719,27 @@ spindle.registerInterceptor(async (messages, context) => {
       return messages;
     return [{ role: "system", content: preview.injectedText }, ...messages];
   } catch (error) {
+    if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
+      const activeSession = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))?.sessions.find((session) => session.id === retrievalSessionId);
+      appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
+        id: `issue:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        kind: "issue",
+        label: "Retrieval failed",
+        summary: error instanceof Error ? error.message : String(error),
+        timestamp: Date.now(),
+        phase: "fallback",
+        tone: "error"
+      });
+      finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
+        type: "finish",
+        timestamp: Date.now(),
+        status: "failed",
+        controllerUsed: activeSession?.controllerUsed ?? false,
+        resolvedConnectionId: activeSession?.resolvedConnectionId ?? null,
+        fallbackReason: error instanceof Error ? error.message : String(error)
+      });
+      scheduleLiveStatePush(liveUserId, liveChatId);
+    }
     spindle.log.warn(`Lore Recall interceptor failed: ${error instanceof Error ? error.message : String(error)}`);
     return messages;
   }

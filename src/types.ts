@@ -215,6 +215,63 @@ export interface RetrievalPreview {
   resolvedConnectionId?: string | null;
 }
 
+export type RetrievalFeedItemKind = "trace" | "scope" | "manifest" | "pulled" | "injected" | "issue";
+export type RetrievalFeedItemTone = "info" | "warn" | "error" | "success";
+export type RetrievalSessionStatus = "running" | "completed" | "fallback" | "failed";
+
+export interface RetrievalFeedItem {
+  id: string;
+  kind: RetrievalFeedItemKind;
+  label: string;
+  summary: string;
+  timestamp: number;
+  phase?: TraversalTracePhase | "controller" | "session" | null;
+  count?: number | null;
+  scopes?: PreviewScope[];
+  entries?: PreviewNode[];
+  details?: string[];
+  tone?: RetrievalFeedItemTone;
+}
+
+export interface RetrievalSession {
+  id: string;
+  chatId: string;
+  mode: SearchMode;
+  startedAt: number;
+  endedAt: number | null;
+  status: RetrievalSessionStatus;
+  controllerUsed: boolean;
+  resolvedConnectionId: string | null;
+  fallbackReason: string | null;
+  items: RetrievalFeedItem[];
+}
+
+export interface RetrievalFeedState {
+  sessions: RetrievalSession[];
+}
+
+export type RetrievalProgressEvent =
+  | {
+      type: "start";
+      mode: SearchMode;
+      timestamp: number;
+      label: string;
+      summary: string;
+      details?: string[];
+    }
+  | {
+      type: "item";
+      item: RetrievalFeedItem;
+    }
+  | {
+      type: "finish";
+      timestamp: number;
+      status: RetrievalSessionStatus;
+      controllerUsed: boolean;
+      resolvedConnectionId: string | null;
+      fallbackReason: string | null;
+    };
+
 export interface ExportSnapshot {
   version: 2;
   exportedAt: number;
@@ -286,6 +343,7 @@ export interface FrontendState {
   availableConnections: ConnectionOption[];
   diagnosticsResults: DiagnosticFinding[];
   suggestedBookIds: string[];
+  retrievalFeed: RetrievalFeedState;
   preview: RetrievalPreview | null;
 }
 

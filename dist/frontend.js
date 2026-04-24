@@ -1172,6 +1172,233 @@ var LORE_RECALL_CSS = `
   gap: 8px;
 }
 
+.lore-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lore-feed-session {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-0);
+  border-left: 3px solid var(--lr-line-2);
+}
+
+.lore-feed-session.info { border-left-color: var(--lr-acc); }
+.lore-feed-session.warn { border-left-color: var(--lr-warn); }
+.lore-feed-session.success { border-left-color: var(--lr-good); }
+.lore-feed-session.error { border-left-color: var(--lr-warn); }
+
+.lore-feed-session-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.lore-feed-session-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-feed-session-subtitle {
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-feed-session-items {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--lr-line);
+  margin: 0 -12px -12px;
+}
+
+.lore-feed-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--lr-line);
+}
+
+.lore-feed-item:last-child {
+  border-bottom: 0;
+}
+
+.lore-feed-item-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--lr-text) 8%, transparent);
+  color: var(--lr-text);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.lore-feed-item.info .lore-feed-item-icon {
+  background: color-mix(in srgb, var(--lr-acc) 12%, transparent);
+  color: color-mix(in srgb, var(--lr-acc) 80%, var(--lr-text));
+}
+
+.lore-feed-item.warn .lore-feed-item-icon,
+.lore-feed-item.error .lore-feed-item-icon {
+  background: color-mix(in srgb, var(--lr-warn) 12%, transparent);
+  color: color-mix(in srgb, var(--lr-warn) 82%, var(--lr-text));
+}
+
+.lore-feed-item.success .lore-feed-item-icon {
+  background: color-mix(in srgb, var(--lr-good) 12%, transparent);
+  color: color-mix(in srgb, var(--lr-good) 82%, var(--lr-text));
+}
+
+.lore-feed-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lore-feed-item-top {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.lore-feed-item-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+  min-width: 0;
+}
+
+.lore-feed-item-time {
+  font-size: 11px;
+  color: var(--lr-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.lore-feed-item-summary {
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-feed-item-meta {
+  gap: 6px;
+}
+
+.lore-feed-details {
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: color-mix(in srgb, var(--lr-text) 2%, transparent);
+  overflow: hidden;
+}
+
+.lore-feed-details-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.lore-feed-details-summary::-webkit-details-marker {
+  display: none;
+}
+
+.lore-feed-details-toggle {
+  font-size: 11.5px;
+  color: var(--lr-muted);
+  font-weight: 500;
+}
+
+.lore-feed-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.lore-feed-detail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lore-feed-detail-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--lr-dim);
+  font-weight: 600;
+}
+
+.lore-feed-scope-list,
+.lore-feed-entry-list {
+  display: grid;
+  gap: 8px;
+}
+
+.lore-feed-scope-card,
+.lore-feed-entry-row {
+  padding: 10px 11px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-panel);
+}
+
+.lore-feed-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.lore-feed-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--lr-text);
+  min-width: 0;
+}
+
+.lore-feed-card-meta {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--lr-dim);
+}
+
+.lore-feed-card-summary {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
+.lore-feed-note {
+  padding: 8px 10px;
+  border-radius: var(--lr-r-sm);
+  background: var(--lr-panel);
+  border-left: 2px solid var(--lr-line-2);
+  font-size: 12px;
+  color: var(--lr-muted);
+  line-height: 1.5;
+}
+
 .lore-retrieval-card-index {
   width: 22px;
   height: 22px;
@@ -1660,7 +1887,7 @@ function setup(ctx) {
   let currentState = null;
   let refreshTimer = null;
   let pendingChatId = null;
-  let drawerTabMode = "searches";
+  let drawerFeedFilter = "all";
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection = "sources";
@@ -2527,6 +2754,274 @@ function setup(ctx) {
     section.appendChild(grid);
     return section;
   }
+  function itemMatchesFeedFilter(item, filter) {
+    if (filter === "all")
+      return true;
+    return item.kind === filter;
+  }
+  function getFeedItemGlyph(item) {
+    switch (item.kind) {
+      case "scope":
+        return "S";
+      case "manifest":
+        return "M";
+      case "pulled":
+        return "P";
+      case "injected":
+        return "I";
+      case "issue":
+        return "!";
+      default:
+        return "T";
+    }
+  }
+  function getFeedItemTone(item) {
+    switch (item.tone) {
+      case "success":
+        return "success";
+      case "warn":
+        return "warn";
+      case "error":
+        return "error";
+      default:
+        return "info";
+    }
+  }
+  function getSessionTone(session) {
+    switch (session.status) {
+      case "completed":
+        return "success";
+      case "fallback":
+        return "warn";
+      case "failed":
+        return "error";
+      default:
+        return "info";
+    }
+  }
+  function getSessionStatusLabel(session) {
+    switch (session.status) {
+      case "completed":
+        return "Completed";
+      case "fallback":
+        return "Fallback";
+      case "failed":
+        return "Failed";
+      default:
+        return "Running";
+    }
+  }
+  function formatTimeOnly(timestamp) {
+    if (!timestamp || !Number.isFinite(timestamp))
+      return "Unknown time";
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  }
+  function formatSelectionRoleLabel(role) {
+    if (!role)
+      return "entry";
+    return role.replace(/_/g, " ");
+  }
+  function createFeedChipRow(labels, limit = 3) {
+    if (!labels.length)
+      return null;
+    const wrap = createElement("div", "lore-cluster");
+    const shown = labels.slice(0, limit);
+    for (const label of shown) {
+      wrap.appendChild(createTag(clipText(label, 30), "accent"));
+    }
+    if (labels.length > shown.length) {
+      wrap.appendChild(createTag(`+${labels.length - shown.length} more`));
+    }
+    return wrap;
+  }
+  function renderFeedScopeCards(scopes) {
+    const list = createElement("div", "lore-feed-scope-list");
+    for (const scope of scopes) {
+      const card = createElement("div", "lore-feed-scope-card");
+      const head = createElement("div", "lore-feed-card-head");
+      head.append(createElement("div", "lore-feed-card-title", scope.label), createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"));
+      card.append(head, createElement("div", "lore-feed-card-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`));
+      if (scope.summary?.trim()) {
+        card.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 220)));
+      }
+      if (scope.selectionReason?.trim()) {
+        card.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 220)}`));
+      }
+      list.appendChild(card);
+    }
+    return list;
+  }
+  function renderFeedEntryRows(entries) {
+    const list = createElement("div", "lore-feed-entry-list");
+    for (const entry of entries) {
+      const row = createElement("div", "lore-feed-entry-row");
+      const head = createElement("div", "lore-feed-card-head");
+      head.append(createElement("div", "lore-feed-card-title", entry.label), createTag(formatSelectionRoleLabel(entry.selectionRole), entry.selectionRole === "background" ? "neutral" : "good"));
+      row.append(head, createElement("div", "lore-feed-card-meta", `${entry.worldBookName} | ${entry.breadcrumb || "Root"}`));
+      if (entry.previewText?.trim()) {
+        row.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 220)));
+      }
+      if (entry.reasons?.length) {
+        const reasons = createElement("div", "lore-cluster");
+        for (const reason of entry.reasons.slice(0, 4)) {
+          reasons.appendChild(createTag(reason));
+        }
+        row.appendChild(reasons);
+      }
+      list.appendChild(row);
+    }
+    return list;
+  }
+  function renderFeedItemDetails(item) {
+    const hasScopes = !!item.scopes?.length;
+    const hasEntries = !!item.entries?.length;
+    const hasDetails = !!item.details?.length;
+    if (!hasScopes && !hasEntries && !hasDetails)
+      return null;
+    const details = createElement("details", "lore-feed-details");
+    const summary = createElement("summary", "lore-feed-details-summary");
+    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Show details"));
+    const chips = createElement("div", "lore-cluster");
+    if (hasScopes) {
+      const row = createFeedChipRow(item.scopes.map((scope) => scope.label));
+      if (row)
+        chips.appendChild(row);
+    }
+    if (hasEntries) {
+      const row = createFeedChipRow(item.entries.map((entry) => entry.label));
+      if (row)
+        chips.appendChild(row);
+    }
+    if (hasDetails) {
+      chips.appendChild(createTag(`${item.details.length} note${item.details.length === 1 ? "" : "s"}`));
+    }
+    if (chips.childElementCount)
+      summary.appendChild(chips);
+    const body = createElement("div", "lore-feed-details-body");
+    if (hasScopes) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.append(createElement("div", "lore-feed-detail-title", `Scopes (${item.scopes.length})`), renderFeedScopeCards(item.scopes));
+      body.appendChild(group);
+    }
+    if (hasEntries) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.append(createElement("div", "lore-feed-detail-title", `Entries (${item.entries.length})`), renderFeedEntryRows(item.entries));
+      body.appendChild(group);
+    }
+    if (hasDetails) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.appendChild(createElement("div", "lore-feed-detail-title", "Notes"));
+      const notes = createElement("div", "lore-stack");
+      notes.style.gap = "6px";
+      for (const detail of item.details) {
+        notes.appendChild(createElement("div", "lore-feed-note", detail));
+      }
+      group.appendChild(notes);
+      body.appendChild(group);
+    }
+    details.append(summary, body);
+    return details;
+  }
+  function renderFeedItem(item) {
+    const row = createElement("div", `lore-feed-item ${getFeedItemTone(item)}`);
+    const icon = createElement("div", "lore-feed-item-icon", getFeedItemGlyph(item));
+    const body = createElement("div", "lore-feed-item-body");
+    const top = createElement("div", "lore-feed-item-top");
+    top.append(createElement("div", "lore-feed-item-label", item.label), createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
+    body.append(top, createElement("div", "lore-feed-item-summary", item.summary));
+    const meta = createElement("div", "lore-cluster");
+    meta.classList.add("lore-feed-item-meta");
+    meta.appendChild(createTag(item.kind === "trace" ? "trace" : item.kind.replace(/_/g, " "), item.kind === "issue" ? "warn" : "accent"));
+    if (item.phase && item.phase !== "session") {
+      meta.appendChild(createTag(item.phase.replace(/_/g, " ")));
+    }
+    if (typeof item.count === "number") {
+      meta.appendChild(createTag(`${item.count}`));
+    }
+    body.appendChild(meta);
+    const details = renderFeedItemDetails(item);
+    if (details)
+      body.appendChild(details);
+    row.append(icon, body);
+    return row;
+  }
+  function renderFeedSession(session) {
+    const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
+    if (drawerFeedFilter !== "all" && !visibleItems.length)
+      return null;
+    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}`);
+    const head = createElement("div", "lore-feed-session-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.append(createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"), createElement("div", "lore-feed-session-subtitle", `${formatCapturedAt(session.startedAt)}${session.endedAt ? ` -> ${formatTimeOnly(session.endedAt)}` : " -> live"}`));
+    head.appendChild(copy);
+    const tags = createElement("div", "lore-cluster");
+    tags.append(createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"), createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"), createTag(`${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`));
+    if (session.resolvedConnectionId) {
+      tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
+    }
+    if (session.fallbackReason && session.status !== "failed") {
+      tags.appendChild(createTag("Fallback path", "warn"));
+    }
+    head.appendChild(tags);
+    wrap.appendChild(head);
+    if (session.fallbackReason) {
+      wrap.appendChild(createBanner(session.status === "failed" ? "error" : "warn", session.status === "failed" ? "Retrieval failed" : "Fallback path active", session.fallbackReason));
+    }
+    const items = createElement("div", "lore-feed-session-items");
+    for (const item of visibleItems) {
+      items.appendChild(renderFeedItem(item));
+    }
+    wrap.appendChild(items);
+    return wrap;
+  }
+  function renderRetrievalFeedSection(state) {
+    const section = createElement("section", "lore-section");
+    const actions = createElement("div", "lore-cluster");
+    if (state.preview) {
+      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview)));
+    }
+    section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
+    const filters = createElement("div", "lore-cluster");
+    for (const [value, label] of [
+      ["all", "All"],
+      ["scope", "Scopes"],
+      ["manifest", "Manifest"],
+      ["pulled", "Pulled"],
+      ["injected", "Injected"],
+      ["issue", "Issues"]
+    ]) {
+      filters.appendChild(createButton(label, `lore-chip${drawerFeedFilter === value ? " active" : ""}`, () => {
+        drawerFeedFilter = value;
+        render();
+      }));
+    }
+    section.appendChild(filters);
+    const feed = createElement("div", "lore-feed");
+    const sessions = state.retrievalFeed?.sessions ?? [];
+    if (!sessions.length) {
+      feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch Lore Recall stream scope choice, manifest selection, pulled entries, injection, and fallback events here."));
+      section.appendChild(feed);
+      return section;
+    }
+    let rendered = 0;
+    for (const session of sessions) {
+      const sessionNode = renderFeedSession(session);
+      if (!sessionNode)
+        continue;
+      feed.appendChild(sessionNode);
+      rendered += 1;
+    }
+    if (!rendered) {
+      feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
+    }
+    section.appendChild(feed);
+    return section;
+  }
   function createBreadcrumb(segments) {
     const wrap = createElement("div", "lore-breadcrumb");
     if (!segments.length) {
@@ -2643,41 +3138,14 @@ function setup(ctx) {
       operationSection.appendChild(createOperationSummary(activeOperation, true));
       shell.appendChild(operationSection);
     }
-    const preview = createElement("section", "lore-section");
-    const tabs = createElement("div", "lore-tabs");
-    for (const [value, label] of [
-      ["searches", "Selected nodes"],
-      ["pulled", "Pulled"],
-      ["injected", "Injected"]
-    ]) {
-      tabs.appendChild(createButton(label, `lore-tab${drawerTabMode === value ? " active" : ""}`, () => {
-        drawerTabMode = value;
-        render();
-      }));
-    }
-    const previewActions = state?.preview ? createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview)) : null;
-    preview.append(createSectionHead("Last retrieval", "Captured from the most recent generated turn.", previewActions), tabs);
-    if (!state?.preview) {
-      preview.appendChild(createEmpty("No retrieval captured yet", "Send a message to capture Lore Recall's actual retrieval for this chat."));
+    if (state) {
+      shell.appendChild(renderRetrievalFeedSection(state));
     } else {
-      const meta2 = createElement("div", "lore-cluster");
-      meta2.append(createTag(state.preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(state.preview.controllerUsed ? "Controller used" : "Deterministic fallback", state.preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(state.preview.capturedAt)}`));
-      if (state.preview.resolvedConnectionId) {
-        meta2.appendChild(createTag(`Conn ${truncateMiddle(state.preview.resolvedConnectionId, 8, 6)}`));
-      }
-      preview.appendChild(meta2);
-      if (state.preview.fallbackReason) {
-        preview.appendChild(createBanner("warn", "Fallback used", state.preview.fallbackReason));
-      }
+      const preview = createElement("section", "lore-section");
+      preview.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat."));
+      preview.appendChild(createEmpty("Loading retrieval feed", "Lore Recall is waiting for the current chat state."));
+      shell.appendChild(preview);
     }
-    if (!state?.preview) {} else if (drawerTabMode === "searches") {
-      preview.appendChild(renderSearchActivity(state.preview) ?? createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."));
-    } else if (drawerTabMode === "pulled") {
-      preview.appendChild(renderRetrievalEntries(getPreviewPulledNodes(state.preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
-    } else {
-      preview.appendChild(renderRetrievalEntries(getPreviewInjectedNodes(state.preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
-    }
-    shell.appendChild(preview);
     const sources = createElement("section", "lore-section");
     sources.appendChild(createSectionHead("Managed sources", managed.length ? `${managed.length} book${managed.length === 1 ? "" : "s"} | retrieval drives only these` : "No sources managed yet."));
     if (!managed.length) {

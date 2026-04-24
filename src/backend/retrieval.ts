@@ -8,7 +8,10 @@ import type {
   PreviewNode,
   PreviewScope,
   PreviewScopeManifest,
+  RetrievalFeedItem,
+  RetrievalFeedItemTone,
   RetrievalPreview,
+  RetrievalProgressEvent,
   TraversalTraceStep,
 } from "../types";
 import type { ChatLikeMessage, RuntimeBook, ScoredEntry } from "./contracts";
@@ -19,6 +22,7 @@ interface RetrievalPreviewOptions {
   connectionId?: string | null;
   capturedAt?: number;
   isActual?: boolean;
+  reportProgress?: (event: RetrievalProgressEvent) => void;
 }
 
 interface ControllerSession {
@@ -28,6 +32,7 @@ interface ControllerSession {
   controllerUsed: boolean;
   deadlineAt: number;
   callCount: number;
+  reportProgress?: (event: RetrievalProgressEvent) => void;
 }
 
 interface ControllerResponse {
@@ -96,6 +101,10 @@ interface EntrySelectionResult {
   fallbackPath: string[];
   selectionReason: string | null;
 }
+
+type RetrievalProgressReporter = NonNullable<RetrievalPreviewOptions["reportProgress"]>;
+const TRACE_REPORTER = Symbol("traceReporter");
+type TraceCollection = TraversalTraceStep[] & { [TRACE_REPORTER]?: RetrievalProgressReporter };
 
 const CONTROLLER_TIMEOUT_MS = 45_000;
 const CONTROLLER_TOTAL_BUDGET_MS = 175_000;
@@ -297,6 +306,80 @@ function resolveControllerConnectionId(
   return null;
 }
 
+function createTraceBuffer(reporter?: RetrievalProgressReporter): TraceCollection {
+  const trace = [] as TraceCollection;
+  trace[TRACE_REPORTER] = reporter;
+  return trace;
+}
+
+function getTraceReporter(trace: TraversalTraceStep[]): RetrievalProgressReporter | undefined {
+  return (trace as TraceCollection)[TRACE_REPORTER];
+}
+
+function emitProgress(
+  reporter: RetrievalProgressReporter | undefined,
+  event: RetrievalProgressEvent,
+): void {
+  if (!reporter) return;
+  try {
+    reporter(event);
+  } catch (error) {
+    spindle.log.warn(`Lore Recall progress update failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function createFeedItem(
+  kind: RetrievalFeedItem["kind"],
+  label: string,
+  summary: string,
+  options: {
+    timestamp?: number;
+    phase?: RetrievalFeedItem["phase"];
+    count?: number | null;
+    scopes?: PreviewScope[];
+    entries?: PreviewNode[];
+    details?: string[];
+    tone?: RetrievalFeedItemTone;
+  } = {},
+): RetrievalFeedItem {
+  const timestamp = options.timestamp ?? Date.now();
+  return {
+    id: `${kind}:${timestamp}:${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    label,
+    summary,
+    timestamp,
+    phase: options.phase ?? null,
+    count: typeof options.count === "number" ? options.count : null,
+    scopes: options.scopes?.map((scope) => ({ ...scope })),
+    entries: options.entries?.map((entry) => ({ ...entry, reasons: [...entry.reasons] })),
+    details: options.details ? [...options.details] : undefined,
+    tone: options.tone,
+  };
+}
+
+function emitTraceFeedItem(
+  trace: TraversalTraceStep[],
+  label: string,
+  summary: string,
+  options: {
+    timestamp?: number;
+    phase?: RetrievalFeedItem["phase"];
+    count?: number | null;
+    scopes?: PreviewScope[];
+    entries?: PreviewNode[];
+    details?: string[];
+    tone?: RetrievalFeedItemTone;
+  } = {},
+): void {
+  const reporter = getTraceReporter(trace);
+  if (!reporter) return;
+  emitProgress(reporter, {
+    type: "item",
+    item: createFeedItem("trace", label, summary, options),
+  });
+}
+
 function pushTrace(
   trace: TraversalTraceStep[],
   phase: TraversalTraceStep["phase"],
@@ -312,6 +395,11 @@ function pushTrace(
     bookId: extra.bookId ?? null,
     nodeId: extra.nodeId ?? null,
     entryCount: extra.entryCount ?? null,
+  });
+  emitTraceFeedItem(trace, label, summary, {
+    phase,
+    count: typeof extra.entryCount === "number" ? extra.entryCount : null,
+    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info",
   });
 }
 
@@ -956,6 +1044,7 @@ async function runControllerJson(
   prompt: string,
   controller: ControllerSession,
   systemPrompt?: string,
+  requestLabel = "Controller request",
 ): Promise<ControllerResponse> {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
     return { parsed: null, error: "Traversal controller hit its call limit." };
@@ -967,9 +1056,17 @@ async function runControllerJson(
   }
 
   controller.callCount += 1;
+  emitProgress(controller.reportProgress, {
+    type: "item",
+    item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
+      phase: "controller",
+      tone: "info",
+    }),
+  });
   const abortController = new AbortController();
   const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timeoutHandled = false;
   try {
     const requestPromise: Promise<ControllerResponse> = spindle.generate
       .quiet({
@@ -993,12 +1090,45 @@ async function runControllerJson(
           return { parsed, error: null };
         }
         spindle.log.warn("Lore Recall controller call returned invalid JSON.");
+        emitProgress(controller.reportProgress, {
+          type: "item",
+          item: createFeedItem(
+            "issue",
+            `Controller issue: ${requestLabel}`,
+            "Controller returned invalid JSON, so Lore Recall will fall back where it can.",
+            {
+              phase: "controller",
+              tone: "warn",
+            },
+          ),
+        });
         return { parsed: null, error: "Traversal controller returned invalid JSON." };
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         const isAbort = error instanceof Error && error.name === "AbortError";
+        if (isAbort && timeoutHandled) {
+          return {
+            parsed: null,
+            error: "Traversal controller timed out before the interceptor budget was exhausted.",
+          };
+        }
         spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
+        emitProgress(controller.reportProgress, {
+          type: "item",
+          item: createFeedItem(
+            "issue",
+            `${isAbort ? "Controller timeout" : "Controller error"}: ${requestLabel}`,
+            isAbort
+              ? "Controller request timed out and Lore Recall will keep going with fallback behavior when possible."
+              : `Controller request failed: ${message}`,
+            {
+              phase: "controller",
+              tone: isAbort ? "warn" : "error",
+              details: isAbort ? [`Timeout after ${timeoutMs} ms.`] : [message],
+            },
+          ),
+        });
         return {
           parsed: null,
           error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
@@ -1007,8 +1137,22 @@ async function runControllerJson(
 
     const timeoutPromise = new Promise<ControllerResponse>((resolve) => {
       timer = setTimeout(() => {
+        timeoutHandled = true;
         abortController.abort();
         spindle.log.warn("Lore Recall controller call failed: request timed out");
+        emitProgress(controller.reportProgress, {
+          type: "item",
+          item: createFeedItem(
+            "issue",
+            `Controller timeout: ${requestLabel}`,
+            "Controller request timed out before Lore Recall finished retrieval.",
+            {
+              phase: "controller",
+              tone: "warn",
+              details: [`Timeout after ${timeoutMs} ms.`],
+            },
+          ),
+        });
         resolve({
           parsed: null,
           error: "Traversal controller timed out before the interceptor budget was exhausted.",
@@ -1054,14 +1198,19 @@ async function maybeChooseBooks(
     ),
   ].join("\n");
 
-  const { parsed } = await runControllerJson(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT);
+  const { parsed } = await runControllerJson(
+    prompt,
+    controller,
+    RETRIEVAL_BOOK_SYSTEM_PROMPT,
+    "Choose books",
+  );
   const ids = Array.isArray(parsed?.bookIds)
     ? parsed.bookIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   if (!ids.length) return { books, trace: [] };
   const chosen = books.filter((book) => ids.includes(book.summary.id));
   const nextBooks = chosen.length ? chosen : books;
-  const trace: TraversalTraceStep[] = [];
+  const trace = createTraceBuffer(controller.reportProgress);
   pushTrace(
     trace,
     "choose_book",
@@ -1097,7 +1246,7 @@ async function maybeRerankEntries(
     ),
   ].join("\n");
 
-  const { parsed } = await runControllerJson(prompt, controller);
+  const { parsed } = await runControllerJson(prompt, controller, undefined, "Rerank entries");
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -1169,7 +1318,7 @@ async function maybeSelectEntries(
     ),
   ].join("\n");
 
-  const { parsed } = await runControllerJson(prompt, controller);
+  const { parsed } = await runControllerJson(prompt, controller, undefined, "Select manifest entries");
   const ids = Array.isArray(parsed?.entryIds)
     ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
@@ -1661,6 +1810,7 @@ async function chooseCollapsedScopes(
       buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+      "Choose collapsed scopes",
     );
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1710,6 +1860,7 @@ async function chooseCollapsedScopes(
           buildChildScopePrompt(recentConversation, scopes, categories, 1, config),
           controller,
           RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+          "Refine collapsed scopes",
         );
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds)
           ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1775,6 +1926,7 @@ async function chooseTraversalScopes(
       buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+      "Choose traversal scopes",
     );
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1828,6 +1980,7 @@ async function chooseTraversalScopes(
         buildChildScopePrompt(recentConversation, scopes, categories, step, config),
         controller,
         RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+        "Refine traversal scopes",
       );
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
         ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -1933,6 +2086,7 @@ async function refineScopesForManifest(
         buildChildScopePrompt(recentConversation, broadScopes, categories, step, config),
         controller,
         RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+        "Refine manifest scopes",
       );
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
         ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -2396,7 +2550,12 @@ async function selectTraversalEntries(
       };
     }
 
-    const response = await runControllerJson(buildTraversalPrompt(activeSelectionQuery, frontier, step, config), controller);
+    const response = await runControllerJson(
+      buildTraversalPrompt(activeSelectionQuery, frontier, step, config),
+      controller,
+      undefined,
+      "Traverse retrieval tree",
+    );
     if (!response.parsed) {
       pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
       return {
@@ -2517,6 +2676,8 @@ async function selectTraversalEntries(
         const refinement = await runControllerJson(
           buildScopeRefinementPrompt(activeSelectionQuery, refinementFrontier, config),
           controller,
+          undefined,
+          "Refine retrieved branches",
         );
         if (refinement.parsed) {
           const refinedNodeIds = Array.isArray(refinement.parsed.nodeIds)
@@ -2626,6 +2787,13 @@ function buildPreviewNodes(selected: ScoredEntry[], booksById: Map<string, Runti
   });
 }
 
+function areSameScopes(left: TraversalScope[], right: TraversalScope[]): boolean {
+  const leftKeys = left.map(makeScopeKey);
+  const rightKeys = right.map(makeScopeKey);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key, index) => key === rightKeys[index]);
+}
+
 function buildInjectionText(
   selected: ScoredEntry[],
   booksById: Map<string, RuntimeBook>,
@@ -2689,6 +2857,17 @@ export async function buildRetrievalPreview(
   const readableBooks = books.filter((book) => isReadableBook(book.config));
   if (!readableBooks.length) return null;
 
+  const reportProgress = options.reportProgress;
+  const startedAt = options.capturedAt ?? Date.now();
+  emitProgress(reportProgress, {
+    type: "start",
+    mode: config.searchMode,
+    timestamp: startedAt,
+    label: "Start retrieval",
+    summary: `Started ${config.searchMode} retrieval across ${readableBooks.length} readable book(s).`,
+    details: [`Recent conversation: ${truncateText(recentConversation, 260)}`],
+  });
+
   const controller: ControllerSession = {
     settings,
     userId,
@@ -2696,6 +2875,7 @@ export async function buildRetrievalPreview(
     controllerUsed: false,
     deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
     callCount: 0,
+    reportProgress,
   };
   const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
   const chosenBooks = chosenBooksResult.books;
@@ -2704,7 +2884,8 @@ export async function buildRetrievalPreview(
     `${chosenBooks.length} readable book(s) selected for search.`,
   ];
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
-  const trace: TraversalTraceStep[] = [...chosenBooksResult.trace];
+  const trace = createTraceBuffer(reportProgress);
+  trace.push(...chosenBooksResult.trace);
   const deterministic = scoreEntries(recentConversation, chosenBooks);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes: TraversalScope[] = [];
@@ -2722,10 +2903,32 @@ export async function buildRetrievalPreview(
       config.searchMode === "traversal"
         ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace)
         : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
+    const initiallySelectedScopes = scopeSelection.scopes;
     selectedScopes = scopeSelection.scopes;
     selectionReason = scopeSelection.selectionReason;
     fallbackPath.push(...scopeSelection.fallbackPath);
     steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+    const initialSelectionReasons = new Map(
+      selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
+    );
+    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map(), initialSelectionReasons);
+    if (initialScopePreviews.length) {
+      emitProgress(reportProgress, {
+        type: "item",
+        item: createFeedItem(
+          "scope",
+          "Selected scopes",
+          `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`,
+          {
+            phase: "choose_scope",
+            count: initialScopePreviews.length,
+            scopes: initialScopePreviews,
+            details: selectionReason ? [selectionReason] : undefined,
+            tone: "info",
+          },
+        ),
+      });
+    }
 
     const entrySelection = await selectEntriesForScopes(
       recentConversation,
@@ -2746,25 +2949,82 @@ export async function buildRetrievalPreview(
     }
     steps.push(`Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
     steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
+    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
+      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map(), refinedReasons);
+      if (refinedScopePreviews.length) {
+        emitProgress(reportProgress, {
+          type: "item",
+          item: createFeedItem(
+            "scope",
+            "Refined scopes",
+            `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`,
+            {
+              phase: "refine_scope",
+              count: refinedScopePreviews.length,
+              scopes: refinedScopePreviews,
+              details: selectionReason ? [selectionReason] : undefined,
+              tone: "info",
+            },
+          ),
+        });
+      }
+    }
   }
 
-  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
-  const included = injection?.included ?? selected;
   const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
-  const injectedNodes = buildPreviewNodes(included, booksById);
-  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
-  const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
+  if (pulledNodes.length) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "pulled",
+        "Pulled candidates",
+        `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from ${Math.max(selectedScopes.length, 1)} scope(s).`,
+        {
+          phase: "retrieve",
+          count: pulledNodes.length,
+          entries: pulledNodes,
+          tone: "info",
+        },
+      ),
+    });
+  }
+
   const manifestCounts = new Map<string, number>(
     manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]),
   );
   const selectionReasons = new Map<string, string>(
     selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
   );
+  const selectedScopePreviews = buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons);
   const scopeManifestCounts = populateScopeManifestSelections(
     buildPreviewScopeManifests(manifests),
     selected,
     selectedScopes,
   );
+  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
+  if (config.selectiveRetrieval || manifests.length) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "manifest",
+        "Manifest selection",
+        `Kept ${manifestSelectedEntries.length} of ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} for injection.`,
+        {
+          phase: "manifest_select",
+          count: manifestSelectedEntries.length,
+          scopes: selectedScopePreviews,
+          entries: manifestSelectedEntries,
+          tone: "info",
+        },
+      ),
+    });
+  }
+
+  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const included = injection?.included ?? selected;
+  const injectedNodes = buildPreviewNodes(included, booksById);
+  const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
 
   if (injection?.included.length) {
     pushTrace(
@@ -2774,9 +3034,56 @@ export async function buildRetrievalPreview(
       `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`,
       { entryCount: injection.included.length },
     );
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "injected",
+        "Injected entries",
+        `Prepared ${injectedNodes.length} entr${injectedNodes.length === 1 ? "y" : "ies"} for prompt injection.`,
+        {
+          phase: "inject",
+          count: injectedNodes.length,
+          entries: injectedNodes,
+          tone: "success",
+        },
+      ),
+    });
+  } else {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "injected",
+        "Injection skipped",
+        "No retrieved entries were injected for this turn.",
+        {
+          phase: "inject",
+          count: 0,
+          tone: selected.length ? "warn" : "info",
+        },
+      ),
+    });
   }
 
   const fallbackReason = buildFallbackReason(fallbackPath);
+  if (fallbackReason) {
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("issue", "Fallback path active", fallbackReason, {
+        phase: "fallback",
+        tone: "warn",
+        details: fallbackPath,
+      }),
+    });
+  }
+  const resolvedConnectionId = controller.controllerUsed ? controller.connectionId : null;
+  emitProgress(reportProgress, {
+    type: "finish",
+    timestamp: Date.now(),
+    status: fallbackReason ? "fallback" : "completed",
+    controllerUsed: controller.controllerUsed,
+    resolvedConnectionId,
+    fallbackReason,
+  });
 
   return {
     mode: config.searchMode,
@@ -2785,13 +3092,13 @@ export async function buildRetrievalPreview(
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
     selectionSummary,
-    selectedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
-    retrievedScopes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    selectedScopes: selectedScopePreviews,
+    retrievedScopes: selectedScopePreviews,
     scopeManifestCounts,
     pulledNodes,
     injectedNodes,
     manifestSelectedEntries,
-    selectedNodes: buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons),
+    selectedNodes: selectedScopePreviews,
     fallbackReason,
     fallbackPath,
     selectedBookIds: chosenBooks.map((book) => book.summary.id),
@@ -2800,7 +3107,7 @@ export async function buildRetrievalPreview(
     capturedAt: options.capturedAt ?? Date.now(),
     isActual: options.isActual === true,
     controllerUsed: controller.controllerUsed,
-    resolvedConnectionId: controller.controllerUsed ? controller.connectionId : null,
+    resolvedConnectionId,
   };
 }
 

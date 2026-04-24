@@ -23,9 +23,12 @@ import type {
   OperationUpdate,
   PreviewNode,
   PreviewScope,
+  RetrievalFeedItem,
+  RetrievalFeedState,
+  RetrievalSession,
 } from "../types";
 import {
-  DrawerPreviewTab,
+  DrawerFeedFilter,
   TreeSelection,
   clipText,
   createElement,
@@ -106,7 +109,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let currentState: FrontendState | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
-  let drawerTabMode: DrawerPreviewTab = "searches";
+  let drawerFeedFilter: DrawerFeedFilter = "all";
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection: WorkspaceSection = "sources";
@@ -1112,6 +1115,338 @@ export function setup(ctx: SpindleFrontendContext) {
     return section;
   }
 
+  function itemMatchesFeedFilter(item: RetrievalFeedItem, filter: DrawerFeedFilter): boolean {
+    if (filter === "all") return true;
+    return item.kind === filter;
+  }
+
+  function getFeedItemGlyph(item: RetrievalFeedItem): string {
+    switch (item.kind) {
+      case "scope":
+        return "S";
+      case "manifest":
+        return "M";
+      case "pulled":
+        return "P";
+      case "injected":
+        return "I";
+      case "issue":
+        return "!";
+      default:
+        return "T";
+    }
+  }
+
+  function getFeedItemTone(item: RetrievalFeedItem): NoticeTone {
+    switch (item.tone) {
+      case "success":
+        return "success";
+      case "warn":
+        return "warn";
+      case "error":
+        return "error";
+      default:
+        return "info";
+    }
+  }
+
+  function getSessionTone(session: RetrievalSession): NoticeTone {
+    switch (session.status) {
+      case "completed":
+        return "success";
+      case "fallback":
+        return "warn";
+      case "failed":
+        return "error";
+      default:
+        return "info";
+    }
+  }
+
+  function getSessionStatusLabel(session: RetrievalSession): string {
+    switch (session.status) {
+      case "completed":
+        return "Completed";
+      case "fallback":
+        return "Fallback";
+      case "failed":
+        return "Failed";
+      default:
+        return "Running";
+    }
+  }
+
+  function formatTimeOnly(timestamp: number | null | undefined): string {
+    if (!timestamp || !Number.isFinite(timestamp)) return "Unknown time";
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
+    if (!role) return "entry";
+    return role.replace(/_/g, " ");
+  }
+
+  function createFeedChipRow(labels: string[], limit = 3): HTMLElement | null {
+    if (!labels.length) return null;
+    const wrap = createElement("div", "lore-cluster");
+    const shown = labels.slice(0, limit);
+    for (const label of shown) {
+      wrap.appendChild(createTag(clipText(label, 30), "accent"));
+    }
+    if (labels.length > shown.length) {
+      wrap.appendChild(createTag(`+${labels.length - shown.length} more`));
+    }
+    return wrap;
+  }
+
+  function renderFeedScopeCards(scopes: PreviewScope[]): HTMLElement {
+    const list = createElement("div", "lore-feed-scope-list");
+    for (const scope of scopes) {
+      const card = createElement("div", "lore-feed-scope-card");
+      const head = createElement("div", "lore-feed-card-head");
+      head.append(
+        createElement("div", "lore-feed-card-title", scope.label),
+        createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"),
+      );
+      card.append(
+        head,
+        createElement("div", "lore-feed-card-meta", `${scope.worldBookName} | ${scope.breadcrumb || "Root"}`),
+      );
+      if (scope.summary?.trim()) {
+        card.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 220)));
+      }
+      if (scope.selectionReason?.trim()) {
+        card.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 220)}`));
+      }
+      list.appendChild(card);
+    }
+    return list;
+  }
+
+  function renderFeedEntryRows(entries: PreviewNode[]): HTMLElement {
+    const list = createElement("div", "lore-feed-entry-list");
+    for (const entry of entries) {
+      const row = createElement("div", "lore-feed-entry-row");
+      const head = createElement("div", "lore-feed-card-head");
+      head.append(
+        createElement("div", "lore-feed-card-title", entry.label),
+        createTag(formatSelectionRoleLabel(entry.selectionRole), entry.selectionRole === "background" ? "neutral" : "good"),
+      );
+      row.append(
+        head,
+        createElement("div", "lore-feed-card-meta", `${entry.worldBookName} | ${entry.breadcrumb || "Root"}`),
+      );
+      if (entry.previewText?.trim()) {
+        row.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 220)));
+      }
+      if (entry.reasons?.length) {
+        const reasons = createElement("div", "lore-cluster");
+        for (const reason of entry.reasons.slice(0, 4)) {
+          reasons.appendChild(createTag(reason));
+        }
+        row.appendChild(reasons);
+      }
+      list.appendChild(row);
+    }
+    return list;
+  }
+
+  function renderFeedItemDetails(item: RetrievalFeedItem): HTMLElement | null {
+    const hasScopes = !!item.scopes?.length;
+    const hasEntries = !!item.entries?.length;
+    const hasDetails = !!item.details?.length;
+    if (!hasScopes && !hasEntries && !hasDetails) return null;
+
+    const details = createElement("details", "lore-feed-details") as HTMLDetailsElement;
+    const summary = createElement("summary", "lore-feed-details-summary");
+    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Show details"));
+
+    const chips = createElement("div", "lore-cluster");
+    if (hasScopes) {
+      const row = createFeedChipRow(item.scopes!.map((scope) => scope.label));
+      if (row) chips.appendChild(row);
+    }
+    if (hasEntries) {
+      const row = createFeedChipRow(item.entries!.map((entry) => entry.label));
+      if (row) chips.appendChild(row);
+    }
+    if (hasDetails) {
+      chips.appendChild(createTag(`${item.details!.length} note${item.details!.length === 1 ? "" : "s"}`));
+    }
+    if (chips.childElementCount) summary.appendChild(chips);
+
+    const body = createElement("div", "lore-feed-details-body");
+    if (hasScopes) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.append(
+        createElement("div", "lore-feed-detail-title", `Scopes (${item.scopes!.length})`),
+        renderFeedScopeCards(item.scopes!),
+      );
+      body.appendChild(group);
+    }
+    if (hasEntries) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.append(
+        createElement("div", "lore-feed-detail-title", `Entries (${item.entries!.length})`),
+        renderFeedEntryRows(item.entries!),
+      );
+      body.appendChild(group);
+    }
+    if (hasDetails) {
+      const group = createElement("div", "lore-feed-detail-group");
+      group.appendChild(createElement("div", "lore-feed-detail-title", "Notes"));
+      const notes = createElement("div", "lore-stack");
+      notes.style.gap = "6px";
+      for (const detail of item.details!) {
+        notes.appendChild(createElement("div", "lore-feed-note", detail));
+      }
+      group.appendChild(notes);
+      body.appendChild(group);
+    }
+
+    details.append(summary, body);
+    return details;
+  }
+
+  function renderFeedItem(item: RetrievalFeedItem): HTMLElement {
+    const row = createElement("div", `lore-feed-item ${getFeedItemTone(item)}`);
+    const icon = createElement("div", "lore-feed-item-icon", getFeedItemGlyph(item));
+    const body = createElement("div", "lore-feed-item-body");
+    const top = createElement("div", "lore-feed-item-top");
+    top.append(
+      createElement("div", "lore-feed-item-label", item.label),
+      createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)),
+    );
+    body.append(
+      top,
+      createElement("div", "lore-feed-item-summary", item.summary),
+    );
+    const meta = createElement("div", "lore-cluster");
+    meta.classList.add("lore-feed-item-meta");
+    meta.appendChild(createTag(item.kind === "trace" ? "trace" : item.kind.replace(/_/g, " "), item.kind === "issue" ? "warn" : "accent"));
+    if (item.phase && item.phase !== "session") {
+      meta.appendChild(createTag(item.phase.replace(/_/g, " ")));
+    }
+    if (typeof item.count === "number") {
+      meta.appendChild(createTag(`${item.count}`));
+    }
+    body.appendChild(meta);
+    const details = renderFeedItemDetails(item);
+    if (details) body.appendChild(details);
+    row.append(icon, body);
+    return row;
+  }
+
+  function renderFeedSession(session: RetrievalSession): HTMLElement | null {
+    const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
+    if (drawerFeedFilter !== "all" && !visibleItems.length) return null;
+
+    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}`);
+    const head = createElement("div", "lore-feed-session-head");
+    const copy = createElement("div", "lore-stack");
+    copy.style.gap = "4px";
+    copy.append(
+      createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"),
+      createElement(
+        "div",
+        "lore-feed-session-subtitle",
+        `${formatCapturedAt(session.startedAt)}${session.endedAt ? ` -> ${formatTimeOnly(session.endedAt)}` : " -> live"}`,
+      ),
+    );
+    head.appendChild(copy);
+
+    const tags = createElement("div", "lore-cluster");
+    tags.append(
+      createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"),
+      createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"),
+      createTag(`${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`),
+    );
+    if (session.resolvedConnectionId) {
+      tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
+    }
+    if (session.fallbackReason && session.status !== "failed") {
+      tags.appendChild(createTag("Fallback path", "warn"));
+    }
+    head.appendChild(tags);
+    wrap.appendChild(head);
+
+    if (session.fallbackReason) {
+      wrap.appendChild(
+        createBanner(
+          session.status === "failed" ? "error" : "warn",
+          session.status === "failed" ? "Retrieval failed" : "Fallback path active",
+          session.fallbackReason,
+        ),
+      );
+    }
+
+    const items = createElement("div", "lore-feed-session-items");
+    for (const item of visibleItems) {
+      items.appendChild(renderFeedItem(item));
+    }
+    wrap.appendChild(items);
+    return wrap;
+  }
+
+  function renderRetrievalFeedSection(state: FrontendState): HTMLElement {
+    const section = createElement("section", "lore-section");
+    const actions = createElement("div", "lore-cluster");
+    if (state.preview) {
+      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview!)));
+    }
+    section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
+
+    const filters = createElement("div", "lore-cluster");
+    for (const [value, label] of [
+      ["all", "All"],
+      ["scope", "Scopes"],
+      ["manifest", "Manifest"],
+      ["pulled", "Pulled"],
+      ["injected", "Injected"],
+      ["issue", "Issues"],
+    ] as const) {
+      filters.appendChild(
+        createButton(label, `lore-chip${drawerFeedFilter === value ? " active" : ""}`, () => {
+          drawerFeedFilter = value;
+          render();
+        }),
+      );
+    }
+    section.appendChild(filters);
+
+    const feed = createElement("div", "lore-feed");
+    const sessions = state.retrievalFeed?.sessions ?? [];
+    if (!sessions.length) {
+      feed.appendChild(
+        createEmpty(
+          "No retrieval activity yet",
+          "Send a message to watch Lore Recall stream scope choice, manifest selection, pulled entries, injection, and fallback events here.",
+        ),
+      );
+      section.appendChild(feed);
+      return section;
+    }
+
+    let rendered = 0;
+    for (const session of sessions) {
+      const sessionNode = renderFeedSession(session);
+      if (!sessionNode) continue;
+      feed.appendChild(sessionNode);
+      rendered += 1;
+    }
+
+    if (!rendered) {
+      feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
+    }
+
+    section.appendChild(feed);
+    return section;
+  }
+
   function createBreadcrumb(segments: string[]): HTMLElement {
     const wrap = createElement("div", "lore-breadcrumb");
     if (!segments.length) {
@@ -1269,72 +1604,14 @@ export function setup(ctx: SpindleFrontendContext) {
       shell.appendChild(operationSection);
     }
 
-    // --- Last retrieval section -------------------------------------
-    const preview = createElement("section", "lore-section");
-    const tabs = createElement("div", "lore-tabs");
-    for (const [value, label] of [
-      ["searches", "Selected nodes"],
-      ["pulled", "Pulled"],
-      ["injected", "Injected"],
-    ] as const) {
-      tabs.appendChild(
-        createButton(label, `lore-tab${drawerTabMode === value ? " active" : ""}`, () => {
-          drawerTabMode = value;
-          render();
-        }),
-      );
-    }
-    const previewActions =
-      state?.preview
-        ? createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview!))
-        : null;
-    preview.append(createSectionHead("Last retrieval", "Captured from the most recent generated turn.", previewActions), tabs);
-
-    if (!state?.preview) {
-      preview.appendChild(createEmpty("No retrieval captured yet", "Send a message to capture Lore Recall's actual retrieval for this chat."));
+    if (state) {
+      shell.appendChild(renderRetrievalFeedSection(state));
     } else {
-      const meta = createElement("div", "lore-cluster");
-      meta.append(
-        createTag(state.preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"),
-        createTag(state.preview.controllerUsed ? "Controller used" : "Deterministic fallback", state.preview.controllerUsed ? "good" : "warn"),
-        createTag(`Captured ${formatCapturedAt(state.preview.capturedAt)}`),
-      );
-      if (state.preview.resolvedConnectionId) {
-        meta.appendChild(createTag(`Conn ${truncateMiddle(state.preview.resolvedConnectionId, 8, 6)}`));
-      }
-      preview.appendChild(meta);
-      if (state.preview.fallbackReason) {
-        preview.appendChild(createBanner("warn", "Fallback used", state.preview.fallbackReason));
-      }
+      const preview = createElement("section", "lore-section");
+      preview.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat."));
+      preview.appendChild(createEmpty("Loading retrieval feed", "Lore Recall is waiting for the current chat state."));
+      shell.appendChild(preview);
     }
-
-    if (!state?.preview) {
-      // already rendered empty state above
-    } else if (drawerTabMode === "searches") {
-      preview.appendChild(
-        renderSearchActivity(state.preview) ??
-          createEmpty("No search activity", "This turn did not record any traversal or retrieval steps."),
-      );
-    } else if (drawerTabMode === "pulled") {
-      preview.appendChild(
-        renderRetrievalEntries(
-          getPreviewPulledNodes(state.preview),
-          "pulled",
-          "Nothing pulled",
-          "No entries were pulled into the retrieval set for this turn.",
-        ),
-      );
-    } else {
-      preview.appendChild(
-        renderRetrievalEntries(
-          getPreviewInjectedNodes(state.preview),
-          "injected",
-          "Nothing injected",
-          "The turn completed without injecting any retrieved entries.",
-        ),
-      );
-    }
-    shell.appendChild(preview);
 
     // --- Sources section --------------------------------------------
     const sources = createElement("section", "lore-section");
