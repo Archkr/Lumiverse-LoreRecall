@@ -7,7 +7,8 @@
     "build:backend": "bun build src/backend.ts --outfile dist/backend.js --target bun",
     "build:frontend": "bun build src/frontend.ts --outfile dist/frontend.js --target browser",
     "build": "bun run build:backend && bun run build:frontend",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "lumiverse-spindle-types": "0.3.6",

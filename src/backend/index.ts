@@ -146,30 +146,77 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
+  const previewDiagnostics =
+    cachedPreview
+      ? [
+          ...(cachedPreview.fallbackPath?.length
+            ? [
+                {
+                  id: "preview-fallback",
+                  severity: "info" as const,
+                  bookId: null,
+                  title: "Last retrieval used fallback behavior",
+                  detail: cachedPreview.fallbackPath.join(" "),
+                },
+              ]
+            : []),
+          ...(cachedPreview.fallbackPath?.some((detail) => /invalid json|did not map|empty nodeids array/i.test(detail))
+            ? [
+                {
+                  id: "preview-scope-selection-failure",
+                  severity: "warn" as const,
+                  bookId: null,
+                  title: "Last retrieval had controller scope-selection trouble",
+                  detail:
+                    "The most recent retrieval fell back because the controller returned invalid JSON, empty nodeIds, or nodeIds that did not map to visible scopes.",
+                },
+              ]
+            : []),
+          ...(cachedPreview.selectedScopes.length > 0 && cachedPreview.pulledNodes.length === 0
+            ? [
+                {
+                  id: "preview-empty-scopes",
+                  severity: "warn" as const,
+                  bookId: null,
+                  title: "Last retrieval scopes resolved no entries",
+                  detail:
+                    "The most recent retrieval chose one or more scopes but resolved no pulled entries. This usually points to overly broad or poorly summarized categories.",
+                },
+              ]
+            : []),
+          ...(cachedPreview.selectedScopes.some(
+            (scope) =>
+              scope.descendantEntryCount > 24 &&
+              typeof scope.manifestEntryCount === "number" &&
+              scope.manifestEntryCount < scope.descendantEntryCount,
+          )
+            ? [
+                {
+                  id: "preview-broad-manifest-scope",
+                  severity: "warn" as const,
+                  bookId: null,
+                  title: "Last retrieval still had a broad manifest scope",
+                  detail:
+                    "One or more selected scopes exposed more than 24 descendant entries but still did not fully narrow before manifest selection. Retrieval may still be too broad for exact entry choice.",
+                },
+              ]
+            : []),
+          ...(cachedPreview.recentConversation && /\[narrative|important note:|black box|you represent/i.test(cachedPreview.recentConversation)
+            ? [
+                {
+                  id: "preview-protocol-heavy-context",
+                  severity: "warn" as const,
+                  bookId: null,
+                  title: "Recent retrieval context still contains protocol text",
+                  detail:
+                    "The sanitized recent conversation still appears to contain narrative protocol or policy text, which can distort node and entry selection.",
+                },
+              ]
+            : []),
+        ]
+      : [];
   const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(
-    cachedPreview?.fallbackPath?.length
-      ? [
-          {
-            id: "preview-fallback",
-            severity: "info" as const,
-            bookId: null,
-            title: "Last retrieval used fallback behavior",
-            detail: cachedPreview.fallbackPath.join(" "),
-          },
-        ]
-      : [],
-    cachedPreview && cachedPreview.selectedScopes.length > 0 && cachedPreview.pulledNodes.length === 0
-      ? [
-          {
-            id: "preview-empty-scopes",
-            severity: "warn" as const,
-            bookId: null,
-            title: "Last retrieval scopes resolved no entries",
-            detail:
-              "The most recent retrieval chose one or more scopes but resolved no pulled entries. This usually points to overly broad or poorly summarized categories.",
-          },
-        ]
-      : [],
+    previewDiagnostics,
   );
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
 
