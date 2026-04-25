@@ -3774,7 +3774,7 @@ function setup(ctx) {
       characterDraft.selectiveRetrieval = next;
     }));
     switches.appendChild(switchRow);
-    switches.appendChild(createFieldNote("Selective retrieval off injects entries directly from the chosen scopes. Selective retrieval on shows scoped manifests to the controller and lets it pick exact entry IDs from those scopes."));
+    switches.appendChild(createFieldNote("Selective retrieval off injects from the chosen scopes and lets injection-time caps trim the result. Selective retrieval on makes the controller choose the final injected entry IDs from the chosen-scope manifests."));
     form.appendChild(switches);
     section.appendChild(form);
     const actions = createElement("div", "lore-actions");

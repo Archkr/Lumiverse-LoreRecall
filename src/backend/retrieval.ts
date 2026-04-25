@@ -563,18 +563,15 @@ function buildDeterministicSelection(
     .map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
 }
 
-function summarizeSelection(selection: ScoredEntry[], availableCandidates: ScoredEntry[] = selection): string {
+function summarizeSelection(selection: ScoredEntry[]): string {
   if (!selection.length) return "No entries selected.";
   const mentionCount = selection.filter(
     (item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention",
   ).length;
-  if (selection.length === availableCandidates.length) {
-    return `Selected all ${selection.length} entry candidate(s) from the chosen node scope${selection.length === 1 ? "" : "s"}.`;
-  }
   if (mentionCount > 0) {
-    return `Selected ${selection.length} of ${availableCandidates.length} scoped entry candidate(s), led by direct query mentions.`;
+    return `Final selection contains ${selection.length} entry candidate(s), led by direct query mentions.`;
   }
-  return `Selected ${selection.length} of ${availableCandidates.length} scoped entry candidate(s) from the chosen node manifests.`;
+  return `Final selection contains ${selection.length} entry candidate(s) from the chosen node manifests.`;
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
@@ -958,8 +955,12 @@ async function maybeSelectEntries(
   scopes: TraversalScope[] = [],
 ): Promise<ScoredEntry[]> {
   const rankedCandidates = rankSelectionCandidates(queryText, candidates, scopes);
+  const maxFinalEntries = Math.min(
+    candidates.length,
+    clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
+  );
   const buildScopedFallbackSelection = (): ScoredEntry[] =>
-    buildDeterministicSelection(rankedCandidates, Math.min(candidates.length, config.maxResults));
+    buildDeterministicSelection(rankedCandidates, maxFinalEntries);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
 
@@ -971,11 +972,11 @@ async function maybeSelectEntries(
   }
 
   const prompt = [
-    "Select the exact lore entries that should be injected from the chosen node manifests.",
+    "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${config.maxResults} entryIds from the manifests below.`,
+    `Choose up to ${maxFinalEntries} entryIds from the manifests below.`,
     "Use only entryIds that appear in the manifests.",
-    "The selected scopes are already the retrieval decision. Choose the exact entries you want from those scopes.",
+    "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
     "If none of the listed entries would help, return an empty entryIds array.",
     "",
@@ -1011,24 +1012,70 @@ async function maybeSelectEntries(
         )),
   ].join("\n");
 
-  const { parsed } = await runControllerJson(prompt, controller, undefined, "Select manifest entries");
-  const ids = Array.isArray(parsed?.entryIds)
-    ? parsed.entryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    : [];
-  if (!ids.length) return buildScopedFallbackSelection();
-
   const byId = new Map(rankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
-  const chosen: ScoredEntry[] = [];
-  const seen = new Set<string>();
-  for (const id of ids) {
-    const match = byId.get(id)?.candidate;
-    if (!match || seen.has(id)) continue;
-    seen.add(id);
-    chosen.push(match);
-    if (chosen.length >= config.maxResults) break;
+  const { parsed } = await runControllerJson(prompt, controller, undefined, "Select manifest entries");
+  const parsedEntryIds = parsed?.entryIds;
+  const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
+  const requestedIds = hasExplicitEntryIds
+    ? parsedEntryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+
+  if (hasExplicitEntryIds && requestedIds.length === 0) {
+    return [];
   }
-  if (!chosen.length) return buildScopedFallbackSelection();
-  return chosen;
+
+  const uniqueRequestedIds = uniqueStrings(requestedIds);
+  const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
+  const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
+  const selectedAllManifestEntries =
+    rankedCandidates.length > maxFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
+  const invalidSelectionReasons: string[] = [];
+
+  if (!hasExplicitEntryIds) {
+    invalidSelectionReasons.push("Controller did not return an entryIds array.");
+  }
+  if (requestedIds.length !== uniqueRequestedIds.length) {
+    invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
+  }
+  if (unmappedIds.length) {
+    invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
+  }
+  if (mappedIds.length > maxFinalEntries) {
+    invalidSelectionReasons.push(
+      `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${maxFinalEntries}.`,
+    );
+  }
+  if (selectedAllManifestEntries) {
+    invalidSelectionReasons.push(
+      `Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${maxFinalEntries}).`,
+    );
+  }
+
+  if (invalidSelectionReasons.length) {
+    spindle.log.warn(`Lore Recall manifest selection fell back to deterministic final ranking: ${invalidSelectionReasons.join(" ")}`);
+    emitProgress(controller.reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "issue",
+        "Manifest selection fell back",
+        `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${maxFinalEntries}.`,
+        {
+          phase: "manifest_select",
+          tone: "warn",
+          details: invalidSelectionReasons,
+        },
+      ),
+    });
+    return buildScopedFallbackSelection();
+  }
+
+  const mappedIdSet = new Set(mappedIds);
+  const chosen = rankedCandidates
+    .filter((item) => mappedIdSet.has(item.candidate.entry.entryId))
+    .slice(0, maxFinalEntries)
+    .map((item) => item.candidate);
+
+  return chosen.length ? chosen : buildScopedFallbackSelection();
 }
 
 function getDescendantCategoryIds(tree: BookTreeIndex, nodeId: string, depthLimit: number): string[] {
@@ -1792,11 +1839,15 @@ async function selectEntriesForScopes(
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
+    const maxFinalEntries = Math.min(
+      candidates.length,
+      clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
+    );
     pushTrace(
       trace,
       "manifest_select",
       "Select manifest entries",
-      `Scoped manifests exposed ${candidates.length} candidate entries across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} entry candidate(s) were kept for injection.`,
+      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final entry candidate(s) were selected for injection (cap ${maxFinalEntries}).`,
       { entryCount: selected.length },
     );
   } else {
@@ -2536,7 +2587,7 @@ export async function buildRetrievalPreview(
       item: createFeedItem(
         "manifest",
         "Manifest selection",
-        `Kept ${manifestSelectedEntries.length} of ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} for injection.`,
+        `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} scoped manifest entr${pulledNodes.length === 1 ? "y" : "ies"}.`,
         {
           phase: "manifest_select",
           count: manifestSelectedEntries.length,
@@ -2549,12 +2600,35 @@ export async function buildRetrievalPreview(
     });
   }
 
+  const maxInjectedEntries = clampInt(config.tokenBudget, 1, 32);
+  if (config.selectiveRetrieval && selected.length > maxInjectedEntries) {
+    spindle.log.warn(
+      `Lore Recall selective retrieval exceeded the inject cap before prompt assembly (${selected.length} > ${maxInjectedEntries}); applying safety clamp.`,
+    );
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem(
+        "issue",
+        "Selective retrieval exceeded inject cap",
+        `Selective retrieval produced ${selected.length} entries before injection, so Lore Recall had to safety-clamp to ${maxInjectedEntries}.`,
+        {
+          phase: "inject",
+          tone: "warn",
+          details: [
+            `selected=${selected.length}`,
+            `injectCap=${maxInjectedEntries}`,
+          ],
+        },
+      ),
+    });
+  }
+
   const injectionStartedAt = Date.now();
   const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
   const injectionDurationMs = Date.now() - injectionStartedAt;
   const included = injection?.included ?? selected;
   const injectedNodes = buildPreviewNodes(included, booksById);
-  const selectionSummary = summarizeSelection(selected, pulledCandidates.length ? pulledCandidates : selected);
+  const selectionSummary = summarizeSelection(selected);
 
   if (injection?.included.length) {
     pushTrace(
