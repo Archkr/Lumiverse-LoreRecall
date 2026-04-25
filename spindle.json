@@ -10,5 +10,5 @@
   "interceptorTimeoutMs": 180000,
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
-  "minimum_lumiverse_version": "0.1.0"
+  "minimum_lumiverse_version": "0.9.0"
 }
