@@ -953,150 +953,9 @@ var CONTROLLER_MAX_CALLS = 12;
 var TRAVERSAL_FULL_OVERVIEW_LIMIT = 1e4;
 var RECENT_MESSAGE_LIMIT = 500;
 var MAX_SCOPE_CHOICES = 5;
-var MANIFEST_SCOPE_ENTRY_LIMIT = 24;
 var DOCUMENT_CHOICE_PREFIX = "doc:";
 var RETRIEVAL_SCOPE_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 var RETRIEVAL_BOOK_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only lore book IDs from the provided list. Return only the requested JSON with no commentary or markdown.";
-var GROUP_TERMS = [
-  "allies",
-  "alliance",
-  "bond",
-  "bonds",
-  "collective",
-  "companions",
-  "crew",
-  "duo",
-  "family",
-  "faction",
-  "group",
-  "groups",
-  "household",
-  "network",
-  "pair",
-  "party",
-  "relationship",
-  "relationships",
-  "retinue",
-  "squad",
-  "team",
-  "trio",
-  "villagers"
-];
-var LOCATION_TERMS = [
-  "base",
-  "capital",
-  "city",
-  "country",
-  "district",
-  "domain",
-  "forest",
-  "fortress",
-  "harbor",
-  "headquarters",
-  "hq",
-  "island",
-  "kingdom",
-  "location",
-  "outpost",
-  "pier",
-  "place",
-  "realm",
-  "region",
-  "sanctuary",
-  "settlement",
-  "ship",
-  "stronghold",
-  "territory",
-  "town",
-  "vessel",
-  "village",
-  "world"
-];
-var EVENT_TERMS = [
-  "arc",
-  "assault",
-  "attack",
-  "battle",
-  "campaign",
-  "catastrophe",
-  "conflict",
-  "crisis",
-  "disaster",
-  "event",
-  "expedition",
-  "incident",
-  "journey",
-  "liberation",
-  "mission",
-  "operation",
-  "ritual",
-  "siege",
-  "succession",
-  "summit",
-  "tournament",
-  "trial",
-  "war"
-];
-var THREAT_OR_RULE_TERMS = [
-  "ability",
-  "abilities",
-  "artifact",
-  "classification",
-  "command response",
-  "danger",
-  "law",
-  "laws",
-  "magic",
-  "mechanic",
-  "mechanics",
-  "monster",
-  "power",
-  "powers",
-  "procedure",
-  "procedures",
-  "protocol",
-  "protocols",
-  "rule",
-  "rules",
-  "system",
-  "systems",
-  "technique",
-  "techniques",
-  "threat",
-  "weapon",
-  "weapons"
-];
-var PERSON_TERMS = [
-  "ally",
-  "allies",
-  "captain",
-  "character",
-  "child",
-  "commander",
-  "companion",
-  "doctor",
-  "friend",
-  "girl",
-  "guide",
-  "hero",
-  "king",
-  "knight",
-  "leader",
-  "man",
-  "mentor",
-  "officer",
-  "person",
-  "prince",
-  "princess",
-  "queen",
-  "ranger",
-  "scout",
-  "soldier",
-  "teacher",
-  "villager",
-  "warrior",
-  "woman"
-];
 function createTraceBuffer(reporter) {
   const trace = [];
   trace[TRACE_REPORTER] = reporter;
@@ -1227,11 +1086,9 @@ function buildSceneSelectionSignals(recentConversation) {
 `).map((line) => line.trim()).filter(Boolean);
   const latestExchange = normalizeSearchText(lines.slice(-2).join(" "));
   const normalizedConversation = normalizeSearchText(lines.join(" "));
-  const crowdCue = /\b(all|everyone|everybody|crowd|gathered|group|together)\b/.test(normalizedConversation);
   return {
     normalizedConversation,
-    latestExchange,
-    crowdCue
+    latestExchange
   };
 }
 function countPhraseOccurrences(haystack, phrase) {
@@ -1256,231 +1113,96 @@ function countPhraseOccurrences(haystack, phrase) {
 function normalizeVariantList(values) {
   return uniqueStrings(values).map((value) => normalizeSearchText(value)).filter((value) => value.length >= 3);
 }
-function buildEntryRoleDescriptor(entry) {
-  return normalizeSearchText([entry.label, entry.summary, entry.groupName, entry.comment, ...entry.tags].join(" "));
-}
-function isLikelyEntityLabel(label) {
-  const rawTokens = label.trim().split(/\s+/).map((token) => token.replace(/[^A-Za-z0-9'_-]/g, "")).filter(Boolean);
-  if (!rawTokens.length || rawTokens.length > 3)
-    return false;
-  const normalized = normalizeSearchText(label);
-  if (matchesDescriptorTerm(normalized, GROUP_TERMS) || matchesDescriptorTerm(normalized, LOCATION_TERMS) || matchesDescriptorTerm(normalized, EVENT_TERMS) || matchesDescriptorTerm(normalized, THREAT_OR_RULE_TERMS)) {
-    return false;
-  }
-  return rawTokens.every((token) => /^[A-Z][A-Za-z0-9'_-]*$/.test(token));
-}
-function buildEntityShortVariants(entry) {
-  if (!isLikelyEntityLabel(entry.label))
-    return [];
-  const tokens = normalizeSearchText(entry.label).split(" ").filter(Boolean);
-  if (tokens.length < 2 || tokens.length > 3)
-    return [];
-  const variants = [];
-  if (tokens[0] && tokens[0].length >= 4)
-    variants.push(tokens[0]);
-  if (tokens.length >= 2)
-    variants.push(tokens.slice(0, 2).join(" "));
-  const lastToken = tokens[tokens.length - 1];
-  if (lastToken && lastToken.length >= 5 && lastToken !== tokens[0]) {
-    variants.push(lastToken);
-  }
-  return normalizeVariantList(variants);
-}
-function buildEntryMentionPhrases(entry, allowShortVariants = false) {
-  const baseVariants = normalizeVariantList([entry.label, ...entry.aliases, entry.comment]);
-  if (!allowShortVariants)
-    return baseVariants;
-  return normalizeVariantList([...baseVariants, ...buildEntityShortVariants(entry)]);
-}
-function matchesDescriptorTerm(descriptor, terms) {
-  return terms.some((term) => descriptor.includes(normalizeSearchText(term)));
-}
-function inferSelectionRole(entry, signals) {
-  const labelDescriptor = normalizeSearchText(entry.label);
-  const commentDescriptor = normalizeSearchText(entry.comment);
-  const groupNameDescriptor = normalizeSearchText(entry.groupName);
-  const summaryDescriptor = normalizeSearchText(entry.summary);
-  const descriptor = buildEntryRoleDescriptor(entry);
-  const personCue = isLikelyEntityLabel(entry.label) && (matchesDescriptorTerm(labelDescriptor, PERSON_TERMS) || matchesDescriptorTerm(commentDescriptor, PERSON_TERMS) || matchesDescriptorTerm(summaryDescriptor, PERSON_TERMS));
-  const explicitGroupCue = matchesDescriptorTerm(labelDescriptor, GROUP_TERMS) || matchesDescriptorTerm(commentDescriptor, GROUP_TERMS) || matchesDescriptorTerm(groupNameDescriptor, GROUP_TERMS);
-  const summaryGroupSupport = !personCue && matchesDescriptorTerm(summaryDescriptor, GROUP_TERMS) && (summaryDescriptor.includes("act as a group") || summaryDescriptor.includes("serve as a group") || summaryDescriptor.includes("work as a team") || summaryDescriptor.includes("collective") || summaryDescriptor.includes("relationship"));
-  const groupCue = explicitGroupCue || summaryGroupSupport;
-  const threatCue = matchesDescriptorTerm(labelDescriptor, THREAT_OR_RULE_TERMS) || !personCue && (matchesDescriptorTerm(summaryDescriptor, THREAT_OR_RULE_TERMS) || matchesDescriptorTerm(descriptor, THREAT_OR_RULE_TERMS));
-  const eventCue = matchesDescriptorTerm(labelDescriptor, EVENT_TERMS) || !personCue && (matchesDescriptorTerm(summaryDescriptor, EVENT_TERMS) || matchesDescriptorTerm(descriptor, EVENT_TERMS));
-  const locationCue = matchesDescriptorTerm(labelDescriptor, LOCATION_TERMS) || !personCue && matchesDescriptorTerm(summaryDescriptor, LOCATION_TERMS);
-  const mentionPhrases = buildEntryMentionPhrases(entry, !groupCue && !locationCue && !eventCue && !threatCue);
-  const latestMentionCount = mentionPhrases.reduce((total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase), 0);
-  const overallMentionCount = mentionPhrases.reduce((total, phrase) => total + countPhraseOccurrences(signals.normalizedConversation, phrase), 0);
-  const latestMention = latestMentionCount > 0;
-  const overallMention = overallMentionCount > 0;
-  if (groupCue) {
+function inferSelectionSignal(entry, reasons, signals) {
+  const labelVariants = normalizeVariantList([entry.label]);
+  const aliasVariants = normalizeVariantList(entry.aliases);
+  const latestLabelMentions = labelVariants.reduce((total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase), 0);
+  const latestAliasMentions = aliasVariants.reduce((total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase), 0);
+  const overallLabelMentions = labelVariants.reduce((total, phrase) => total + countPhraseOccurrences(signals.normalizedConversation, phrase), 0);
+  const overallAliasMentions = aliasVariants.reduce((total, phrase) => total + countPhraseOccurrences(signals.normalizedConversation, phrase), 0);
+  const latestMentionCount = latestLabelMentions + latestAliasMentions;
+  const overallMentionCount = overallLabelMentions + overallAliasMentions;
+  if (latestMentionCount > 0) {
     return {
-      role: "group_cover",
-      helperType: null,
-      latestMention,
-      overallMention,
-      mentionCount: overallMentionCount
+      role: "recent_mention",
+      latestMentionCount,
+      overallMentionCount: Math.max(overallMentionCount, latestMentionCount)
     };
   }
-  if (threatCue) {
+  if (overallMentionCount > 0) {
     return {
-      role: "threat_or_rule_context",
-      helperType: "threat_or_rule",
-      latestMention,
-      overallMention,
-      mentionCount: overallMentionCount
+      role: "context_mention",
+      latestMentionCount,
+      overallMentionCount
     };
   }
-  if (eventCue) {
-    return {
-      role: "event_context",
-      helperType: "event",
-      latestMention,
-      overallMention,
-      mentionCount: overallMentionCount
-    };
+  if (reasons.includes("label")) {
+    return { role: "label_match", latestMentionCount, overallMentionCount };
   }
-  if (locationCue) {
-    return {
-      role: "location_context",
-      helperType: "location",
-      latestMention,
-      overallMention,
-      mentionCount: overallMentionCount
-    };
+  if (reasons.includes("alias")) {
+    return { role: "alias_match", latestMentionCount, overallMentionCount };
   }
-  if (latestMention) {
-    return {
-      role: "present_entity",
-      helperType: null,
-      latestMention,
-      overallMention: true,
-      mentionCount: Math.max(latestMentionCount, overallMentionCount)
-    };
+  if (reasons.includes("keyword")) {
+    return { role: "keyword_match", latestMentionCount, overallMentionCount };
   }
-  if (overallMention) {
-    return {
-      role: "mentioned_entity",
-      helperType: null,
-      latestMention,
-      overallMention,
-      mentionCount: overallMentionCount
-    };
+  if (reasons.includes("branch")) {
+    return { role: "branch_match", latestMentionCount, overallMentionCount };
   }
-  return {
-    role: "background",
-    helperType: null,
-    latestMention,
-    overallMention,
-    mentionCount: overallMentionCount
-  };
+  if (reasons.some((reason) => reason === "summary" || reason === "content" || reason === "comment" || reason === "tag")) {
+    return { role: "content_match", latestMentionCount, overallMentionCount };
+  }
+  return { role: "score_fallback", latestMentionCount, overallMentionCount };
 }
 function rankSelectionCandidates(recentConversation, candidates, scopes) {
   const signals = buildSceneSelectionSignals(recentConversation);
   const roleWeight = {
-    present_entity: 600,
-    mentioned_entity: 500,
-    group_cover: 420,
-    location_context: 300,
-    event_context: 280,
-    threat_or_rule_context: 260,
-    background: 120
+    recent_mention: 640,
+    context_mention: 540,
+    label_match: 420,
+    alias_match: 380,
+    keyword_match: 320,
+    branch_match: 260,
+    content_match: 220,
+    score_fallback: 120
   };
   return candidates.map((candidate) => {
     const scope = scopes.find((item) => getScopedEntryIds(item.book, item.nodeId, true).includes(candidate.entry.entryId));
-    const inferred = inferSelectionRole(candidate.entry, signals);
-    let priority = roleWeight[inferred.role] + candidate.score * 10 + inferred.mentionCount * 20;
-    if (inferred.latestMention)
-      priority += 60;
-    if (inferred.overallMention)
-      priority += 20;
-    if (inferred.role === "group_cover" && signals.crowdCue)
-      priority += 50;
-    if (inferred.role !== "background" && candidate.reasons.includes("label"))
-      priority += 10;
+    const inferred = inferSelectionSignal(candidate.entry, candidate.reasons, signals);
+    let priority = roleWeight[inferred.role] + candidate.score * 10 + inferred.latestMentionCount * 45 + inferred.overallMentionCount * 20;
+    if (candidate.reasons.includes("label"))
+      priority += 18;
+    if (candidate.reasons.includes("alias"))
+      priority += 12;
+    if (candidate.reasons.includes("keyword"))
+      priority += 8;
+    if (candidate.reasons.includes("branch"))
+      priority += 4;
     return {
       candidate: { ...candidate, selectionRole: inferred.role },
       selectionRole: inferred.role,
       priority,
       scopeBreadcrumb: scope ? getScopeBreadcrumb(scope.book, scope.nodeId) : "Unscoped",
-      helperType: inferred.helperType,
-      latestMention: inferred.latestMention,
-      overallMention: inferred.overallMention
+      latestMentionCount: inferred.latestMentionCount,
+      overallMentionCount: inferred.overallMentionCount
     };
   }).sort((left, right) => right.priority - left.priority || right.candidate.score - left.candidate.score || left.candidate.entry.label.localeCompare(right.candidate.entry.label));
 }
 function buildDeterministicSelection(rankedCandidates, maxResults) {
   if (!rankedCandidates.length || maxResults <= 0)
     return [];
-  const results = [];
-  const seen = new Set;
-  const pushUnique = (items, limit = Number.MAX_SAFE_INTEGER, distinctHelperTypes = false) => {
-    const usedHelperTypes = new Set(results.map((item) => item.helperType).filter((value) => !!value));
-    for (const item of items) {
-      if (results.length >= maxResults || limit <= 0)
-        break;
-      if (seen.has(item.candidate.entry.entryId))
-        continue;
-      if (distinctHelperTypes && item.helperType && usedHelperTypes.has(item.helperType))
-        continue;
-      seen.add(item.candidate.entry.entryId);
-      results.push(item);
-      if (item.helperType)
-        usedHelperTypes.add(item.helperType);
-      limit -= 1;
-    }
-  };
-  const present = rankedCandidates.filter((item) => item.selectionRole === "present_entity");
-  const mentioned = rankedCandidates.filter((item) => item.selectionRole === "mentioned_entity");
-  const groups = rankedCandidates.filter((item) => item.selectionRole === "group_cover");
-  const helpers = rankedCandidates.filter((item) => item.selectionRole === "location_context" || item.selectionRole === "event_context" || item.selectionRole === "threat_or_rule_context");
-  const entityCount = present.length + mentioned.length;
-  const crowdScene = entityCount >= 3 || groups.some((item) => item.latestMention || item.overallMention || item.priority >= 450);
-  const primaryEntityBudget = crowdScene && groups.length && entityCount >= maxResults && maxResults >= 3 ? maxResults - 1 : maxResults;
-  pushUnique(present, primaryEntityBudget);
-  if (results.length < primaryEntityBudget) {
-    pushUnique(mentioned, primaryEntityBudget - results.length);
-  }
-  if (crowdScene && groups.length && results.length < maxResults) {
-    pushUnique(groups, 1);
-  }
-  if (results.length < maxResults) {
-    pushUnique(mentioned, maxResults - results.length);
-  }
-  if (results.length < maxResults) {
-    pushUnique(helpers, Math.min(2, maxResults - results.length), true);
-  }
-  if (results.length < maxResults) {
-    pushUnique(rankedCandidates, maxResults - results.length);
-  }
-  return results.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+  return rankedCandidates.slice(0, maxResults).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
 }
 function summarizeSelection(selection, availableCandidates = selection) {
   if (!selection.length)
     return "No entries selected.";
-  const presentCount = selection.filter((item) => item.selectionRole === "present_entity").length;
-  const groupCount = selection.filter((item) => item.selectionRole === "group_cover").length;
-  const availablePresentCount = availableCandidates.filter((item) => item.selectionRole === "present_entity").length;
-  const roles = new Set(selection.map((item) => item.selectionRole).filter(Boolean));
-  if (groupCount > selection.length / 2 && availablePresentCount > presentCount) {
-    return "Warning: group-style coverage dominated even though present entities were available; role tagging or selection may still need adjustment.";
+  const mentionCount = selection.filter((item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention").length;
+  if (selection.length === availableCandidates.length) {
+    return `Selected all ${selection.length} entry candidate(s) from the chosen node scope${selection.length === 1 ? "" : "s"}.`;
   }
-  if (presentCount > 0 && groupCount > 0) {
-    return "Present entities plus group coverage.";
+  if (mentionCount > 0) {
+    return `Selected ${selection.length} of ${availableCandidates.length} scoped entry candidate(s), led by direct query mentions.`;
   }
-  if (presentCount > 0) {
-    return "Present-entity focused.";
-  }
-  if (roles.has("mentioned_entity")) {
-    return "Scene-first selection prioritized explicitly mentioned entities before helper context.";
-  }
-  if (groupCount > selection.length / 2) {
-    return "Helper-heavy fallback: group-style coverage dominated because direct focal entities were not confidently detected.";
-  }
-  if (roles.has("location_context") || roles.has("event_context") || roles.has("threat_or_rule_context")) {
-    return "Helper-heavy fallback: helper context outweighed explicit focal entities.";
-  }
-  return "Scene-first selection kept a small generic context set.";
+  return `Selected ${selection.length} of ${availableCandidates.length} scoped entry candidate(s) from the chosen node manifests.`;
 }
 function getEntryBody(entry) {
   return entry.collapsedText.trim() || entry.content.trim();
@@ -1730,6 +1452,8 @@ async function maybeChooseBooks(recentConversation, books, config, controller, a
 async function maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes = []) {
   const rankedCandidates = rankSelectionCandidates(queryText, candidates, scopes);
   const buildScopedFallbackSelection = () => buildDeterministicSelection(rankedCandidates, Math.min(candidates.length, config.maxResults));
+  const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+  const manifests = buildScopedManifests(rankedEntries, scopes);
   if (!config.selectiveRetrieval || !rankedCandidates.length) {
     return buildScopedFallbackSelection();
   }
@@ -1737,26 +1461,24 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     return buildScopedFallbackSelection();
   }
   const prompt = [
-    "Select the exact lore entries that should be injected.",
+    "Select the exact lore entries that should be injected from the chosen node manifests.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${config.maxResults} entryIds, but only include entries that materially help the next reply.`,
-    "It is fine to return far fewer than the limit.",
-    "Prefer the smallest useful set.",
-    "Choose the best overall set for the scene, not a representative sample of scopes.",
-    "Multiple entries may come from the same scope. Some scopes may contribute zero entries.",
-    "Prioritize focal present or explicitly mentioned entities first.",
-    "Role hints are advisory for each entry only, not a signal to prefer many entries with the same role.",
-    "Choose named focal entities before relationship or collective entries when both are available.",
-    "Use a group or relationship entry to compress coverage, not to replace clearly named present entities.",
-    "When several related entities are active, one strong group or relationship entry may cover the ensemble better than many weak individuals.",
-    "Add place, event, threat, rule, or power context only when it materially changes how the next reply should be written.",
-    "Do not pad the list with loosely related helper entries just because they are available.",
-    "Suggested roles in the manifest are hints, not quotas.",
+    `Choose up to ${config.maxResults} entryIds from the manifests below.`,
+    "Use only entryIds that appear in the manifests.",
+    "The selected scopes are already the retrieval decision. Choose the exact entries you want from those scopes.",
+    "Entries may come from any listed scope, and some scopes may contribute zero entries.",
+    "If none of the listed entries would help, return an empty entryIds array.",
     "",
     buildPromptContext(queryText),
     "",
-    "Entry manifest:",
-    ...rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; role=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
+    "Chosen scopes:",
+    ...scopes.length ? scopes.map((scope) => `- ${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`) : ["- none"],
+    "",
+    "Scoped entry manifests:",
+    ...manifests.length ? manifests.flatMap((manifest) => [
+      `Scope: ${manifest.scope.book.summary.name} :: ${getScopeBreadcrumb(manifest.scope.book, manifest.scope.nodeId)} (${manifest.candidates.length} entries)`,
+      ...manifest.candidates.map((item) => `- entryId=${item.entry.entryId}; signal=${item.selectionRole ?? "score_fallback"}; label=${item.entry.label}; score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
+    ]) : rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
   ].join(`
 `);
   const { parsed } = await runControllerJson2(prompt, controller, undefined, "Select manifest entries");
@@ -1879,8 +1601,13 @@ function buildPreviewScopeManifests(manifests) {
 }
 function buildScopedManifests(candidates, scopes) {
   const candidatesById = new Map(candidates.map((item) => [item.entry.entryId, item]));
+  const candidateOrder = new Map(candidates.map((item, index) => [item.entry.entryId, index]));
   return scopes.map((scope) => {
-    const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true).map((entryId) => candidatesById.get(entryId)).filter((item) => !!item).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
+    const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true).map((entryId) => candidatesById.get(entryId)).filter((item) => !!item).sort((left, right) => {
+      const leftOrder = candidateOrder.get(left.entry.entryId) ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = candidateOrder.get(right.entry.entryId) ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder || right.score - left.score || left.entry.label.localeCompare(right.entry.label);
+    });
     if (!scopeCandidates.length)
       return null;
     return {
@@ -2082,7 +1809,6 @@ function buildChildScopePrompt(recentConversation, scopes, categories, step, con
     '- Use action "retrieve" when the chosen nodeIds are already specific enough to resolve entries.',
     "- Prefer specific leaves over broad branches.",
     "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
-    "- Keep the result small instead of padding it.",
     "",
     buildPromptContext(recentConversation),
     `Current scopes: ${scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ")}`,
@@ -2248,65 +1974,10 @@ function populateScopeManifestSelections(scopeManifestCounts, selected, scopes) 
   }
   return previews;
 }
-function isScopeTooBroadForManifest(scope) {
-  const node = scope.book.tree.nodes[scope.nodeId];
-  if (!node || !node.childIds.length)
-    return false;
-  return getScopedEntryIds(scope.book, scope.nodeId, true).length > MANIFEST_SCOPE_ENTRY_LIMIT;
-}
-async function refineScopesForManifest(recentConversation, scopes, config, controller, allowController, deterministicById, trace) {
-  let activeScopes = dedupeScopes(scopes);
-  const fallbackPath = [];
-  let selectionReason = null;
-  for (let step = 0;step < Math.max(1, config.traversalStepLimit); step += 1) {
-    const broadScopes = activeScopes.filter(isScopeTooBroadForManifest);
-    if (!broadScopes.length)
-      break;
-    const categories = collectChildScopeChoices(broadScopes, deterministicById, config);
-    if (!categories.length)
-      break;
-    let refinedScopes = [];
-    let refinedReason = "Refined broad scopes again before manifest selection.";
-    if (allowController) {
-      const response = await runControllerJson2(buildChildScopePrompt(recentConversation, broadScopes, categories, step, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine manifest scopes");
-      const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-      refinedScopes = resolveScopeChoices(requestedNodeIds, uniqueStrings(activeScopes.map((scope) => scope.book.summary.id)).map((bookId) => activeScopes.find((scope) => scope.book.summary.id === bookId).book));
-      refinedReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : refinedReason;
-      if (!refinedScopes.length) {
-        fallbackPath.push(response.error ?? (requestedNodeIds.length ? "Manifest refinement returned nodeIds that did not map to current child scopes; used deterministic child-scope fallback." : "Manifest refinement returned an empty nodeIds array; used deterministic child-scope fallback."));
-        refinedScopes = chooseDeterministicScopes(broadScopes, deterministicById, config);
-        refinedReason = fallbackPath[fallbackPath.length - 1];
-      }
-    } else {
-      fallbackPath.push("Manifest refinement skipped the controller and used deterministic child scopes.");
-      refinedScopes = chooseDeterministicScopes(broadScopes, deterministicById, config);
-      refinedReason = fallbackPath[fallbackPath.length - 1];
-    }
-    const remainingScopes = activeScopes.filter((scope) => !broadScopes.some((candidate) => makeScopeKey(candidate) === makeScopeKey(scope)));
-    const nextScopes = dedupeScopes([...remainingScopes, ...refinedScopes]);
-    const changed = nextScopes.length !== activeScopes.length || nextScopes.some((scope, index) => makeScopeKey(scope) !== makeScopeKey(activeScopes[index] ?? scope));
-    if (!changed)
-      break;
-    activeScopes = nextScopes;
-    selectionReason = refinedReason;
-    pushTrace(trace, "refine_scope", "Refine manifest scopes", `${refinedReason} Manifest selection will use ${activeScopes.length} narrowed scope(s): ${buildTraceScopeSummary(activeScopes)}.`, {
-      bookId: activeScopes[0]?.book.summary.id ?? null,
-      nodeId: activeScopes[0]?.nodeId ?? null,
-      entryCount: activeScopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
-    });
-  }
-  return { scopes: activeScopes, fallbackPath, selectionReason };
-}
 async function selectEntriesForScopes(recentConversation, scopes, config, controller, allowController, deterministicById, trace) {
   const fallbackPath = [];
   let activeScopes = dedupeScopes(scopes);
   let selectionReason = null;
-  if (config.selectiveRetrieval) {
-    const refinement = await refineScopesForManifest(recentConversation, activeScopes, config, controller, allowController, deterministicById, trace);
-    activeScopes = refinement.scopes;
-    fallbackPath.push(...refinement.fallbackPath);
-    selectionReason = refinement.selectionReason;
-  }
   const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval);
   const rankedCandidates = rankSelectionCandidates(recentConversation, rawCandidates, activeScopes);
   const candidates = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
@@ -3920,7 +3591,7 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
       severity: "warn",
       bookId: null,
       title: "Traversal step limit is low for selective retrieval",
-      detail: "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose scopes, refine them, and then pick exact entries from scoped manifests."
+      detail: "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose useful scopes before picking exact entries from their manifests."
     });
   }
   if (!readableBooks.length && runtimeBooks.length) {
@@ -4467,7 +4138,7 @@ async function buildState(userId, chatId) {
         severity: "warn",
         bookId: null,
         title: "Last retrieval still had a broad manifest scope",
-        detail: "One or more selected scopes exposed more than 24 descendant entries but still did not fully narrow before manifest selection. Retrieval may still be too broad for exact entry choice."
+        detail: "One or more selected scopes exposed more than 24 descendant entries, so exact entry choice depended on a broad manifest. Retrieval may still be too wide for clean entry selection."
       }
     ] : [],
     ...cachedPreview.recentConversation && /\[narrative|important note:|black box|you represent/i.test(cachedPreview.recentConversation) ? [

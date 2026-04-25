@@ -1210,7 +1210,29 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
     if (!role) return "entry";
-    return role.replace(/_/g, " ");
+    const labels: Record<NonNullable<PreviewNode["selectionRole"]>, string> = {
+      recent_mention: "recent mention",
+      context_mention: "context mention",
+      label_match: "label match",
+      alias_match: "alias match",
+      keyword_match: "keyword match",
+      branch_match: "branch match",
+      content_match: "content match",
+      score_fallback: "score fallback",
+    };
+    return labels[role] ?? role.replace(/_/g, " ");
+  }
+
+  function getSelectionRoleTone(role: PreviewNode["selectionRole"]): "good" | "neutral" {
+    switch (role) {
+      case "recent_mention":
+      case "context_mention":
+      case "label_match":
+      case "alias_match":
+        return "good";
+      default:
+        return "neutral";
+    }
   }
 
   function createFeedChipRow(labels: string[], limit = 3): HTMLElement | null {
@@ -1260,7 +1282,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const head = createElement("div", "lore-feed-detail-head");
       head.append(
         createElement("div", "lore-feed-card-title", entry.label),
-        createTag(formatSelectionRoleLabel(entry.selectionRole), entry.selectionRole === "background" ? "neutral" : "good"),
+        createTag(formatSelectionRoleLabel(entry.selectionRole), getSelectionRoleTone(entry.selectionRole)),
       );
       body.append(
         head,
@@ -2325,7 +2347,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Pull limit and inject limit are upper bounds, not targets. Lore Recall should keep and inject fewer entries when a smaller set is more relevant.",
+        "Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit is the maximum number of entries that can be written into the prompt.",
       ),
     );
 
@@ -2342,6 +2364,11 @@ export function setup(ctx: SpindleFrontendContext) {
       }),
     );
     switches.appendChild(switchRow);
+    switches.appendChild(
+      createFieldNote(
+        "Selective retrieval off injects entries directly from the chosen scopes. Selective retrieval on shows scoped manifests to the controller and lets it pick exact entry IDs from those scopes.",
+      ),
+    );
     form.appendChild(switches);
 
     section.appendChild(form);

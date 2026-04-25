@@ -336,7 +336,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
                   bookId: null,
                   title: "Last retrieval still had a broad manifest scope",
                   detail:
-                    "One or more selected scopes exposed more than 24 descendant entries but still did not fully narrow before manifest selection. Retrieval may still be too broad for exact entry choice.",
+                    "One or more selected scopes exposed more than 24 descendant entries, so exact entry choice depended on a broad manifest. Retrieval may still be too wide for clean entry selection.",
                 },
               ]
             : []),

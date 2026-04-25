@@ -149,13 +149,14 @@ export interface PreviewNode {
   reasons: string[];
   previewText: string;
   selectionRole?:
-    | "present_entity"
-    | "mentioned_entity"
-    | "group_cover"
-    | "location_context"
-    | "event_context"
-    | "threat_or_rule_context"
-    | "background";
+    | "recent_mention"
+    | "context_mention"
+    | "label_match"
+    | "alias_match"
+    | "keyword_match"
+    | "branch_match"
+    | "content_match"
+    | "score_fallback";
 }
 
 export interface PreviewScope {

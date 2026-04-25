@@ -1672,7 +1672,7 @@ export function buildDiagnostics(
       bookId: null,
       title: "Traversal step limit is low for selective retrieval",
       detail:
-        "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose scopes, refine them, and then pick exact entries from scoped manifests.",
+        "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose useful scopes before picking exact entries from their manifests.",
     });
   }
 
