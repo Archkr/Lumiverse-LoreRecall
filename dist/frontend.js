@@ -1161,6 +1161,10 @@ var LORE_RECALL_CSS = `
   border-color: color-mix(in srgb, var(--lr-good) 32%, var(--lr-line));
 }
 
+.lore-retrieval-card.reserved {
+  border-color: color-mix(in srgb, var(--lr-warn) 28%, var(--lr-line));
+}
+
 .lore-retrieval-card.pulled {
   border-color: color-mix(in srgb, var(--lr-acc) 28%, var(--lr-line));
 }
@@ -1825,6 +1829,10 @@ var LORE_RECALL_CSS = `
   gap: 1px;
 }
 
+.lore-tree-controls {
+  margin-bottom: 8px;
+}
+
 .lore-tree-group {
   padding: 12px 8px 4px;
   font-size: 10.5px;
@@ -1855,6 +1863,42 @@ var LORE_RECALL_CSS = `
   text-overflow: ellipsis;
   transition: background var(--lr-t), color var(--lr-t);
   letter-spacing: 0;
+}
+
+.lore-tree-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+}
+
+.lore-tree-node .lore-tree-row {
+  padding-left: 8px !important;
+}
+
+.lore-tree-disclosure {
+  appearance: none;
+  width: 18px;
+  height: 28px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lr-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.lore-tree-disclosure:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lr-text) 5%, transparent);
+}
+
+.lore-tree-disclosure.empty {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.lore-tree-disclosure:disabled {
+  opacity: 0.45;
 }
 
 .lore-tree-row > span {
@@ -1986,6 +2030,7 @@ function setup(ctx) {
   let workspaceSection = "sources";
   let selectedBookId = null;
   let selectedTreeByBook = new Map;
+  const collapsedTreeNodesByBook = new Map;
   let globalDraft = null;
   let globalDraftKey = "";
   let characterDraft = null;
@@ -2059,8 +2104,72 @@ function setup(ctx) {
   function getSelectedTree(bookId) {
     return selectedTreeByBook.get(bookId) ?? null;
   }
+  function getCollapsedTreeNodes(bookId) {
+    let existing = collapsedTreeNodesByBook.get(bookId);
+    if (!existing) {
+      existing = new Set;
+      collapsedTreeNodesByBook.set(bookId, existing);
+    }
+    return existing;
+  }
+  function expandTreeAncestors(bookId, nodeId) {
+    if (!nodeId)
+      return;
+    const tree = getBookTree(bookId);
+    if (!tree)
+      return;
+    const collapsed = getCollapsedTreeNodes(bookId);
+    let cursor = tree.nodes[nodeId];
+    const visited = new Set;
+    while (cursor && !visited.has(cursor.id)) {
+      visited.add(cursor.id);
+      collapsed.delete(cursor.id);
+      cursor = cursor.parentId ? tree.nodes[cursor.parentId] : undefined;
+    }
+  }
+  function revealSelectionInTree(bookId, selection) {
+    const tree = getBookTree(bookId);
+    if (!tree)
+      return;
+    if (selection.kind === "category") {
+      expandTreeAncestors(bookId, selection.nodeId);
+      return;
+    }
+    if (selection.kind === "entry") {
+      const assigned = getAssignedCategoryId(tree, selection.entryId);
+      if (assigned !== "root" && assigned !== "unassigned") {
+        expandTreeAncestors(bookId, assigned);
+      }
+    }
+  }
+  function setTreeNodeCollapsed(bookId, nodeId, collapsed) {
+    const set = getCollapsedTreeNodes(bookId);
+    if (collapsed)
+      set.add(nodeId);
+    else
+      set.delete(nodeId);
+  }
+  function getDescendantEntryIds(tree, nodeId) {
+    const collected = [];
+    const queue = [nodeId];
+    const seen = new Set;
+    while (queue.length) {
+      const currentId = queue.shift();
+      if (!currentId || seen.has(currentId))
+        continue;
+      seen.add(currentId);
+      const node = tree.nodes[currentId];
+      if (!node)
+        continue;
+      collected.push(...node.entryIds);
+      for (const childId of node.childIds)
+        queue.push(childId);
+    }
+    return collected;
+  }
   function setSelectedTree(bookId, selection) {
     selectedBookId = bookId;
+    revealSelectionInTree(bookId, selection);
     selectedTreeByBook.set(bookId, selection);
     render();
   }
@@ -2094,12 +2203,16 @@ function setup(ctx) {
       return;
     const firstCategoryId = tree.nodes[tree.rootId]?.childIds[0];
     if (firstCategoryId) {
-      selectedTreeByBook.set(selectedBookId, { kind: "category", bookId: selectedBookId, nodeId: firstCategoryId });
+      const selection = { kind: "category", bookId: selectedBookId, nodeId: firstCategoryId };
+      revealSelectionInTree(selectedBookId, selection);
+      selectedTreeByBook.set(selectedBookId, selection);
       return;
     }
     const firstEntryId = tree.nodes[tree.rootId]?.entryIds[0] ?? tree.unassignedEntryIds[0] ?? entries[0]?.entryId;
     if (firstEntryId) {
-      selectedTreeByBook.set(selectedBookId, { kind: "entry", bookId: selectedBookId, entryId: firstEntryId });
+      const selection = { kind: "entry", bookId: selectedBookId, entryId: firstEntryId };
+      revealSelectionInTree(selectedBookId, selection);
+      selectedTreeByBook.set(selectedBookId, selection);
       return;
     }
     selectedTreeByBook.set(selectedBookId, { kind: "unassigned", bookId: selectedBookId });
@@ -2146,6 +2259,11 @@ function setup(ctx) {
     if (active.scope?.bookId === bookId)
       return true;
     return !!active.scope?.bookIds?.includes(bookId);
+  }
+  function isBookReadOnly(bookId) {
+    if (!bookId)
+      return false;
+    return normalizeBookConfig(currentState?.bookConfigs[bookId]).permission === "read_only";
   }
   function pushNotice(notice) {
     notices.set(notice.id, notice);
@@ -2394,7 +2512,10 @@ function setup(ctx) {
       tags: [...entry.tags],
       summary: entry.summary,
       collapsedText: entry.collapsedText,
-      location: tree ? getAssignedCategoryId(tree, entry.entryId) : "unassigned"
+      location: tree ? getAssignedCategoryId(tree, entry.entryId) : "unassigned",
+      disabled: entry.disabled,
+      constant: entry.constant,
+      selective: entry.selective
     };
     entryDrafts.set(key, next);
     return next;
@@ -2597,6 +2718,8 @@ function setup(ctx) {
       selectionSummary: preview.selectionSummary ?? null,
       pullLimit: currentState?.characterConfig?.maxResults ?? null,
       injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
+      reservedConstantCount: preview.reservedConstantCount ?? 0,
+      remainingDynamicSlots: preview.remainingDynamicSlots ?? null,
       trace: preview.trace,
       selectedScopes: preview.selectedScopes.map((scope) => ({
         nodeId: scope.nodeId,
@@ -2617,6 +2740,17 @@ function setup(ctx) {
         breadcrumb: scope.breadcrumb,
         manifestEntryCount: scope.manifestEntryCount,
         selectedEntryIds: scope.selectedEntryIds
+      })),
+      reservedConstantNodes: getPreviewReservedNodes(preview).map((node) => ({
+        entryId: node.entryId,
+        label: node.label,
+        worldBookId: node.worldBookId,
+        worldBookName: node.worldBookName,
+        breadcrumb: node.breadcrumb,
+        score: node.score,
+        reasons: node.reasons,
+        selectionRole: node.selectionRole ?? null,
+        previewText: node.previewText
       })),
       pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
         entryId: node.entryId,
@@ -2727,6 +2861,11 @@ function setup(ctx) {
       return [];
     return preview.pulledNodes ?? [];
   }
+  function getPreviewReservedNodes(preview) {
+    if (!preview)
+      return [];
+    return preview.reservedConstantNodes ?? [];
+  }
   function getPreviewInjectedNodes(preview) {
     if (!preview)
       return [];
@@ -2802,7 +2941,9 @@ function setup(ctx) {
   function createRetrievalEntryCard(node, index, emphasis) {
     const item = createElement("div", `lore-retrieval-card ${emphasis}`);
     const head = createElement("div", "lore-retrieval-card-head");
-    head.append(createElement("div", "lore-retrieval-card-index", String(index + 1)), createElement("div", "lore-retrieval-card-title", node.label), createTag(emphasis === "injected" ? "Injected" : "Pulled", emphasis === "injected" ? "good" : "accent"));
+    const tagLabel = emphasis === "injected" ? "Injected" : emphasis === "reserved" ? "Reserved" : "Pulled";
+    const tagTone = emphasis === "injected" ? "good" : emphasis === "reserved" ? "warn" : "accent";
+    head.append(createElement("div", "lore-retrieval-card-index", String(index + 1)), createElement("div", "lore-retrieval-card-title", node.label), createTag(tagLabel, tagTone));
     const meta = createElement("div", "lore-retrieval-card-meta", [node.worldBookName, node.breadcrumb || "Root"].filter(Boolean).join(" | "));
     const body = createElement("div", "lore-retrieval-card-body", clipText(node.previewText, emphasis === "injected" ? 260 : 200));
     const reasonRow = createElement("div", "lore-cluster");
@@ -2831,7 +2972,7 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Last retrieval", "Most recent captured retrieval for this chat."));
     const meta = createElement("div", "lore-cluster");
-    meta.append(createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`));
+    meta.append(createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic slots left: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
     section.appendChild(meta);
     if (preview.fallbackReason) {
       section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
@@ -2841,9 +2982,11 @@ function setup(ctx) {
     searches.append(createElement("div", "lore-last-panel-title", "Selected nodes"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
     const pulled = createElement("div", "lore-last-panel");
     pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
+    const reserved = createElement("div", "lore-last-panel");
+    reserved.append(createElement("div", "lore-last-panel-title", "Reserved constants"), renderRetrievalEntries(getPreviewReservedNodes(preview), "reserved", "No reserved constants", "No native constant entries were reserved for this retrieval."));
     const injected = createElement("div", "lore-last-panel");
     injected.append(createElement("div", "lore-last-panel-title", "Injected"), renderRetrievalEntries(getPreviewInjectedNodes(preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
-    grid.append(searches, pulled, injected);
+    grid.append(searches, reserved, pulled, injected);
     section.appendChild(grid);
     return section;
   }
@@ -2858,6 +3001,8 @@ function setup(ctx) {
         return "S";
       case "manifest":
         return "M";
+      case "reserved":
+        return "R";
       case "pulled":
         return "P";
       case "injected":
@@ -3153,6 +3298,7 @@ function setup(ctx) {
       ["all", "All"],
       ["scope", "Scopes"],
       ["manifest", "Manifest"],
+      ["reserved", "Reserved"],
       ["pulled", "Pulled"],
       ["injected", "Injected"],
       ["issue", "Issues"]
@@ -3938,27 +4084,64 @@ function setup(ctx) {
     const filteredEntries = filterTreeEntries(entries, workspaceSearch);
     const entryMap = new Map(filteredEntries.map((entry) => [entry.entryId, entry]));
     const query = workspaceSearch.trim().toLowerCase();
+    const collapsedNodes = getCollapsedTreeNodes(bookId);
+    const controls = createElement("div", "lore-cluster lore-tree-controls");
+    controls.append(createButton("Collapse all", "lore-btn lore-btn-sm", () => {
+      const next = getCollapsedTreeNodes(bookId);
+      next.clear();
+      for (const node of Object.values(tree.nodes)) {
+        if (node.id !== tree.rootId)
+          next.add(node.id);
+      }
+      revealSelectionInTree(bookId, getSelectedTree(bookId) ?? { kind: "unassigned", bookId });
+      renderWorkspaceModal();
+    }), createButton("Expand all", "lore-btn lore-btn-sm", () => {
+      getCollapsedTreeNodes(bookId).clear();
+      renderWorkspaceModal();
+    }));
+    container.appendChild(controls);
     const tree_wrap = createElement("div", "lore-tree");
     container.appendChild(tree_wrap);
     const renderCategory = (nodeId, depth) => {
       const node = tree.nodes[nodeId];
       if (!node)
-        return;
+        return false;
+      let rendered = false;
+      const selected = getSelectedTree(bookId);
+      const childDepth = depth + (nodeId === tree.rootId ? 0 : 1);
       if (nodeId !== tree.rootId && (!query || node.label.toLowerCase().includes(query))) {
-        const selected = getSelectedTree(bookId);
         const active = selected?.kind === "category" && selected.nodeId === nodeId;
+        const wrapper = createElement("div", "lore-tree-node");
+        wrapper.style.paddingLeft = `${10 + depth * 12}px`;
+        const hasChildren = node.childIds.length > 0 || node.entryIds.some((entryId) => entryMap.has(entryId));
+        const collapsed = !query && collapsedNodes.has(nodeId);
+        const disclosure = createElement("button", `lore-tree-disclosure${hasChildren ? "" : " empty"}`, hasChildren ? collapsed ? "▸" : "▾" : "•");
+        disclosure.type = "button";
+        disclosure.disabled = !hasChildren;
+        disclosure.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!hasChildren)
+            return;
+          setTreeNodeCollapsed(bookId, nodeId, !collapsed);
+          renderWorkspaceModal();
+        });
         const row = createElement("button", `lore-tree-row category${active ? " active" : ""}`);
         row.type = "button";
         row.addEventListener("click", () => setSelectedTree(bookId, { kind: "category", bookId, nodeId }));
-        row.style.paddingLeft = `${10 + depth * 12}px`;
         row.appendChild(createElement("span", "", node.label || "Untitled"));
-        tree_wrap.appendChild(row);
+        wrapper.append(disclosure, row);
+        tree_wrap.appendChild(wrapper);
+        rendered = true;
+      }
+      const isCollapsed = nodeId !== tree.rootId && !query && collapsedNodes.has(nodeId);
+      if (isCollapsed) {
+        return rendered;
       }
       for (const entryId of node.entryIds) {
         const entry = entryMap.get(entryId);
         if (!entry)
           continue;
-        const selected = getSelectedTree(bookId);
         const active = selected?.kind === "entry" && selected.entryId === entryId;
         const row = createElement("button", `lore-tree-row entry${active ? " active" : ""}`);
         row.type = "button";
@@ -3966,9 +4149,12 @@ function setup(ctx) {
         row.style.paddingLeft = `${22 + depth * 12}px`;
         row.appendChild(createElement("span", "", entry.label || "Untitled"));
         tree_wrap.appendChild(row);
+        rendered = true;
       }
-      for (const childId of node.childIds)
-        renderCategory(childId, depth + (nodeId === tree.rootId ? 0 : 1));
+      for (const childId of node.childIds) {
+        rendered = renderCategory(childId, childDepth) || rendered;
+      }
+      return rendered;
     };
     renderCategory(tree.rootId, 0);
     const unassignedEntries = filteredEntries.filter((entry) => tree.unassignedEntryIds.includes(entry.entryId));
@@ -3998,7 +4184,9 @@ function setup(ctx) {
     const selected = getSelectedTree(bookId);
     const activeOperation = getActiveOperation();
     const locked = isBookLocked(bookId);
-    const lockMessage = locked && activeOperation ? `${activeOperation.title} is rebuilding this book right now. Editing is temporarily locked.` : null;
+    const readOnly = isBookReadOnly(bookId);
+    const editingLocked = locked || readOnly;
+    const lockMessage = locked && activeOperation ? `${activeOperation.title} is rebuilding this book right now. Editing is temporarily locked.` : readOnly ? "This lorebook is read-only inside Lore Recall, so tree edits and native flag changes are disabled." : null;
     if (!tree) {
       panel.appendChild(createEmpty("No tree for this book", "Build one with metadata or the LLM builder in the settings workspace."));
       return panel;
@@ -4041,6 +4229,34 @@ function setup(ctx) {
       }));
       form2.appendChild(collapsedSwitch);
       panel.appendChild(form2);
+      const descendantEntryIds = uniqueStrings(getDescendantEntryIds(tree, selected.nodeId));
+      const bulkActions = createElement("section", "lore-section");
+      bulkActions.appendChild(createSectionHead("Bulk entry flags", `${descendantEntryIds.length} descendant entr${descendantEntryIds.length === 1 ? "y" : "ies"} in this category.`));
+      const bulkCluster = createElement("div", "lore-cluster");
+      const runBulkPatch = (label, patch) => {
+        if (!descendantEntryIds.length) {
+          pushNotice({
+            id: `bulk-empty:${Date.now()}`,
+            tone: "warn",
+            title: "No descendant entries",
+            message: "This category does not contain any descendant entries to update."
+          });
+          render();
+          return;
+        }
+        const confirmed = window.confirm(`${label} for ${descendantEntryIds.length} descendant entr${descendantEntryIds.length === 1 ? "y" : "ies"}?`);
+        if (!confirmed)
+          return;
+        sendToBackend(ctx, {
+          type: "patch_entry_flags",
+          entryIds: descendantEntryIds,
+          chatId: currentState?.activeChatId,
+          patch
+        });
+      };
+      bulkCluster.append(createButton("Set constant", "lore-btn lore-btn-sm", () => runBulkPatch("Set constant", { constant: true })), createButton("Clear constant", "lore-btn lore-btn-sm", () => runBulkPatch("Clear constant", { constant: false })), createButton("Disable all", "lore-btn lore-btn-sm", () => runBulkPatch("Disable all", { disabled: true })), createButton("Enable all", "lore-btn lore-btn-sm", () => runBulkPatch("Enable all", { disabled: false })), createButton("Set selective", "lore-btn lore-btn-sm", () => runBulkPatch("Set selective", { selective: true })), createButton("Clear selective", "lore-btn lore-btn-sm", () => runBulkPatch("Clear selective", { selective: false })));
+      bulkActions.appendChild(bulkCluster);
+      panel.appendChild(bulkActions);
       const actions2 = createElement("div", "lore-actions");
       actions2.classList.add("lore-editor-actions");
       actions2.append(createButton("Create child", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
@@ -4088,7 +4304,7 @@ function setup(ctx) {
         });
       }));
       panel.appendChild(actions2);
-      if (locked)
+      if (editingLocked)
         disableInteractive(panel);
       return panel;
     }
@@ -4117,6 +4333,15 @@ function setup(ctx) {
       draft.location = locationSelect.value;
     });
     form.appendChild(createField("Location", locationSelect));
+    const nativeFlags = createElement("div", "lore-field-span");
+    nativeFlags.append(createElement("span", "lore-label", "Native flags"), createSwitch("Disabled", draft.disabled, (next) => {
+      draft.disabled = next;
+    }), createSwitch("Constant", draft.constant, (next) => {
+      draft.constant = next;
+    }), createSwitch("Selective", draft.selective, (next) => {
+      draft.selective = next;
+    }), createFieldNote("These are native lorebook entry flags. Constant entries are reserved outside Lore Recall's dynamic retrieval budget."));
+    form.appendChild(nativeFlags);
     form.appendChild(createField("Aliases", createTextInput(joinCommaList(draft.aliases), "Comma-separated, e.g. Aria, Commander", (next) => {
       draft.aliases = splitCommaList(next);
     }), true));
@@ -4161,6 +4386,16 @@ function setup(ctx) {
           tags: draft.tags
         }
       });
+      sendToBackend(ctx, {
+        type: "patch_entry_flags",
+        entryIds: [entry.entryId],
+        chatId: currentState?.activeChatId,
+        patch: {
+          disabled: draft.disabled,
+          constant: draft.constant,
+          selective: draft.selective
+        }
+      });
       const target = draft.location === "unassigned" ? "unassigned" : draft.location === "root" ? "root" : { categoryId: draft.location };
       sendToBackend(ctx, {
         type: "assign_entries",
@@ -4171,7 +4406,7 @@ function setup(ctx) {
       });
     }));
     panel.appendChild(actions);
-    if (locked)
+    if (editingLocked)
       disableInteractive(panel);
     return panel;
   }

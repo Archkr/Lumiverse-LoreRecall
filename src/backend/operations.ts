@@ -28,6 +28,7 @@ import type {
   EntryRecallMeta,
   ExportSnapshot,
   GlobalLoreRecallSettings,
+  NativeEntryFlagPatch,
   OperationIssue,
 } from "../types";
 import type { IndexedEntry, RuntimeBook } from "./contracts";
@@ -734,6 +735,8 @@ async function generateEntrySummaryBatch(
 export async function updateEntryMeta(entryId: string, meta: EntryRecallMeta, userId: string): Promise<void> {
   const entry = await spindle.world_books.entries.get(entryId, userId);
   if (!entry) throw new Error("That world book entry no longer exists.");
+  const config = await loadBookConfig(entry.world_book_id, userId);
+  if (!canEditBook(config)) throw new Error("This book is read-only inside Lore Recall.");
   const nextMeta = normalizeEntryMetaForWrite(meta, { entryId: entry.id, comment: entry.comment, key: entry.key });
   await spindle.world_books.entries.update(
     entry.id,
@@ -749,6 +752,55 @@ export async function updateEntryMeta(entryId: string, meta: EntryRecallMeta, us
     userId,
   );
   await invalidateBookCache(entry.world_book_id, userId);
+}
+
+function normalizeEntryFlagPatch(patch: NativeEntryFlagPatch): NativeEntryFlagPatch {
+  const next: NativeEntryFlagPatch = {};
+  if (typeof patch.disabled === "boolean") next.disabled = patch.disabled;
+  if (typeof patch.constant === "boolean") next.constant = patch.constant;
+  if (typeof patch.selective === "boolean") next.selective = patch.selective;
+  return next;
+}
+
+export async function patchEntryFlags(entryIds: string[], patch: NativeEntryFlagPatch, userId: string): Promise<void> {
+  const normalizedPatch = normalizeEntryFlagPatch(patch);
+  const patchKeys = Object.keys(normalizedPatch);
+  if (!patchKeys.length) return;
+
+  const ids = uniqueStrings(entryIds);
+  if (!ids.length) return;
+
+  const entries = (
+    await Promise.all(ids.map((entryId) => spindle.world_books.entries.get(entryId, userId).catch(() => null)))
+  ).filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  if (!entries.length) return;
+
+  const configByBookId = new Map<string, Awaited<ReturnType<typeof loadBookConfig>>>();
+  for (const entry of entries) {
+    if (!configByBookId.has(entry.world_book_id)) {
+      configByBookId.set(entry.world_book_id, await loadBookConfig(entry.world_book_id, userId));
+    }
+    const config = configByBookId.get(entry.world_book_id);
+    if (!config || !canEditBook(config)) {
+      throw new Error("One or more targeted books are read-only inside Lore Recall.");
+    }
+  }
+
+  const touchedBookIds = new Set<string>();
+  for (const entry of entries) {
+    await spindle.world_books.entries.update(
+      entry.id,
+      {
+        disabled: normalizedPatch.disabled ?? entry.disabled ?? false,
+        constant: normalizedPatch.constant ?? entry.constant ?? false,
+        selective: normalizedPatch.selective ?? entry.selective ?? false,
+      },
+      userId,
+    );
+    touchedBookIds.add(entry.world_book_id);
+  }
+
+  await Promise.all(Array.from(touchedBookIds).map((bookId) => invalidateBookCache(bookId, userId)));
 }
 
 function getMetadataCategoryPath(entry: IndexedEntry): string[] {

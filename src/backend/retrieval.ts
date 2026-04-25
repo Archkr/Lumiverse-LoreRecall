@@ -128,6 +128,7 @@ const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
 const RECENT_MESSAGE_LIMIT = 500;
 const MAX_SCOPE_CHOICES = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
+const EMPTY_ENTRY_ID_SET = new Set<string>();
 
 const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
   "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
@@ -563,15 +564,64 @@ function buildDeterministicSelection(
     .map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
 }
 
-function summarizeSelection(selection: ScoredEntry[]): string {
-  if (!selection.length) return "No entries selected.";
+function getDynamicEntryLimit(config: CharacterRetrievalConfig, remainingDynamicSlots: number): number {
+  if (remainingDynamicSlots <= 0) return 0;
+  return clampInt(Math.min(config.maxResults, remainingDynamicSlots), 1, 32);
+}
+
+function collectReservedConstantEntries(books: RuntimeBook[]): ScoredEntry[] {
+  const reserved: ScoredEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const book of books) {
+    for (const entry of book.cache.entries) {
+      if (!entry.constant || entry.disabled || seen.has(entry.entryId)) continue;
+      seen.add(entry.entryId);
+      reserved.push({
+        entry,
+        score: 0,
+        reasons: ["constant"],
+        selectionRole: "score_fallback",
+      });
+    }
+  }
+
+  return reserved.sort(
+    (left, right) =>
+      left.entry.worldBookName.localeCompare(right.entry.worldBookName) ||
+      left.entry.label.localeCompare(right.entry.label),
+  );
+}
+
+function summarizeSelection(
+  selection: ScoredEntry[],
+  reservedConstantCount = 0,
+  remainingDynamicSlots?: number,
+): string {
+  if (!selection.length) {
+    if (reservedConstantCount > 0) {
+      const free = typeof remainingDynamicSlots === "number" ? ` ${Math.max(0, remainingDynamicSlots)} dynamic slot(s) remained free.` : "";
+      return `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
+    }
+    return "No entries selected.";
+  }
   const mentionCount = selection.filter(
     (item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention",
   ).length;
+  const reservedPrefix =
+    reservedConstantCount > 0 ? `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
+  const freeSuffix =
+    typeof remainingDynamicSlots === "number" ? ` Dynamic slot budget after constants: ${Math.max(0, remainingDynamicSlots)}.` : "";
   if (mentionCount > 0) {
-    return `Final selection contains ${selection.length} entry candidate(s), led by direct query mentions.`;
+    return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(
+      /^f/,
+      (match) => match.toUpperCase(),
+    );
   }
-  return `Final selection contains ${selection.length} entry candidate(s) from the chosen node manifests.`;
+  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(
+    /^f/,
+    (match) => match.toUpperCase(),
+  );
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
@@ -661,13 +711,16 @@ function scoreEntry(
   score += breadcrumbMatches * 2;
   score += commentMatches * 2;
   score += groupMatches;
-  if (entry.constant) score += 0.2;
   if (entry.selective) score += 0.1;
 
   return { entry, score, reasons: Array.from(new Set(reasons)) };
 }
 
-function scoreEntries(queryText: string, books: RuntimeBook[]): ScoredEntry[] {
+function scoreEntries(
+  queryText: string,
+  books: RuntimeBook[],
+  excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+): ScoredEntry[] {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
   if (!normalized || !queryTokens.length) return [];
@@ -675,7 +728,7 @@ function scoreEntries(queryText: string, books: RuntimeBook[]): ScoredEntry[] {
   return books
     .flatMap((book) =>
       book.cache.entries
-        .filter((entry) => !entry.disabled)
+        .filter((entry) => !entry.disabled && !excludedEntryIds.has(entry.entryId))
         .map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens)),
     )
     .filter((item) => item.score > 0)
@@ -953,14 +1006,13 @@ async function maybeSelectEntries(
   controller: ControllerSession,
   allowController: boolean,
   scopes: TraversalScope[] = [],
+  maxFinalEntries = clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
 ): Promise<ScoredEntry[]> {
   const rankedCandidates = rankSelectionCandidates(queryText, candidates, scopes);
-  const maxFinalEntries = Math.min(
-    candidates.length,
-    clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
-  );
+  const clampedFinalEntries = Math.min(candidates.length, Math.max(0, maxFinalEntries));
+  if (!clampedFinalEntries) return [];
   const buildScopedFallbackSelection = (): ScoredEntry[] =>
-    buildDeterministicSelection(rankedCandidates, maxFinalEntries);
+    buildDeterministicSelection(rankedCandidates, clampedFinalEntries);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
 
@@ -974,7 +1026,7 @@ async function maybeSelectEntries(
   const prompt = [
     "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${maxFinalEntries} entryIds from the manifests below.`,
+    `Choose up to ${clampedFinalEntries} entryIds from the manifests below.`,
     "Use only entryIds that appear in the manifests.",
     "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
@@ -1028,7 +1080,7 @@ async function maybeSelectEntries(
   const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
   const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
   const selectedAllManifestEntries =
-    rankedCandidates.length > maxFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
+    rankedCandidates.length > clampedFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
   const invalidSelectionReasons: string[] = [];
 
   if (!hasExplicitEntryIds) {
@@ -1040,14 +1092,14 @@ async function maybeSelectEntries(
   if (unmappedIds.length) {
     invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
   }
-  if (mappedIds.length > maxFinalEntries) {
+  if (mappedIds.length > clampedFinalEntries) {
     invalidSelectionReasons.push(
-      `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${maxFinalEntries}.`,
+      `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`,
     );
   }
   if (selectedAllManifestEntries) {
     invalidSelectionReasons.push(
-      `Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${maxFinalEntries}).`,
+      `Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${clampedFinalEntries}).`,
     );
   }
 
@@ -1058,7 +1110,7 @@ async function maybeSelectEntries(
       item: createFeedItem(
         "issue",
         "Manifest selection fell back",
-        `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${maxFinalEntries}.`,
+        `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${clampedFinalEntries}.`,
         {
           phase: "manifest_select",
           tone: "warn",
@@ -1072,7 +1124,7 @@ async function maybeSelectEntries(
   const mappedIdSet = new Set(mappedIds);
   const chosen = rankedCandidates
     .filter((item) => mappedIdSet.has(item.candidate.entry.entryId))
-    .slice(0, maxFinalEntries)
+    .slice(0, clampedFinalEntries)
     .map((item) => item.candidate);
 
   return chosen.length ? chosen : buildScopedFallbackSelection();
@@ -1228,6 +1280,7 @@ function collectCandidatesForScopes(
   directEntryIds: string[] = [],
   fallbackById?: Map<string, ScoredEntry>,
   preserveScopeOrder = false,
+  excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
 ): ScoredEntry[] {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
@@ -1238,6 +1291,7 @@ function collectCandidatesForScopes(
     const entriesById = new Map(scope.book.cache.entries.map((entry) => [entry.entryId, entry]));
     for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
       if (seen.has(entryId)) continue;
+      if (excludedEntryIds.has(entryId)) continue;
       const entry = entriesById.get(entryId);
       if (!entry || entry.disabled) continue;
       seen.add(entryId);
@@ -1255,6 +1309,7 @@ function collectCandidatesForScopes(
     const allBooks = new Map(scopes.map((scope) => [scope.book.summary.id, scope.book]));
     for (const entryId of directEntryIds) {
       if (seen.has(entryId)) continue;
+      if (excludedEntryIds.has(entryId)) continue;
       let resolved = false;
       for (const book of allBooks.values()) {
         const entriesById = new Map(book.cache.entries.map((entry) => [entry.entryId, entry]));
@@ -1804,6 +1859,8 @@ async function selectEntriesForScopes(
   allowController: boolean,
   deterministicById: Map<string, ScoredEntry>,
   trace: TraversalTraceStep[],
+  maxDynamicEntries: number,
+  excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
 ): Promise<EntrySelectionResult> {
   const fallbackPath: string[] = [];
   let activeScopes = dedupeScopes(scopes);
@@ -1815,6 +1872,7 @@ async function selectEntriesForScopes(
     [],
     deterministicById,
     !config.selectiveRetrieval,
+    excludedEntryIds,
   );
   const rankedCandidates = rankSelectionCandidates(recentConversation, rawCandidates, activeScopes);
   const candidates = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
@@ -1835,19 +1893,23 @@ async function selectEntriesForScopes(
   let selected: ScoredEntry[];
   if (config.selectiveRetrieval) {
     const beforeCalls = controller.callCount;
-    selected = await maybeSelectEntries(recentConversation, candidates, config, controller, allowController, activeScopes);
+    selected = await maybeSelectEntries(
+      recentConversation,
+      candidates,
+      config,
+      controller,
+      allowController,
+      activeScopes,
+      maxDynamicEntries,
+    );
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
-    const maxFinalEntries = Math.min(
-      candidates.length,
-      clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
-    );
     pushTrace(
       trace,
       "manifest_select",
       "Select manifest entries",
-      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final entry candidate(s) were selected for injection (cap ${maxFinalEntries}).`,
+      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`,
       { entryCount: selected.length },
     );
   } else {
@@ -2456,7 +2518,30 @@ export async function buildRetrievalPreview(
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const trace = createTraceBuffer(reportProgress);
   trace.push(...chosenBooksResult.trace);
-  const deterministic = scoreEntries(recentConversation, chosenBooks);
+  const reservedConstants = collectReservedConstantEntries(chosenBooks);
+  const reservedConstantCount = reservedConstants.length;
+  const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
+  const configuredInjectCap = clampInt(config.tokenBudget, 1, 32);
+  const remainingDynamicSlots = Math.max(0, configuredInjectCap - reservedConstantCount);
+  const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
+  const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
+  if (reservedConstantCount) {
+    const reservedSummary = `Reserved ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} before dynamic retrieval, leaving ${remainingDynamicSlots} dynamic slot(s).`;
+    steps.push(reservedSummary);
+    pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("reserved", "Reserved constants", reservedSummary, {
+        phase: "inject",
+        count: reservedConstantCount,
+        entries: reservedConstantNodes,
+        tone: "info",
+      }),
+    });
+  } else {
+    steps.push(`No native constant entries were reserved; ${remainingDynamicSlots} dynamic slot(s) are available.`);
+  }
+  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes: TraversalScope[] = [];
   let pulledCandidates: ScoredEntry[] = [];
@@ -2466,7 +2551,9 @@ export async function buildRetrievalPreview(
   let entrySelectionDurationMs: number | null = null;
   const fallbackPath: string[] = [];
 
-  if (!deterministic.length) {
+  if (remainingDynamicSlots <= 0) {
+    steps.push("Reserved constants consumed the full injection budget, so Lore Recall skipped dynamic retrieval.");
+  } else if (!deterministic.length) {
     fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
@@ -2513,6 +2600,8 @@ export async function buildRetrievalPreview(
       allowController,
       deterministicById,
       trace,
+      maxDynamicEntries,
+      reservedEntryIds,
     );
     entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
     selectedScopes = entrySelection.scopes;
@@ -2600,7 +2689,7 @@ export async function buildRetrievalPreview(
     });
   }
 
-  const maxInjectedEntries = clampInt(config.tokenBudget, 1, 32);
+  const maxInjectedEntries = remainingDynamicSlots;
   if (config.selectiveRetrieval && selected.length > maxInjectedEntries) {
     spindle.log.warn(
       `Lore Recall selective retrieval exceeded the inject cap before prompt assembly (${selected.length} > ${maxInjectedEntries}); applying safety clamp.`,
@@ -2624,11 +2713,12 @@ export async function buildRetrievalPreview(
   }
 
   const injectionStartedAt = Date.now();
-  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const injection =
+    remainingDynamicSlots > 0 ? buildInjectionText(selected, booksById, remainingDynamicSlots, config.collapsedDepth) : null;
   const injectionDurationMs = Date.now() - injectionStartedAt;
   const included = injection?.included ?? selected;
   const injectedNodes = buildPreviewNodes(included, booksById);
-  const selectionSummary = summarizeSelection(selected);
+  const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
 
   if (injection?.included.length) {
     pushTrace(
@@ -2654,16 +2744,31 @@ export async function buildRetrievalPreview(
       ),
     });
   } else {
+    const skippedSummary =
+      reservedConstantCount > 0 && remainingDynamicSlots <= 0
+        ? `Reserved constants consumed the full injection budget, so Lore Recall injected no additional dynamic entries.`
+        : reservedConstantCount > 0
+          ? `No additional dynamic entries were injected after reserving ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}.`
+          : "No retrieved entries were injected for this turn.";
+    if (reservedConstantCount > 0 && remainingDynamicSlots <= 0) {
+      pushTrace(
+        trace,
+        "inject",
+        "Dynamic injection skipped",
+        skippedSummary,
+        { entryCount: 0, durationMs: injectionDurationMs },
+      );
+    }
     emitProgress(reportProgress, {
       type: "item",
       item: createFeedItem(
         "injected",
         "Injection skipped",
-        "No retrieved entries were injected for this turn.",
+        skippedSummary,
         {
           phase: "inject",
           count: 0,
-          tone: selected.length ? "warn" : "info",
+          tone: selected.length ? "warn" : reservedConstantCount > 0 ? "success" : "info",
           durationMs: injectionDurationMs,
         },
       ),
@@ -2698,9 +2803,12 @@ export async function buildRetrievalPreview(
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
     selectionSummary,
+    reservedConstantCount,
+    remainingDynamicSlots,
     selectedScopes: selectedScopePreviews,
     retrievedScopes: selectedScopePreviews,
     scopeManifestCounts,
+    reservedConstantNodes,
     pulledNodes,
     injectedNodes,
     manifestSelectedEntries,

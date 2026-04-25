@@ -191,6 +191,12 @@ export interface TraversalTraceStep {
   entryCount?: number | null;
 }
 
+export interface NativeEntryFlagPatch {
+  disabled?: boolean;
+  constant?: boolean;
+  selective?: boolean;
+}
+
 export interface RetrievalPreview {
   mode: SearchMode;
   queryText: string;
@@ -198,9 +204,12 @@ export interface RetrievalPreview {
   estimatedTokens: number;
   injectedText: string;
   selectionSummary?: string;
+  reservedConstantCount: number;
+  remainingDynamicSlots: number;
   selectedScopes: PreviewScope[];
   retrievedScopes: PreviewScope[];
   scopeManifestCounts: PreviewScopeManifest[];
+  reservedConstantNodes: PreviewNode[];
   pulledNodes: PreviewNode[];
   injectedNodes: PreviewNode[];
   manifestSelectedEntries: PreviewNode[];
@@ -216,7 +225,7 @@ export interface RetrievalPreview {
   resolvedConnectionId?: string | null;
 }
 
-export type RetrievalFeedItemKind = "trace" | "scope" | "manifest" | "pulled" | "injected" | "issue";
+export type RetrievalFeedItemKind = "trace" | "scope" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
 export type RetrievalFeedItemTone = "info" | "warn" | "error" | "success";
 export type RetrievalSessionStatus = "running" | "completed" | "fallback" | "failed";
 
@@ -374,6 +383,12 @@ export type FrontendToBackend =
       entryId: string;
       chatId?: string | null;
       meta: EntryRecallMeta;
+    }
+  | {
+      type: "patch_entry_flags";
+      entryIds: string[];
+      chatId?: string | null;
+      patch: NativeEntryFlagPatch;
     }
   | {
       type: "save_category";

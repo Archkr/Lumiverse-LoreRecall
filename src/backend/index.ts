@@ -27,6 +27,7 @@ import {
   exportSnapshot,
   importSnapshot,
   moveCategory,
+  patchEntryFlags,
   regenerateSummaries,
   updateCategory,
   updateEntryMeta,
@@ -727,6 +728,11 @@ spindle.onFrontendMessage(async (payload, userId) => {
 
       case "save_entry_meta":
         await updateEntryMeta(message.entryId, message.meta, userId);
+        await pushState(userId, message.chatId);
+        break;
+
+      case "patch_entry_flags":
+        await patchEntryFlags(message.entryIds, message.patch, userId);
         await pushState(userId, message.chatId);
         break;
 

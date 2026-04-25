@@ -865,6 +865,10 @@ export const LORE_RECALL_CSS = `
   border-color: color-mix(in srgb, var(--lr-good) 32%, var(--lr-line));
 }
 
+.lore-retrieval-card.reserved {
+  border-color: color-mix(in srgb, var(--lr-warn) 28%, var(--lr-line));
+}
+
 .lore-retrieval-card.pulled {
   border-color: color-mix(in srgb, var(--lr-acc) 28%, var(--lr-line));
 }
@@ -1529,6 +1533,10 @@ export const LORE_RECALL_CSS = `
   gap: 1px;
 }
 
+.lore-tree-controls {
+  margin-bottom: 8px;
+}
+
 .lore-tree-group {
   padding: 12px 8px 4px;
   font-size: 10.5px;
@@ -1559,6 +1567,42 @@ export const LORE_RECALL_CSS = `
   text-overflow: ellipsis;
   transition: background var(--lr-t), color var(--lr-t);
   letter-spacing: 0;
+}
+
+.lore-tree-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+}
+
+.lore-tree-node .lore-tree-row {
+  padding-left: 8px !important;
+}
+
+.lore-tree-disclosure {
+  appearance: none;
+  width: 18px;
+  height: 28px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lr-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.lore-tree-disclosure:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lr-text) 5%, transparent);
+}
+
+.lore-tree-disclosure.empty {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.lore-tree-disclosure:disabled {
+  opacity: 0.45;
 }
 
 .lore-tree-row > span {

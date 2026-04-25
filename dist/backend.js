@@ -954,6 +954,7 @@ var TRAVERSAL_FULL_OVERVIEW_LIMIT = 1e4;
 var RECENT_MESSAGE_LIMIT = 500;
 var MAX_SCOPE_CHOICES = 5;
 var DOCUMENT_CHOICE_PREFIX = "doc:";
+var EMPTY_ENTRY_ID_SET = new Set;
 var RETRIEVAL_SCOPE_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 var RETRIEVAL_BOOK_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only lore book IDs from the provided list. Return only the requested JSON with no commentary or markdown.";
 function createTraceBuffer(reporter) {
@@ -1192,14 +1193,44 @@ function buildDeterministicSelection(rankedCandidates, maxResults) {
     return [];
   return rankedCandidates.slice(0, maxResults).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
 }
-function summarizeSelection(selection) {
-  if (!selection.length)
-    return "No entries selected.";
-  const mentionCount = selection.filter((item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention").length;
-  if (mentionCount > 0) {
-    return `Final selection contains ${selection.length} entry candidate(s), led by direct query mentions.`;
+function getDynamicEntryLimit(config, remainingDynamicSlots) {
+  if (remainingDynamicSlots <= 0)
+    return 0;
+  return clampInt(Math.min(config.maxResults, remainingDynamicSlots), 1, 32);
+}
+function collectReservedConstantEntries(books) {
+  const reserved = [];
+  const seen = new Set;
+  for (const book of books) {
+    for (const entry of book.cache.entries) {
+      if (!entry.constant || entry.disabled || seen.has(entry.entryId))
+        continue;
+      seen.add(entry.entryId);
+      reserved.push({
+        entry,
+        score: 0,
+        reasons: ["constant"],
+        selectionRole: "score_fallback"
+      });
+    }
   }
-  return `Final selection contains ${selection.length} entry candidate(s) from the chosen node manifests.`;
+  return reserved.sort((left, right) => left.entry.worldBookName.localeCompare(right.entry.worldBookName) || left.entry.label.localeCompare(right.entry.label));
+}
+function summarizeSelection(selection, reservedConstantCount = 0, remainingDynamicSlots) {
+  if (!selection.length) {
+    if (reservedConstantCount > 0) {
+      const free = typeof remainingDynamicSlots === "number" ? ` ${Math.max(0, remainingDynamicSlots)} dynamic slot(s) remained free.` : "";
+      return `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
+    }
+    return "No entries selected.";
+  }
+  const mentionCount = selection.filter((item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention").length;
+  const reservedPrefix = reservedConstantCount > 0 ? `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
+  const freeSuffix = typeof remainingDynamicSlots === "number" ? ` Dynamic slot budget after constants: ${Math.max(0, remainingDynamicSlots)}.` : "";
+  if (mentionCount > 0) {
+    return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
+  }
+  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
 }
 function getEntryBody(entry) {
   return entry.collapsedText.trim() || entry.content.trim();
@@ -1284,18 +1315,16 @@ function scoreEntry(entry, tree, queryText, queryTokens) {
   score += breadcrumbMatches * 2;
   score += commentMatches * 2;
   score += groupMatches;
-  if (entry.constant)
-    score += 0.2;
   if (entry.selective)
     score += 0.1;
   return { entry, score, reasons: Array.from(new Set(reasons)) };
 }
-function scoreEntries(queryText, books) {
+function scoreEntries(queryText, books, excludedEntryIds = EMPTY_ENTRY_ID_SET) {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
   if (!normalized || !queryTokens.length)
     return [];
-  return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
+  return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled && !excludedEntryIds.has(entry.entryId)).map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
 }
 async function runControllerJson2(prompt, controller, systemPrompt, requestLabel = "Controller request") {
   if (controller.callCount >= CONTROLLER_MAX_CALLS) {
@@ -1446,10 +1475,12 @@ async function maybeChooseBooks(recentConversation, books, config, controller, a
   pushTrace(trace, "choose_book", "Book selection", nextBooks.length ? `Controller selected ${nextBooks.length} book(s): ${nextBooks.map((book) => book.summary.name).join(", ")}.` : "Controller kept all readable books in scope.", { entryCount: nextBooks.reduce((total, book) => total + book.cache.entries.length, 0) });
   return { books: nextBooks, trace };
 }
-async function maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes = []) {
+async function maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes = [], maxFinalEntries = clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32)) {
   const rankedCandidates = rankSelectionCandidates(queryText, candidates, scopes);
-  const maxFinalEntries = Math.min(candidates.length, clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32));
-  const buildScopedFallbackSelection = () => buildDeterministicSelection(rankedCandidates, maxFinalEntries);
+  const clampedFinalEntries = Math.min(candidates.length, Math.max(0, maxFinalEntries));
+  if (!clampedFinalEntries)
+    return [];
+  const buildScopedFallbackSelection = () => buildDeterministicSelection(rankedCandidates, clampedFinalEntries);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
   if (!config.selectiveRetrieval || !rankedCandidates.length) {
@@ -1461,7 +1492,7 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   const prompt = [
     "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${maxFinalEntries} entryIds from the manifests below.`,
+    `Choose up to ${clampedFinalEntries} entryIds from the manifests below.`,
     "Use only entryIds that appear in the manifests.",
     "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
@@ -1490,7 +1521,7 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   const uniqueRequestedIds = uniqueStrings(requestedIds);
   const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
   const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
-  const selectedAllManifestEntries = rankedCandidates.length > maxFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
+  const selectedAllManifestEntries = rankedCandidates.length > clampedFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
   const invalidSelectionReasons = [];
   if (!hasExplicitEntryIds) {
     invalidSelectionReasons.push("Controller did not return an entryIds array.");
@@ -1501,17 +1532,17 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   if (unmappedIds.length) {
     invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
   }
-  if (mappedIds.length > maxFinalEntries) {
-    invalidSelectionReasons.push(`Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${maxFinalEntries}.`);
+  if (mappedIds.length > clampedFinalEntries) {
+    invalidSelectionReasons.push(`Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`);
   }
   if (selectedAllManifestEntries) {
-    invalidSelectionReasons.push(`Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${maxFinalEntries}).`);
+    invalidSelectionReasons.push(`Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${clampedFinalEntries}).`);
   }
   if (invalidSelectionReasons.length) {
     spindle.log.warn(`Lore Recall manifest selection fell back to deterministic final ranking: ${invalidSelectionReasons.join(" ")}`);
     emitProgress(controller.reportProgress, {
       type: "item",
-      item: createFeedItem("issue", "Manifest selection fell back", `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${maxFinalEntries}.`, {
+      item: createFeedItem("issue", "Manifest selection fell back", `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${clampedFinalEntries}.`, {
         phase: "manifest_select",
         tone: "warn",
         details: invalidSelectionReasons
@@ -1520,7 +1551,7 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     return buildScopedFallbackSelection();
   }
   const mappedIdSet = new Set(mappedIds);
-  const chosen = rankedCandidates.filter((item) => mappedIdSet.has(item.candidate.entry.entryId)).slice(0, maxFinalEntries).map((item) => item.candidate);
+  const chosen = rankedCandidates.filter((item) => mappedIdSet.has(item.candidate.entry.entryId)).slice(0, clampedFinalEntries).map((item) => item.candidate);
   return chosen.length ? chosen : buildScopedFallbackSelection();
 }
 function getDescendantCategoryIds(tree, nodeId, depthLimit) {
@@ -1638,7 +1669,7 @@ function buildScopedManifests(candidates, scopes) {
     };
   }).filter((item) => !!item);
 }
-function collectCandidatesForScopes(queryText, scopes, directEntryIds = [], fallbackById, preserveScopeOrder = false) {
+function collectCandidatesForScopes(queryText, scopes, directEntryIds = [], fallbackById, preserveScopeOrder = false, excludedEntryIds = EMPTY_ENTRY_ID_SET) {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
   const selected = [];
@@ -1647,6 +1678,8 @@ function collectCandidatesForScopes(queryText, scopes, directEntryIds = [], fall
     const entriesById = new Map(scope.book.cache.entries.map((entry) => [entry.entryId, entry]));
     for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
       if (seen.has(entryId))
+        continue;
+      if (excludedEntryIds.has(entryId))
         continue;
       const entry = entriesById.get(entryId);
       if (!entry || entry.disabled)
@@ -1665,6 +1698,8 @@ function collectCandidatesForScopes(queryText, scopes, directEntryIds = [], fall
     const allBooks = new Map(scopes.map((scope) => [scope.book.summary.id, scope.book]));
     for (const entryId of directEntryIds) {
       if (seen.has(entryId))
+        continue;
+      if (excludedEntryIds.has(entryId))
         continue;
       let resolved = false;
       for (const book of allBooks.values()) {
@@ -1996,11 +2031,11 @@ function populateScopeManifestSelections(scopeManifestCounts, selected, scopes) 
   }
   return previews;
 }
-async function selectEntriesForScopes(recentConversation, scopes, config, controller, allowController, deterministicById, trace) {
+async function selectEntriesForScopes(recentConversation, scopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, excludedEntryIds = EMPTY_ENTRY_ID_SET) {
   const fallbackPath = [];
   let activeScopes = dedupeScopes(scopes);
   let selectionReason = null;
-  const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval);
+  const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval, excludedEntryIds);
   const rankedCandidates = rankSelectionCandidates(recentConversation, rawCandidates, activeScopes);
   const candidates = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(candidates, activeScopes);
@@ -2018,12 +2053,11 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
   let selected;
   if (config.selectiveRetrieval) {
     const beforeCalls = controller.callCount;
-    selected = await maybeSelectEntries(recentConversation, candidates, config, controller, allowController, activeScopes);
+    selected = await maybeSelectEntries(recentConversation, candidates, config, controller, allowController, activeScopes, maxDynamicEntries);
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
-    const maxFinalEntries = Math.min(candidates.length, clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32));
-    pushTrace(trace, "manifest_select", "Select manifest entries", `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final entry candidate(s) were selected for injection (cap ${maxFinalEntries}).`, { entryCount: selected.length });
+    pushTrace(trace, "manifest_select", "Select manifest entries", `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`, { entryCount: selected.length });
   } else {
     selected = candidates;
     pushTrace(trace, "retrieve", "Resolve scoped entries", `Resolved ${selected.length} scoped entry candidate(s) directly from ${Math.max(activeScopes.length, 1)} chosen scope(s).`, { entryCount: selected.length });
@@ -2206,7 +2240,30 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   const booksById = new Map(chosenBooks.map((book) => [book.summary.id, book]));
   const trace = createTraceBuffer(reportProgress);
   trace.push(...chosenBooksResult.trace);
-  const deterministic = scoreEntries(recentConversation, chosenBooks);
+  const reservedConstants = collectReservedConstantEntries(chosenBooks);
+  const reservedConstantCount = reservedConstants.length;
+  const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
+  const configuredInjectCap = clampInt(config.tokenBudget, 1, 32);
+  const remainingDynamicSlots = Math.max(0, configuredInjectCap - reservedConstantCount);
+  const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
+  const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
+  if (reservedConstantCount) {
+    const reservedSummary = `Reserved ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} before dynamic retrieval, leaving ${remainingDynamicSlots} dynamic slot(s).`;
+    steps.push(reservedSummary);
+    pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
+    emitProgress(reportProgress, {
+      type: "item",
+      item: createFeedItem("reserved", "Reserved constants", reservedSummary, {
+        phase: "inject",
+        count: reservedConstantCount,
+        entries: reservedConstantNodes,
+        tone: "info"
+      })
+    });
+  } else {
+    steps.push(`No native constant entries were reserved; ${remainingDynamicSlots} dynamic slot(s) are available.`);
+  }
+  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes = [];
   let pulledCandidates = [];
@@ -2215,7 +2272,9 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   let selectionReason = "";
   let entrySelectionDurationMs = null;
   const fallbackPath = [];
-  if (!deterministic.length) {
+  if (remainingDynamicSlots <= 0) {
+    steps.push("Reserved constants consumed the full injection budget, so Lore Recall skipped dynamic retrieval.");
+  } else if (!deterministic.length) {
     fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
@@ -2243,7 +2302,7 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
       });
     }
     const entrySelectionStartedAt = Date.now();
-    const entrySelection = await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace);
+    const entrySelection = await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, reservedEntryIds);
     entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
     selectedScopes = entrySelection.scopes;
     pulledCandidates = entrySelection.candidates;
@@ -2304,7 +2363,7 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
       })
     });
   }
-  const maxInjectedEntries = clampInt(config.tokenBudget, 1, 32);
+  const maxInjectedEntries = remainingDynamicSlots;
   if (config.selectiveRetrieval && selected.length > maxInjectedEntries) {
     spindle.log.warn(`Lore Recall selective retrieval exceeded the inject cap before prompt assembly (${selected.length} > ${maxInjectedEntries}); applying safety clamp.`);
     emitProgress(reportProgress, {
@@ -2320,11 +2379,11 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     });
   }
   const injectionStartedAt = Date.now();
-  const injection = buildInjectionText(selected, booksById, config.tokenBudget, config.collapsedDepth);
+  const injection = remainingDynamicSlots > 0 ? buildInjectionText(selected, booksById, remainingDynamicSlots, config.collapsedDepth) : null;
   const injectionDurationMs = Date.now() - injectionStartedAt;
   const included = injection?.included ?? selected;
   const injectedNodes = buildPreviewNodes(included, booksById);
-  const selectionSummary = summarizeSelection(selected);
+  const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
   if (injection?.included.length) {
     pushTrace(trace, "inject", "Inject entries", `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`, { entryCount: injection.included.length, durationMs: injectionDurationMs });
     emitProgress(reportProgress, {
@@ -2338,12 +2397,16 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
       })
     });
   } else {
+    const skippedSummary = reservedConstantCount > 0 && remainingDynamicSlots <= 0 ? `Reserved constants consumed the full injection budget, so Lore Recall injected no additional dynamic entries.` : reservedConstantCount > 0 ? `No additional dynamic entries were injected after reserving ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}.` : "No retrieved entries were injected for this turn.";
+    if (reservedConstantCount > 0 && remainingDynamicSlots <= 0) {
+      pushTrace(trace, "inject", "Dynamic injection skipped", skippedSummary, { entryCount: 0, durationMs: injectionDurationMs });
+    }
     emitProgress(reportProgress, {
       type: "item",
-      item: createFeedItem("injected", "Injection skipped", "No retrieved entries were injected for this turn.", {
+      item: createFeedItem("injected", "Injection skipped", skippedSummary, {
         phase: "inject",
         count: 0,
-        tone: selected.length ? "warn" : "info",
+        tone: selected.length ? "warn" : reservedConstantCount > 0 ? "success" : "info",
         durationMs: injectionDurationMs
       })
     });
@@ -2375,9 +2438,12 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
     selectionSummary,
+    reservedConstantCount,
+    remainingDynamicSlots,
     selectedScopes: selectedScopePreviews,
     retrievedScopes: selectedScopePreviews,
     scopeManifestCounts,
+    reservedConstantNodes,
     pulledNodes,
     injectedNodes,
     manifestSelectedEntries,
@@ -2833,6 +2899,9 @@ async function updateEntryMeta(entryId, meta, userId) {
   const entry = await spindle.world_books.entries.get(entryId, userId);
   if (!entry)
     throw new Error("That world book entry no longer exists.");
+  const config = await loadBookConfig(entry.world_book_id, userId);
+  if (!canEditBook(config))
+    throw new Error("This book is read-only inside Lore Recall.");
   const nextMeta = normalizeEntryMetaForWrite(meta, { entryId: entry.id, comment: entry.comment, key: entry.key });
   await spindle.world_books.entries.update(entry.id, {
     extensions: {
@@ -2844,6 +2913,48 @@ async function updateEntryMeta(entryId, meta, userId) {
     }
   }, userId);
   await invalidateBookCache(entry.world_book_id, userId);
+}
+function normalizeEntryFlagPatch(patch) {
+  const next = {};
+  if (typeof patch.disabled === "boolean")
+    next.disabled = patch.disabled;
+  if (typeof patch.constant === "boolean")
+    next.constant = patch.constant;
+  if (typeof patch.selective === "boolean")
+    next.selective = patch.selective;
+  return next;
+}
+async function patchEntryFlags(entryIds, patch, userId) {
+  const normalizedPatch = normalizeEntryFlagPatch(patch);
+  const patchKeys = Object.keys(normalizedPatch);
+  if (!patchKeys.length)
+    return;
+  const ids = uniqueStrings(entryIds);
+  if (!ids.length)
+    return;
+  const entries = (await Promise.all(ids.map((entryId) => spindle.world_books.entries.get(entryId, userId).catch(() => null)))).filter((entry) => !!entry);
+  if (!entries.length)
+    return;
+  const configByBookId = new Map;
+  for (const entry of entries) {
+    if (!configByBookId.has(entry.world_book_id)) {
+      configByBookId.set(entry.world_book_id, await loadBookConfig(entry.world_book_id, userId));
+    }
+    const config = configByBookId.get(entry.world_book_id);
+    if (!config || !canEditBook(config)) {
+      throw new Error("One or more targeted books are read-only inside Lore Recall.");
+    }
+  }
+  const touchedBookIds = new Set;
+  for (const entry of entries) {
+    await spindle.world_books.entries.update(entry.id, {
+      disabled: normalizedPatch.disabled ?? entry.disabled ?? false,
+      constant: normalizedPatch.constant ?? entry.constant ?? false,
+      selective: normalizedPatch.selective ?? entry.selective ?? false
+    }, userId);
+    touchedBookIds.add(entry.world_book_id);
+  }
+  await Promise.all(Array.from(touchedBookIds).map((bookId) => invalidateBookCache(bookId, userId)));
 }
 function getMetadataCategoryPath(entry) {
   if (entry.groupName.trim())
@@ -4502,6 +4613,10 @@ spindle.onFrontendMessage(async (payload, userId) => {
         break;
       case "save_entry_meta":
         await updateEntryMeta(message.entryId, message.meta, userId);
+        await pushState(userId, message.chatId);
+        break;
+      case "patch_entry_flags":
+        await patchEntryFlags(message.entryIds, message.patch, userId);
         await pushState(userId, message.chatId);
         break;
       case "save_category":

@@ -8,6 +8,7 @@ import {
   normalizeCharacterConfig,
   normalizeGlobalSettings,
   splitCommaList,
+  uniqueStrings,
 } from "../shared";
 import type {
   BackendToFrontend,
@@ -51,7 +52,12 @@ const TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 type GlobalDraft = GlobalLoreRecallSettings;
 type CharacterDraft = CharacterRetrievalConfig;
 type BookDraft = { enabled: boolean; description: string; permission: BookPermission };
-type EntryDraft = EntryRecallMeta & { location: string };
+type EntryDraft = EntryRecallMeta & {
+  location: string;
+  disabled: boolean;
+  constant: boolean;
+  selective: boolean;
+};
 type CategoryDraft = { label: string; summary: string; collapsed: boolean; parentId: string };
 type NoticeTone = "error" | "warn" | "success" | "info";
 type WorkspaceSection = "sources" | "build" | "retrieval" | "book" | "maintenance";
@@ -116,6 +122,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let workspaceSection: WorkspaceSection = "sources";
   let selectedBookId: string | null = null;
   let selectedTreeByBook = new Map<string, TreeSelection>();
+  const collapsedTreeNodesByBook = new Map<string, Set<string>>();
   let globalDraft: GlobalDraft | null = null;
   let globalDraftKey = "";
   let characterDraft: CharacterDraft | null = null;
@@ -193,8 +200,69 @@ export function setup(ctx: SpindleFrontendContext) {
     return selectedTreeByBook.get(bookId) ?? null;
   }
 
+  function getCollapsedTreeNodes(bookId: string): Set<string> {
+    let existing = collapsedTreeNodesByBook.get(bookId);
+    if (!existing) {
+      existing = new Set<string>();
+      collapsedTreeNodesByBook.set(bookId, existing);
+    }
+    return existing;
+  }
+
+  function expandTreeAncestors(bookId: string, nodeId: string | null): void {
+    if (!nodeId) return;
+    const tree = getBookTree(bookId);
+    if (!tree) return;
+    const collapsed = getCollapsedTreeNodes(bookId);
+    let cursor: BookTreeIndex["nodes"][string] | undefined = tree.nodes[nodeId];
+    const visited = new Set<string>();
+    while (cursor && !visited.has(cursor.id)) {
+      visited.add(cursor.id);
+      collapsed.delete(cursor.id);
+      cursor = cursor.parentId ? tree.nodes[cursor.parentId] : undefined;
+    }
+  }
+
+  function revealSelectionInTree(bookId: string, selection: TreeSelection): void {
+    const tree = getBookTree(bookId);
+    if (!tree) return;
+    if (selection.kind === "category") {
+      expandTreeAncestors(bookId, selection.nodeId);
+      return;
+    }
+    if (selection.kind === "entry") {
+      const assigned = getAssignedCategoryId(tree, selection.entryId);
+      if (assigned !== "root" && assigned !== "unassigned") {
+        expandTreeAncestors(bookId, assigned);
+      }
+    }
+  }
+
+  function setTreeNodeCollapsed(bookId: string, nodeId: string, collapsed: boolean): void {
+    const set = getCollapsedTreeNodes(bookId);
+    if (collapsed) set.add(nodeId);
+    else set.delete(nodeId);
+  }
+
+  function getDescendantEntryIds(tree: BookTreeIndex, nodeId: string): string[] {
+    const collected: string[] = [];
+    const queue = [nodeId];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const currentId = queue.shift();
+      if (!currentId || seen.has(currentId)) continue;
+      seen.add(currentId);
+      const node = tree.nodes[currentId];
+      if (!node) continue;
+      collected.push(...node.entryIds);
+      for (const childId of node.childIds) queue.push(childId);
+    }
+    return collected;
+  }
+
   function setSelectedTree(bookId: string, selection: TreeSelection): void {
     selectedBookId = bookId;
+    revealSelectionInTree(bookId, selection);
     selectedTreeByBook.set(bookId, selection);
     render();
   }
@@ -229,12 +297,16 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const firstCategoryId = tree.nodes[tree.rootId]?.childIds[0];
     if (firstCategoryId) {
-      selectedTreeByBook.set(selectedBookId, { kind: "category", bookId: selectedBookId, nodeId: firstCategoryId });
+      const selection = { kind: "category", bookId: selectedBookId, nodeId: firstCategoryId } as const;
+      revealSelectionInTree(selectedBookId, selection);
+      selectedTreeByBook.set(selectedBookId, selection);
       return;
     }
     const firstEntryId = tree.nodes[tree.rootId]?.entryIds[0] ?? tree.unassignedEntryIds[0] ?? entries[0]?.entryId;
     if (firstEntryId) {
-      selectedTreeByBook.set(selectedBookId, { kind: "entry", bookId: selectedBookId, entryId: firstEntryId });
+      const selection = { kind: "entry", bookId: selectedBookId, entryId: firstEntryId } as const;
+      revealSelectionInTree(selectedBookId, selection);
+      selectedTreeByBook.set(selectedBookId, selection);
       return;
     }
     selectedTreeByBook.set(selectedBookId, { kind: "unassigned", bookId: selectedBookId });
@@ -286,6 +358,11 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!active) return false;
     if (active.scope?.bookId === bookId) return true;
     return !!active.scope?.bookIds?.includes(bookId);
+  }
+
+  function isBookReadOnly(bookId: string | null): boolean {
+    if (!bookId) return false;
+    return normalizeBookConfig(currentState?.bookConfigs[bookId]).permission === "read_only";
   }
 
   function pushNotice(notice: UiNotice): void {
@@ -550,6 +627,9 @@ export function setup(ctx: SpindleFrontendContext) {
       summary: entry.summary,
       collapsedText: entry.collapsedText,
       location: tree ? getAssignedCategoryId(tree, entry.entryId) : "unassigned",
+      disabled: entry.disabled,
+      constant: entry.constant,
+      selective: entry.selective,
     };
     entryDrafts.set(key, next);
     return next;
@@ -783,6 +863,8 @@ export function setup(ctx: SpindleFrontendContext) {
         selectionSummary: preview.selectionSummary ?? null,
         pullLimit: currentState?.characterConfig?.maxResults ?? null,
         injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
+        reservedConstantCount: preview.reservedConstantCount ?? 0,
+        remainingDynamicSlots: preview.remainingDynamicSlots ?? null,
         trace: preview.trace,
         selectedScopes: preview.selectedScopes.map((scope) => ({
           nodeId: scope.nodeId,
@@ -803,6 +885,17 @@ export function setup(ctx: SpindleFrontendContext) {
           breadcrumb: scope.breadcrumb,
           manifestEntryCount: scope.manifestEntryCount,
           selectedEntryIds: scope.selectedEntryIds,
+        })),
+        reservedConstantNodes: getPreviewReservedNodes(preview).map((node) => ({
+          entryId: node.entryId,
+          label: node.label,
+          worldBookId: node.worldBookId,
+          worldBookName: node.worldBookName,
+          breadcrumb: node.breadcrumb,
+          score: node.score,
+          reasons: node.reasons,
+          selectionRole: node.selectionRole ?? null,
+          previewText: node.previewText,
         })),
         pulledNodes: getPreviewPulledNodes(preview).map((node) => ({
           entryId: node.entryId,
@@ -928,6 +1021,11 @@ export function setup(ctx: SpindleFrontendContext) {
     return preview.pulledNodes ?? [];
   }
 
+  function getPreviewReservedNodes(preview: FrontendState["preview"]): PreviewNode[] {
+    if (!preview) return [];
+    return preview.reservedConstantNodes ?? [];
+  }
+
   function getPreviewInjectedNodes(preview: FrontendState["preview"]): PreviewNode[] {
     if (!preview) return [];
     if (preview.injectedNodes?.length) return preview.injectedNodes;
@@ -1024,14 +1122,16 @@ export function setup(ctx: SpindleFrontendContext) {
   function createRetrievalEntryCard(
     node: PreviewNode,
     index: number,
-    emphasis: "pulled" | "injected",
+    emphasis: "pulled" | "reserved" | "injected",
   ): HTMLElement {
     const item = createElement("div", `lore-retrieval-card ${emphasis}`);
     const head = createElement("div", "lore-retrieval-card-head");
+    const tagLabel = emphasis === "injected" ? "Injected" : emphasis === "reserved" ? "Reserved" : "Pulled";
+    const tagTone = emphasis === "injected" ? "good" : emphasis === "reserved" ? "warn" : "accent";
     head.append(
       createElement("div", "lore-retrieval-card-index", String(index + 1)),
       createElement("div", "lore-retrieval-card-title", node.label),
-      createTag(emphasis === "injected" ? "Injected" : "Pulled", emphasis === "injected" ? "good" : "accent"),
+      createTag(tagLabel, tagTone),
     );
     const meta = createElement(
       "div",
@@ -1051,7 +1151,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderRetrievalEntries(
     nodes: PreviewNode[],
-    emphasis: "pulled" | "injected",
+    emphasis: "pulled" | "reserved" | "injected",
     emptyTitle: string,
     emptyBody: string,
   ): HTMLElement {
@@ -1075,6 +1175,8 @@ export function setup(ctx: SpindleFrontendContext) {
       createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"),
       createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"),
       createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`),
+      createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"),
+      createTag(`Dynamic slots left: ${preview.remainingDynamicSlots ?? 0}`, "accent"),
     );
     section.appendChild(meta);
 
@@ -1100,6 +1202,17 @@ export function setup(ctx: SpindleFrontendContext) {
       ),
     );
 
+    const reserved = createElement("div", "lore-last-panel");
+    reserved.append(
+      createElement("div", "lore-last-panel-title", "Reserved constants"),
+      renderRetrievalEntries(
+        getPreviewReservedNodes(preview),
+        "reserved",
+        "No reserved constants",
+        "No native constant entries were reserved for this retrieval.",
+      ),
+    );
+
     const injected = createElement("div", "lore-last-panel");
     injected.append(
       createElement("div", "lore-last-panel-title", "Injected"),
@@ -1111,7 +1224,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ),
     );
 
-    grid.append(searches, pulled, injected);
+    grid.append(searches, reserved, pulled, injected);
     section.appendChild(grid);
     return section;
   }
@@ -1127,6 +1240,8 @@ export function setup(ctx: SpindleFrontendContext) {
         return "S";
       case "manifest":
         return "M";
+      case "reserved":
+        return "R";
       case "pulled":
         return "P";
       case "injected":
@@ -1471,6 +1586,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ["all", "All"],
       ["scope", "Scopes"],
       ["manifest", "Manifest"],
+      ["reserved", "Reserved"],
       ["pulled", "Pulled"],
       ["injected", "Injected"],
       ["issue", "Issues"],
@@ -2646,32 +2762,77 @@ export function setup(ctx: SpindleFrontendContext) {
     const filteredEntries = filterTreeEntries(entries, workspaceSearch);
     const entryMap = new Map(filteredEntries.map((entry) => [entry.entryId, entry]));
     const query = workspaceSearch.trim().toLowerCase();
+    const collapsedNodes = getCollapsedTreeNodes(bookId);
+
+    const controls = createElement("div", "lore-cluster lore-tree-controls");
+    controls.append(
+      createButton("Collapse all", "lore-btn lore-btn-sm", () => {
+        const next = getCollapsedTreeNodes(bookId);
+        next.clear();
+        for (const node of Object.values(tree.nodes)) {
+          if (node.id !== tree.rootId) next.add(node.id);
+        }
+        revealSelectionInTree(bookId, getSelectedTree(bookId) ?? { kind: "unassigned", bookId });
+        renderWorkspaceModal();
+      }),
+      createButton("Expand all", "lore-btn lore-btn-sm", () => {
+        getCollapsedTreeNodes(bookId).clear();
+        renderWorkspaceModal();
+      }),
+    );
+    container.appendChild(controls);
 
     const tree_wrap = createElement("div", "lore-tree");
     container.appendChild(tree_wrap);
 
-    const renderCategory = (nodeId: string, depth: number) => {
+    const renderCategory = (nodeId: string, depth: number): boolean => {
       const node = tree.nodes[nodeId];
-      if (!node) return;
+      if (!node) return false;
+      let rendered = false;
+      const selected = getSelectedTree(bookId);
+      const childDepth = depth + (nodeId === tree.rootId ? 0 : 1);
 
       if (nodeId !== tree.rootId && (!query || node.label.toLowerCase().includes(query))) {
-        const selected = getSelectedTree(bookId);
         const active = selected?.kind === "category" && selected.nodeId === nodeId;
+        const wrapper = createElement("div", "lore-tree-node");
+        wrapper.style.paddingLeft = `${10 + depth * 12}px`;
+        const hasChildren = node.childIds.length > 0 || node.entryIds.some((entryId) => entryMap.has(entryId));
+        const collapsed = !query && collapsedNodes.has(nodeId);
+        const disclosure = createElement(
+          "button",
+          `lore-tree-disclosure${hasChildren ? "" : " empty"}`,
+          hasChildren ? (collapsed ? "▸" : "▾") : "•",
+        ) as HTMLButtonElement;
+        disclosure.type = "button";
+        disclosure.disabled = !hasChildren;
+        disclosure.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!hasChildren) return;
+          setTreeNodeCollapsed(bookId, nodeId, !collapsed);
+          renderWorkspaceModal();
+        });
+
         const row = createElement(
           "button",
           `lore-tree-row category${active ? " active" : ""}`,
         ) as HTMLButtonElement;
         row.type = "button";
         row.addEventListener("click", () => setSelectedTree(bookId, { kind: "category", bookId, nodeId }));
-        row.style.paddingLeft = `${10 + depth * 12}px`;
         row.appendChild(createElement("span", "", node.label || "Untitled"));
-        tree_wrap.appendChild(row);
+        wrapper.append(disclosure, row);
+        tree_wrap.appendChild(wrapper);
+        rendered = true;
+      }
+
+      const isCollapsed = nodeId !== tree.rootId && !query && collapsedNodes.has(nodeId);
+      if (isCollapsed) {
+        return rendered;
       }
 
       for (const entryId of node.entryIds) {
         const entry = entryMap.get(entryId);
         if (!entry) continue;
-        const selected = getSelectedTree(bookId);
         const active = selected?.kind === "entry" && selected.entryId === entryId;
         const row = createElement(
           "button",
@@ -2682,9 +2843,14 @@ export function setup(ctx: SpindleFrontendContext) {
         row.style.paddingLeft = `${22 + depth * 12}px`;
         row.appendChild(createElement("span", "", entry.label || "Untitled"));
         tree_wrap.appendChild(row);
+        rendered = true;
       }
 
-      for (const childId of node.childIds) renderCategory(childId, depth + (nodeId === tree.rootId ? 0 : 1));
+      for (const childId of node.childIds) {
+        rendered = renderCategory(childId, childDepth) || rendered;
+      }
+
+      return rendered;
     };
 
     renderCategory(tree.rootId, 0);
@@ -2721,8 +2887,13 @@ export function setup(ctx: SpindleFrontendContext) {
     const selected = getSelectedTree(bookId);
     const activeOperation = getActiveOperation();
     const locked = isBookLocked(bookId);
-    const lockMessage =
-      locked && activeOperation ? `${activeOperation.title} is rebuilding this book right now. Editing is temporarily locked.` : null;
+    const readOnly = isBookReadOnly(bookId);
+    const editingLocked = locked || readOnly;
+    const lockMessage = locked && activeOperation
+      ? `${activeOperation.title} is rebuilding this book right now. Editing is temporarily locked.`
+      : readOnly
+        ? "This lorebook is read-only inside Lore Recall, so tree edits and native flag changes are disabled."
+        : null;
 
     if (!tree) {
       panel.appendChild(createEmpty("No tree for this book", "Build one with metadata or the LLM builder in the settings workspace."));
@@ -2793,6 +2964,46 @@ export function setup(ctx: SpindleFrontendContext) {
       form.appendChild(collapsedSwitch);
       panel.appendChild(form);
 
+      const descendantEntryIds = uniqueStrings(getDescendantEntryIds(tree, selected.nodeId));
+      const bulkActions = createElement("section", "lore-section");
+      bulkActions.appendChild(
+        createSectionHead(
+          "Bulk entry flags",
+          `${descendantEntryIds.length} descendant entr${descendantEntryIds.length === 1 ? "y" : "ies"} in this category.`,
+        ),
+      );
+      const bulkCluster = createElement("div", "lore-cluster");
+      const runBulkPatch = (label: string, patch: { disabled?: boolean; constant?: boolean; selective?: boolean }) => {
+        if (!descendantEntryIds.length) {
+          pushNotice({
+            id: `bulk-empty:${Date.now()}`,
+            tone: "warn",
+            title: "No descendant entries",
+            message: "This category does not contain any descendant entries to update.",
+          });
+          render();
+          return;
+        }
+        const confirmed = window.confirm(`${label} for ${descendantEntryIds.length} descendant entr${descendantEntryIds.length === 1 ? "y" : "ies"}?`);
+        if (!confirmed) return;
+        sendToBackend(ctx, {
+          type: "patch_entry_flags",
+          entryIds: descendantEntryIds,
+          chatId: currentState?.activeChatId,
+          patch,
+        });
+      };
+      bulkCluster.append(
+        createButton("Set constant", "lore-btn lore-btn-sm", () => runBulkPatch("Set constant", { constant: true })),
+        createButton("Clear constant", "lore-btn lore-btn-sm", () => runBulkPatch("Clear constant", { constant: false })),
+        createButton("Disable all", "lore-btn lore-btn-sm", () => runBulkPatch("Disable all", { disabled: true })),
+        createButton("Enable all", "lore-btn lore-btn-sm", () => runBulkPatch("Enable all", { disabled: false })),
+        createButton("Set selective", "lore-btn lore-btn-sm", () => runBulkPatch("Set selective", { selective: true })),
+        createButton("Clear selective", "lore-btn lore-btn-sm", () => runBulkPatch("Clear selective", { selective: false })),
+      );
+      bulkActions.appendChild(bulkCluster);
+      panel.appendChild(bulkActions);
+
       const actions = createElement("div", "lore-actions");
       actions.classList.add("lore-editor-actions");
       actions.append(
@@ -2852,7 +3063,7 @@ export function setup(ctx: SpindleFrontendContext) {
         }),
       );
       panel.appendChild(actions);
-      if (locked) disableInteractive(panel);
+      if (editingLocked) disableInteractive(panel);
       return panel;
     }
 
@@ -2892,6 +3103,21 @@ export function setup(ctx: SpindleFrontendContext) {
       draft.location = locationSelect.value;
     });
     form.appendChild(createField("Location", locationSelect));
+    const nativeFlags = createElement("div", "lore-field-span");
+    nativeFlags.append(
+      createElement("span", "lore-label", "Native flags"),
+      createSwitch("Disabled", draft.disabled, (next) => {
+        draft.disabled = next;
+      }),
+      createSwitch("Constant", draft.constant, (next) => {
+        draft.constant = next;
+      }),
+      createSwitch("Selective", draft.selective, (next) => {
+        draft.selective = next;
+      }),
+      createFieldNote("These are native lorebook entry flags. Constant entries are reserved outside Lore Recall's dynamic retrieval budget."),
+    );
+    form.appendChild(nativeFlags);
     form.appendChild(
       createField(
         "Aliases",
@@ -2975,6 +3201,16 @@ export function setup(ctx: SpindleFrontendContext) {
             tags: draft.tags,
           },
         });
+        sendToBackend(ctx, {
+          type: "patch_entry_flags",
+          entryIds: [entry.entryId],
+          chatId: currentState?.activeChatId,
+          patch: {
+            disabled: draft.disabled,
+            constant: draft.constant,
+            selective: draft.selective,
+          },
+        });
         const target =
           draft.location === "unassigned"
             ? "unassigned"
@@ -2991,7 +3227,7 @@ export function setup(ctx: SpindleFrontendContext) {
       }),
     );
     panel.appendChild(actions);
-    if (locked) disableInteractive(panel);
+    if (editingLocked) disableInteractive(panel);
     return panel;
   }
 

@@ -1,6 +1,6 @@
 import type { BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
 
-export type DrawerFeedFilter = "all" | "scope" | "manifest" | "pulled" | "injected" | "issue";
+export type DrawerFeedFilter = "all" | "scope" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }
