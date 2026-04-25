@@ -53,6 +53,28 @@ import {
   toBookSummary,
 } from "./storage";
 
+// Local mirrors of the host-side interceptor result contract.
+// The Lumiverse host accepts either an `LlmMessageDTO[]` (legacy) or this
+// `InterceptorResultDTO` shape from a registered interceptor. Returning the
+// object form with `breakdown` is what surfaces injected messages as
+// first-class blocks in the Prompt Breakdown view (and dry-run results, and
+// saved /generate/breakdown/:messageId snapshots). These interfaces are
+// declared locally because the lumiverse-spindle-types version pinned in
+// package.json (0.3.6) predates the export of these DTOs (added in 0.4.4).
+// See: developer-docs/docs/backend-api/interceptors.md
+//      developer-docs/docs/backend-api/generation.md (AssemblyBreakdownEntryDTO)
+interface InterceptorBreakdownEntryDTO {
+  messageIndex: number;
+  name?: string;
+}
+interface InterceptorResultDTO {
+  messages: LlmMessageDTO[];
+  parameters?: Record<string, unknown>;
+  breakdown?: InterceptorBreakdownEntryDTO[];
+}
+
+const LORE_RECALL_BREAKDOWN_NAME = "Retrieved Lore";
+
 const CONNECTION_CACHE_TTL_MS = 5000;
 const RETRIEVAL_FEED_SESSION_LIMIT = 25;
 const RETRIEVAL_FEED_PUSH_DELAY_MS = 180;
@@ -666,7 +688,21 @@ spindle.registerInterceptor(async (messages, context) => {
     }
     if (!preview?.injectedText.trim()) return messages;
 
-    return [{ role: "system", content: preview.injectedText }, ...messages] satisfies LlmMessageDTO[];
+    // Inject the assembled lore as a system message and tag it as a Prompt
+    // Breakdown entry so it shows up as its own block (with extension
+    // attribution from spindle.json) in dry-run, live generation breakdown,
+    // and saved breakdown snapshots. messageIndex points at position 0 of
+    // the returned `messages` array — the injected system message.
+    const injected: LlmMessageDTO = { role: "system", content: preview.injectedText };
+    const result: InterceptorResultDTO = {
+      messages: [injected, ...messages],
+      breakdown: [{ messageIndex: 0, name: LORE_RECALL_BREAKDOWN_NAME }],
+    };
+    // lumiverse-spindle-types@0.3.6 types the handler return as
+    // `Promise<LlmMessageDTO[]>`; the host accepts `InterceptorResultDTO` at
+    // runtime, so we cast through unknown until the types package is bumped
+    // to >=0.4.4.
+    return result as unknown as LlmMessageDTO[];
   } catch (error: unknown) {
     if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
       const activeSession = retrievalFeedCache
