@@ -23,6 +23,13 @@ export interface SpindleManifest {
   minimum_lumiverse_version?: string;
   /** Files/directories to seed into extension storage on install/import/update */
   storage_seed_files?: SpindleStorageSeedFile[];
+  /**
+   * Maximum wall-clock time (milliseconds) the host will wait for this
+   * extension's interceptor to return a result before aborting with an error.
+   * Overrides the user-level `spindleSettings.interceptorTimeoutMs` setting.
+   * Clamped to [1000, 300000] by the host.
+   */
+  interceptorTimeoutMs?: number;
 }
 
 export interface SpindleStorageSeedFile {

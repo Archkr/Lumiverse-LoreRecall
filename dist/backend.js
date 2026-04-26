@@ -648,6 +648,36 @@ async function ensureStorageFolders(userId) {
 // src/backend/storage.ts
 var WORLD_BOOK_LIST_TTL_MS = 5000;
 var worldBookListCache = new Map;
+function getLoreRecallCharacterPayload(character) {
+  const value = character?.extensions?.[EXTENSION_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return {};
+  return value;
+}
+function readStoredCharacterConfig(character) {
+  const payload = getLoreRecallCharacterPayload(character);
+  return payload.characterConfig === undefined ? null : payload.characterConfig;
+}
+async function readLegacyCharacterConfig(characterId, userId) {
+  return spindle.userStorage.getJson(getCharacterConfigPath(characterId), {
+    fallback: null,
+    userId
+  });
+}
+async function writeCharacterConfigExtension(character, config, userId) {
+  const currentPayload = getLoreRecallCharacterPayload(character);
+  await spindle.characters.update(character.id, {
+    extensions: {
+      [EXTENSION_KEY]: {
+        ...currentPayload,
+        characterConfig: config
+      }
+    }
+  }, userId);
+}
+function characterHasStoredConfig(character) {
+  return readStoredCharacterConfig(character) !== null;
+}
 async function loadGlobalSettings(userId) {
   const stored = await spindle.userStorage.getJson(GLOBAL_SETTINGS_PATH, {
     fallback: DEFAULT_GLOBAL_SETTINGS,
@@ -661,17 +691,36 @@ async function saveGlobalSettings(patch, userId) {
   await spindle.userStorage.setJson(GLOBAL_SETTINGS_PATH, next, { indent: 2, userId });
   return next;
 }
-async function loadCharacterConfig(characterId, userId) {
-  const stored = await spindle.userStorage.getJson(getCharacterConfigPath(characterId), {
-    fallback: DEFAULT_CHARACTER_CONFIG,
-    userId
-  });
-  return normalizeCharacterConfig(stored);
+async function loadCharacterConfig(characterId, userId, character) {
+  const resolvedCharacter = character === undefined ? await spindle.characters.get(characterId, userId) : character;
+  const stored = readStoredCharacterConfig(resolvedCharacter);
+  if (stored)
+    return normalizeCharacterConfig(stored);
+  const legacy = await readLegacyCharacterConfig(characterId, userId);
+  if (legacy) {
+    const normalized = normalizeCharacterConfig(legacy);
+    if (resolvedCharacter) {
+      try {
+        await writeCharacterConfigExtension(resolvedCharacter, normalized, userId);
+        await spindle.userStorage.delete(getCharacterConfigPath(characterId), userId).catch(() => {});
+      } catch (error) {
+        spindle.log.warn(`Lore Recall could not migrate character config ${characterId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return normalized;
+  }
+  return normalizeCharacterConfig(DEFAULT_CHARACTER_CONFIG);
 }
-async function saveCharacterConfig(characterId, patch, userId) {
-  const current = await loadCharacterConfig(characterId, userId);
+async function saveCharacterConfig(characterId, patch, userId, character) {
+  const resolvedCharacter = character === undefined ? await spindle.characters.get(characterId, userId) : character;
+  if (!resolvedCharacter) {
+    throw new Error(`Character ${characterId} was not found.`);
+  }
+  const currentStored = readStoredCharacterConfig(resolvedCharacter);
+  const current = currentStored ? normalizeCharacterConfig(currentStored) : await loadCharacterConfig(characterId, userId, resolvedCharacter);
   const next = normalizeCharacterConfig({ ...current, ...patch });
-  await spindle.userStorage.setJson(getCharacterConfigPath(characterId), next, { indent: 2, userId });
+  await writeCharacterConfigExtension(resolvedCharacter, next, userId);
+  await spindle.userStorage.delete(getCharacterConfigPath(characterId), userId).catch(() => {});
   return next;
 }
 async function loadBookConfig(bookId, userId) {
@@ -709,6 +758,18 @@ async function listAllWorldBooks(userId) {
     books
   });
   return books;
+}
+async function listAllCharacters(userId) {
+  const characters = [];
+  let offset = 0;
+  while (true) {
+    const page = await spindle.characters.list({ limit: PAGE_LIMIT, offset, userId });
+    characters.push(...page.data);
+    if (characters.length >= page.total || page.data.length === 0)
+      break;
+    offset += page.data.length;
+  }
+  return characters;
 }
 async function listAllEntries(worldBookId, userId) {
   const entries = [];
@@ -3884,19 +3945,20 @@ async function exportSnapshot(userId, operation) {
     chunkCurrent: null,
     chunkTotal: null
   });
-  const [globalSettings, characterFiles, bookFiles, treeFiles, books] = await Promise.all([
+  const [globalSettings, characters, characterFiles, bookFiles, treeFiles, books] = await Promise.all([
     loadGlobalSettings(userId),
+    listAllCharacters(userId),
     spindle.userStorage.list(`${CHARACTER_CONFIG_DIR}/`, userId).catch(() => []),
     spindle.userStorage.list(`${BOOK_CONFIG_DIR}/`, userId).catch(() => []),
     spindle.userStorage.list(`${TREE_DIR}/`, userId).catch(() => []),
     listAllWorldBooks(userId)
   ]);
+  const legacyCharacterIds = new Set(characterFiles.filter((file) => file.endsWith(".json")).map((path) => path.split("/").pop()?.replace(/\.json$/i, "") ?? "").filter(Boolean));
   const characterConfigs = {};
-  for (const path of characterFiles.filter((file) => file.endsWith(".json"))) {
-    const characterId = path.split("/").pop()?.replace(/\.json$/i, "") ?? "";
-    if (!characterId)
+  for (const character of characters) {
+    if (!characterHasStoredConfig(character) && !legacyCharacterIds.has(character.id))
       continue;
-    characterConfigs[characterId] = await loadCharacterConfig(characterId, userId);
+    characterConfigs[character.id] = await loadCharacterConfig(character.id, userId, character);
   }
   const bookConfigs = {};
   for (const path of bookFiles.filter((file) => file.endsWith(".json"))) {
@@ -3961,6 +4023,7 @@ async function exportSnapshot(userId, operation) {
 async function importSnapshot(snapshot, userId, operation) {
   const totalSteps = 1 + Object.keys(snapshot.characterConfigs ?? {}).length + Object.keys(snapshot.bookConfigs ?? {}).length + Object.keys(snapshot.treeIndexes ?? {}).length + Object.keys(snapshot.entryMeta ?? {}).reduce((sum, bookId) => sum + Object.keys(snapshot.entryMeta?.[bookId] ?? {}).length, 0);
   let completed = 0;
+  const issues = [];
   operation?.progress({
     phase: "global_settings",
     message: "Importing Lore Recall global settings.",
@@ -3982,7 +4045,19 @@ async function importSnapshot(snapshot, userId, operation) {
       chunkCurrent: null,
       chunkTotal: null
     });
-    await spindle.userStorage.setJson(getCharacterConfigPath(characterId), config, { indent: 2, userId });
+    const character = await spindle.characters.get(characterId, userId);
+    if (!character) {
+      const issue = {
+        severity: "warn",
+        message: `Skipped character settings for missing character ${characterId}.`,
+        phase: "character_configs"
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+      completed += 1;
+      continue;
+    }
+    await saveCharacterConfig(characterId, config, userId, character);
     completed += 1;
   }
   for (const [bookId, config] of Object.entries(snapshot.bookConfigs ?? {})) {
@@ -4061,7 +4136,7 @@ async function importSnapshot(snapshot, userId, operation) {
     chunkTotal: null
   });
   return {
-    issues: [],
+    issues,
     completed,
     total: totalSteps
   };
@@ -4073,6 +4148,7 @@ async function applySuggestedBooks(characterId, bookIds, mode, userId) {
 }
 
 // src/backend/index.ts
+var LORE_RECALL_BREAKDOWN_NAME = "Retrieved Lore";
 var CONNECTION_CACHE_TTL_MS = 5000;
 var RETRIEVAL_FEED_SESSION_LIMIT = 25;
 var RETRIEVAL_FEED_PUSH_DELAY_MS = 180;
@@ -4243,10 +4319,10 @@ async function buildState(userId, chatId) {
   if (!character) {
     return { state: baseState };
   }
-  const characterConfig = await loadCharacterConfig(character.id, userId);
+  const characterConfig = await loadCharacterConfig(character.id, userId, character);
   const validBookIds = new Set(allBooks.map((book) => book.id));
   const selectedBookIds = characterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
-  const attachedWorldBookIds = character && Array.isArray(character.world_book_ids) ? character.world_book_ids.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+  const attachedWorldBookIds = character.world_book_ids;
   const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
   const bookConfigs = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.config]));
@@ -4509,10 +4585,12 @@ spindle.registerInterceptor(async (messages, context) => {
     if (!chat?.character_id)
       return messages;
     const character = await spindle.characters.get(chat.character_id, userId);
-    const config = await loadCharacterConfig(chat.character_id, userId);
+    if (!character)
+      return messages;
+    const config = await loadCharacterConfig(chat.character_id, userId, character);
     if (!config.enabled || !config.managedBookIds.length)
       return messages;
-    const attachedWorldBookIds = character && Array.isArray(character.world_book_ids) ? character.world_book_ids.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+    const attachedWorldBookIds = character.world_book_ids;
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length)
       return messages;
@@ -4560,7 +4638,12 @@ spindle.registerInterceptor(async (messages, context) => {
     }
     if (!preview?.injectedText.trim())
       return messages;
-    return [{ role: "system", content: preview.injectedText }, ...messages];
+    const injected = { role: "system", content: preview.injectedText };
+    const result = {
+      messages: [injected, ...messages],
+      breakdown: [{ messageIndex: 0, name: LORE_RECALL_BREAKDOWN_NAME }]
+    };
+    return result;
   } catch (error) {
     if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
       const activeSession = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))?.sessions.find((session) => session.id === retrievalSessionId);

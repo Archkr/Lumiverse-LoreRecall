@@ -1,6 +1,6 @@
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
-import type { ConnectionProfileDTO, LlmMessageDTO } from "lumiverse-spindle-types";
+import type { ConnectionProfileDTO, InterceptorResultDTO, LlmMessageDTO } from "lumiverse-spindle-types";
 import type {
   FrontendState,
   FrontendToBackend,
@@ -52,26 +52,6 @@ import {
   saveGlobalSettings,
   toBookSummary,
 } from "./storage";
-
-// Local mirrors of the host-side interceptor result contract.
-// The Lumiverse host accepts either an `LlmMessageDTO[]` (legacy) or this
-// `InterceptorResultDTO` shape from a registered interceptor. Returning the
-// object form with `breakdown` is what surfaces injected messages as
-// first-class blocks in the Prompt Breakdown view (and dry-run results, and
-// saved /generate/breakdown/:messageId snapshots). These interfaces are
-// declared locally because the lumiverse-spindle-types version pinned in
-// package.json (0.3.6) predates the export of these DTOs (added in 0.4.4).
-// See: developer-docs/docs/backend-api/interceptors.md
-//      developer-docs/docs/backend-api/generation.md (AssemblyBreakdownEntryDTO)
-interface InterceptorBreakdownEntryDTO {
-  messageIndex: number;
-  name?: string;
-}
-interface InterceptorResultDTO {
-  messages: LlmMessageDTO[];
-  parameters?: Record<string, unknown>;
-  breakdown?: InterceptorBreakdownEntryDTO[];
-}
 
 const LORE_RECALL_BREAKDOWN_NAME = "Retrieved Lore";
 
@@ -292,15 +272,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     return { state: baseState };
   }
 
-  const characterConfig = await loadCharacterConfig(character.id, userId);
+  const characterConfig = await loadCharacterConfig(character.id, userId, character);
   const validBookIds = new Set(allBooks.map((book) => book.id));
   const selectedBookIds = characterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
-  const attachedWorldBookIds =
-    character && Array.isArray((character as unknown as { world_book_ids?: unknown }).world_book_ids)
-      ? ((character as unknown as { world_book_ids?: unknown }).world_book_ids as unknown[]).filter(
-          (value): value is string => typeof value === "string" && value.trim().length > 0,
-        )
-      : [];
+  const attachedWorldBookIds = character.world_book_ids;
   const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
 
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
@@ -621,15 +596,11 @@ spindle.registerInterceptor(async (messages, context) => {
     if (!chat?.character_id) return messages;
 
     const character = await spindle.characters.get(chat.character_id, userId);
-    const config = await loadCharacterConfig(chat.character_id, userId);
+    if (!character) return messages;
+    const config = await loadCharacterConfig(chat.character_id, userId, character);
     if (!config.enabled || !config.managedBookIds.length) return messages;
 
-    const attachedWorldBookIds =
-      character && Array.isArray((character as unknown as { world_book_ids?: unknown }).world_book_ids)
-        ? ((character as unknown as { world_book_ids?: unknown }).world_book_ids as unknown[]).filter(
-            (value): value is string => typeof value === "string" && value.trim().length > 0,
-          )
-        : [];
+    const attachedWorldBookIds = character.world_book_ids;
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length) return messages;
 
@@ -698,11 +669,7 @@ spindle.registerInterceptor(async (messages, context) => {
       messages: [injected, ...messages],
       breakdown: [{ messageIndex: 0, name: LORE_RECALL_BREAKDOWN_NAME }],
     };
-    // lumiverse-spindle-types@0.3.6 types the handler return as
-    // `Promise<LlmMessageDTO[]>`; the host accepts `InterceptorResultDTO` at
-    // runtime, so we cast through unknown until the types package is bumped
-    // to >=0.4.4.
-    return result as unknown as LlmMessageDTO[];
+    return result;
   } catch (error: unknown) {
     if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
       const activeSession = retrievalFeedCache

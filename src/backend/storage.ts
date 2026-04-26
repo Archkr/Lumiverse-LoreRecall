@@ -1,6 +1,6 @@
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
-import type { ConnectionProfileDTO, WorldBookDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
+import type { CharacterDTO, ConnectionProfileDTO, WorldBookDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
 import {
   DEFAULT_BOOK_CONFIG,
   DEFAULT_CHARACTER_CONFIG,
@@ -48,6 +48,51 @@ import {
 const WORLD_BOOK_LIST_TTL_MS = 5000;
 const worldBookListCache = new Map<string, { expiresAt: number; books: WorldBookDTO[] }>();
 
+function getLoreRecallCharacterPayload(character: CharacterDTO | null | undefined): Record<string, unknown> {
+  const value = character?.extensions?.[EXTENSION_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function readStoredCharacterConfig(character: CharacterDTO | null | undefined): Partial<CharacterRetrievalConfig> | null {
+  const payload = getLoreRecallCharacterPayload(character);
+  return payload.characterConfig === undefined ? null : (payload.characterConfig as Partial<CharacterRetrievalConfig>);
+}
+
+async function readLegacyCharacterConfig(
+  characterId: string,
+  userId: string,
+): Promise<Partial<CharacterRetrievalConfig> | null> {
+  return spindle.userStorage.getJson<Partial<CharacterRetrievalConfig> | null>(getCharacterConfigPath(characterId), {
+    fallback: null,
+    userId,
+  });
+}
+
+async function writeCharacterConfigExtension(
+  character: CharacterDTO,
+  config: CharacterRetrievalConfig,
+  userId: string,
+): Promise<void> {
+  const currentPayload = getLoreRecallCharacterPayload(character);
+  await spindle.characters.update(
+    character.id,
+    {
+      extensions: {
+        [EXTENSION_KEY]: {
+          ...currentPayload,
+          characterConfig: config,
+        },
+      },
+    },
+    userId,
+  );
+}
+
+export function characterHasStoredConfig(character: CharacterDTO | null | undefined): boolean {
+  return readStoredCharacterConfig(character) !== null;
+}
+
 export async function loadGlobalSettings(userId: string): Promise<GlobalLoreRecallSettings> {
   const stored = await spindle.userStorage.getJson<Partial<GlobalLoreRecallSettings>>(GLOBAL_SETTINGS_PATH, {
     fallback: DEFAULT_GLOBAL_SETTINGS,
@@ -66,22 +111,52 @@ export async function saveGlobalSettings(
   return next;
 }
 
-export async function loadCharacterConfig(characterId: string, userId: string): Promise<CharacterRetrievalConfig> {
-  const stored = await spindle.userStorage.getJson<Partial<CharacterRetrievalConfig>>(getCharacterConfigPath(characterId), {
-    fallback: DEFAULT_CHARACTER_CONFIG,
-    userId,
-  });
-  return normalizeCharacterConfig(stored);
+export async function loadCharacterConfig(
+  characterId: string,
+  userId: string,
+  character?: CharacterDTO | null,
+): Promise<CharacterRetrievalConfig> {
+  const resolvedCharacter = character === undefined ? await spindle.characters.get(characterId, userId) : character;
+  const stored = readStoredCharacterConfig(resolvedCharacter);
+  if (stored) return normalizeCharacterConfig(stored);
+
+  const legacy = await readLegacyCharacterConfig(characterId, userId);
+  if (legacy) {
+    const normalized = normalizeCharacterConfig(legacy);
+    if (resolvedCharacter) {
+      try {
+        await writeCharacterConfigExtension(resolvedCharacter, normalized, userId);
+        await spindle.userStorage.delete(getCharacterConfigPath(characterId), userId).catch(() => {});
+      } catch (error) {
+        spindle.log.warn(
+          `Lore Recall could not migrate character config ${characterId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return normalized;
+  }
+
+  return normalizeCharacterConfig(DEFAULT_CHARACTER_CONFIG);
 }
 
 export async function saveCharacterConfig(
   characterId: string,
   patch: Partial<CharacterRetrievalConfig>,
   userId: string,
+  character?: CharacterDTO | null,
 ): Promise<CharacterRetrievalConfig> {
-  const current = await loadCharacterConfig(characterId, userId);
+  const resolvedCharacter = character === undefined ? await spindle.characters.get(characterId, userId) : character;
+  if (!resolvedCharacter) {
+    throw new Error(`Character ${characterId} was not found.`);
+  }
+
+  const currentStored = readStoredCharacterConfig(resolvedCharacter);
+  const current = currentStored
+    ? normalizeCharacterConfig(currentStored)
+    : await loadCharacterConfig(characterId, userId, resolvedCharacter);
   const next = normalizeCharacterConfig({ ...current, ...patch });
-  await spindle.userStorage.setJson(getCharacterConfigPath(characterId), next, { indent: 2, userId });
+  await writeCharacterConfigExtension(resolvedCharacter, next, userId);
+  await spindle.userStorage.delete(getCharacterConfigPath(characterId), userId).catch(() => {});
   return next;
 }
 
@@ -127,6 +202,18 @@ export async function listAllWorldBooks(userId: string): Promise<WorldBookDTO[]>
     books,
   });
   return books;
+}
+
+export async function listAllCharacters(userId: string): Promise<CharacterDTO[]> {
+  const characters: CharacterDTO[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await spindle.characters.list({ limit: PAGE_LIMIT, offset, userId });
+    characters.push(...page.data);
+    if (characters.length >= page.total || page.data.length === 0) break;
+    offset += page.data.length;
+  }
+  return characters;
 }
 
 export async function listAllEntries(worldBookId: string, userId: string): Promise<WorldBookEntryDTO[]> {

@@ -5,13 +5,13 @@
     "": {
       "name": "lumiverse-lore-recall",
       "devDependencies": {
-        "lumiverse-spindle-types": "0.3.6",
-        "typescript": "^5.7.3",
+        "lumiverse-spindle-types": "0.4.39",
+        "typescript": "^5.9.3",
       },
     },
   },
   "packages": {
-    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.3.6", "", {}, "sha512-mz37vDfZzsaFhMxw9T/sc/lt+Ici1ccqAOCSSefV8pyAqY93C11cy3Tn7HLyOhYAxHCJvPxkmrR8oAQTKh7geg=="],
+    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.4.39", "", {}, "sha512-mCb6MGze9e+CEYWxukio2tZTrRdxvXK/hVtbEEh5flETZFBc8ub91xQ8YI31wot0dhZRbqGffokzHogXhsrHeg=="],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
   }

@@ -45,13 +45,14 @@ import {
   GLOBAL_SETTINGS_PATH,
   TREE_DIR,
   getBookConfigPath,
-  getCharacterConfigPath,
   getTreePath,
 } from "./runtime";
 import {
   canEditBook,
+  characterHasStoredConfig,
   getRuntimeBooks,
   invalidateBookCache,
+  listAllCharacters,
   listAllEntries,
   listAllWorldBooks,
   loadBookCache,
@@ -1880,19 +1881,25 @@ export async function exportSnapshot(
     chunkCurrent: null,
     chunkTotal: null,
   });
-  const [globalSettings, characterFiles, bookFiles, treeFiles, books] = await Promise.all([
+  const [globalSettings, characters, characterFiles, bookFiles, treeFiles, books] = await Promise.all([
     loadGlobalSettings(userId),
+    listAllCharacters(userId),
     spindle.userStorage.list(`${CHARACTER_CONFIG_DIR}/`, userId).catch(() => [] as string[]),
     spindle.userStorage.list(`${BOOK_CONFIG_DIR}/`, userId).catch(() => [] as string[]),
     spindle.userStorage.list(`${TREE_DIR}/`, userId).catch(() => [] as string[]),
     listAllWorldBooks(userId),
   ]);
 
+  const legacyCharacterIds = new Set(
+    characterFiles
+      .filter((file) => file.endsWith(".json"))
+      .map((path) => path.split("/").pop()?.replace(/\.json$/i, "") ?? "")
+      .filter(Boolean),
+  );
   const characterConfigs: Record<string, CharacterRetrievalConfig> = {};
-  for (const path of characterFiles.filter((file) => file.endsWith(".json"))) {
-    const characterId = path.split("/").pop()?.replace(/\.json$/i, "") ?? "";
-    if (!characterId) continue;
-    characterConfigs[characterId] = await loadCharacterConfig(characterId, userId);
+  for (const character of characters) {
+    if (!characterHasStoredConfig(character) && !legacyCharacterIds.has(character.id)) continue;
+    characterConfigs[character.id] = await loadCharacterConfig(character.id, userId, character);
   }
 
   const bookConfigs: Record<string, any> = {};
@@ -1969,6 +1976,7 @@ export async function importSnapshot(
     Object.keys(snapshot.treeIndexes ?? {}).length +
     Object.keys(snapshot.entryMeta ?? {}).reduce((sum, bookId) => sum + Object.keys(snapshot.entryMeta?.[bookId] ?? {}).length, 0);
   let completed = 0;
+  const issues: OperationIssue[] = [];
 
   operation?.progress({
     phase: "global_settings",
@@ -1992,7 +2000,19 @@ export async function importSnapshot(
       chunkCurrent: null,
       chunkTotal: null,
     });
-    await spindle.userStorage.setJson(getCharacterConfigPath(characterId), config, { indent: 2, userId });
+    const character = await spindle.characters.get(characterId, userId);
+    if (!character) {
+      const issue: OperationIssue = {
+        severity: "warn",
+        message: `Skipped character settings for missing character ${characterId}.`,
+        phase: "character_configs",
+      };
+      issues.push(issue);
+      operation?.addIssue(issue);
+      completed += 1;
+      continue;
+    }
+    await saveCharacterConfig(characterId, config, userId, character);
     completed += 1;
   }
   for (const [bookId, config] of Object.entries(snapshot.bookConfigs ?? {})) {
@@ -2080,7 +2100,7 @@ export async function importSnapshot(
   });
 
   return {
-    issues: [],
+    issues,
     completed,
     total: totalSteps,
   };

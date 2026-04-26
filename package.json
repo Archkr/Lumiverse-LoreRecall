@@ -11,7 +11,7 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "lumiverse-spindle-types": "0.3.6",
+    "lumiverse-spindle-types": "0.4.39",
     "typescript": "^5.9.3"
   }
 }
