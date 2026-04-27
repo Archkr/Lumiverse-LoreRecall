@@ -110,6 +110,24 @@ export function filterBooks(state: FrontendState | null, filterText: string): st
     .map((book) => book.id);
 }
 
+export function formatMode(mode: string | null | undefined): string {
+  if (!mode) return "";
+  return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase();
+}
+
+export function formatBuildSource(source: string | null | undefined): string {
+  if (!source) return "";
+  if (source.toLowerCase() === "llm") return "LLM";
+  return source.charAt(0).toUpperCase() + source.slice(1).toLowerCase();
+}
+
+export function formatPhase(phase: string | null | undefined): string {
+  if (!phase) return "";
+  const cleaned = phase.replace(/_/g, " ").trim();
+  if (!cleaned) return "";
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
 export function filterTreeEntries(entries: ManagedBookEntryView[], filterText: string): ManagedBookEntryView[] {
   const query = filterText.trim().toLowerCase();
   if (!query) return entries;
