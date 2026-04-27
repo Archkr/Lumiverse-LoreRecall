@@ -886,6 +886,23 @@ export function setup(ctx: SpindleFrontendContext) {
           manifestEntryCount: scope.manifestEntryCount,
           selectedEntryIds: scope.selectedEntryIds,
         })),
+        searchEvents: (preview.searchEvents ?? []).map((event) => ({
+          query: event.query,
+          global: event.global,
+          resultCount: event.resultCount,
+          summary: event.summary,
+          matches: event.matches.map((node) => ({
+            entryId: node.entryId,
+            label: node.label,
+            worldBookId: node.worldBookId,
+            worldBookName: node.worldBookName,
+            breadcrumb: node.breadcrumb,
+            score: node.score,
+            reasons: node.reasons,
+            selectionRole: node.selectionRole ?? null,
+            previewText: node.previewText,
+          })),
+        })),
         reservedConstantNodes: getPreviewReservedNodes(preview).map((node) => ({
           entryId: node.entryId,
           label: node.label,
@@ -1084,6 +1101,46 @@ export function setup(ctx: SpindleFrontendContext) {
     return list;
   }
 
+  function renderSearchEvents(
+    searchEvents: NonNullable<FrontendState["preview"]>["searchEvents"],
+  ): HTMLElement | null {
+    if (!searchEvents?.length) return null;
+    const list = createElement("div", "lore-search-events");
+    for (const event of searchEvents) {
+      const item = createElement("details", "lore-search-event") as HTMLDetailsElement;
+      const summary = createElement("summary", "lore-search-event-summary");
+      const copy = createElement("div", "lore-search-event-copy");
+      copy.append(
+        createElement("div", "lore-search-event-title", event.query),
+        createElement("div", "lore-search-event-body", event.summary),
+      );
+      const meta = createElement("div", "lore-cluster lore-search-event-meta");
+      meta.append(
+        createTag(event.global ? "Global" : "Scoped", "accent"),
+        createTag(`${event.resultCount} result${event.resultCount === 1 ? "" : "s"}`),
+      );
+      summary.append(copy, meta);
+      item.appendChild(summary);
+      if (event.matches.length) {
+        const matches = createElement("div", "lore-search-event-matches");
+        for (const match of event.matches) {
+          const matchRow = createElement("div", "lore-search-event-match");
+          matchRow.append(
+            createElement("div", "lore-search-event-match-title", match.label),
+            createElement("div", "lore-search-event-match-meta", `${match.worldBookName} | ${match.breadcrumb || "Root"}`),
+          );
+          if (match.previewText?.trim()) {
+            matchRow.appendChild(createElement("div", "lore-search-event-match-body", clipText(match.previewText, 180)));
+          }
+          matches.appendChild(matchRow);
+        }
+        item.appendChild(matches);
+      }
+      list.appendChild(item);
+    }
+    return list;
+  }
+
   function renderSearchActivity(preview: FrontendState["preview"]): HTMLElement | null {
     if (!preview) return null;
 
@@ -1092,7 +1149,10 @@ export function setup(ctx: SpindleFrontendContext) {
     if (scopes) wrap.appendChild(scopes);
     const manifestCounts = renderScopeManifestCounts(preview.scopeManifestCounts ?? []);
     if (manifestCounts) wrap.appendChild(manifestCounts);
+    const searchEvents = renderSearchEvents(preview.searchEvents ?? []);
+    if (searchEvents) wrap.appendChild(searchEvents);
     if (!preview.trace?.length) {
+      if (wrap.childElementCount) return wrap;
       wrap.appendChild(createEmpty("No selection activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;
     }
@@ -1187,7 +1247,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
     searches.append(
-      createElement("div", "lore-last-panel-title", "Selected nodes"),
+      createElement("div", "lore-last-panel-title", "Search & scopes"),
       renderSearchActivity(preview) ?? createEmpty("No search activity"),
     );
 
@@ -1238,6 +1298,8 @@ export function setup(ctx: SpindleFrontendContext) {
     switch (item.kind) {
       case "scope":
         return "S";
+      case "search":
+        return "⌕";
       case "manifest":
         return "M";
       case "reserved":
@@ -1251,6 +1313,20 @@ export function setup(ctx: SpindleFrontendContext) {
       default:
         return "T";
     }
+  }
+
+  function getFeedMetaBits(item: RetrievalFeedItem): string[] {
+    const bits: string[] = [];
+    if (item.kind === "search" && item.searchQuery) {
+      bits.push(item.searchGlobal ? "global search" : "search");
+      bits.push(`query "${item.searchQuery}"`);
+    } else if (item.phase && item.phase !== "session") {
+      bits.push(item.phase.replace(/_/g, " "));
+    }
+    if (typeof item.count === "number") {
+      bits.push(item.kind === "search" ? `${item.count} match${item.count === 1 ? "" : "es"}` : `${item.count}`);
+    }
+    return bits;
   }
 
   function getFeedItemTone(item: RetrievalFeedItem): NoticeTone {
@@ -1458,7 +1534,7 @@ export function setup(ctx: SpindleFrontendContext) {
     if (hasEntries) {
       const group = createElement("div", "lore-feed-detail-group");
       group.append(
-        createElement("div", "lore-feed-detail-title", `Entries (${item.entries!.length})`),
+        createElement("div", "lore-feed-detail-title", `${item.kind === "search" ? "Matches" : "Entries"} (${item.entries!.length})`),
         renderFeedEntryRows(item.entries!),
       );
       body.appendChild(group);
@@ -1497,16 +1573,11 @@ export function setup(ctx: SpindleFrontendContext) {
       top,
       createElement("div", "lore-feed-item-summary", item.summary),
     );
-    const meta = createElement("div", "lore-cluster");
-    meta.classList.add("lore-feed-item-meta");
-    meta.appendChild(createTag(item.kind === "trace" ? "trace" : item.kind.replace(/_/g, " "), item.kind === "issue" ? "warn" : "accent"));
-    if (item.phase && item.phase !== "session") {
-      meta.appendChild(createTag(item.phase.replace(/_/g, " ")));
+    const metaBits = getFeedMetaBits(item);
+    if (metaBits.length) {
+      const meta = createElement("div", "lore-feed-item-meta", metaBits.join(" • "));
+      body.appendChild(meta);
     }
-    if (typeof item.count === "number") {
-      meta.appendChild(createTag(`${item.count}`));
-    }
-    body.appendChild(meta);
     const details = renderFeedItemDetails(item);
     if (details) body.appendChild(details);
     row.append(icon, body);
@@ -1536,21 +1607,21 @@ export function setup(ctx: SpindleFrontendContext) {
     head.appendChild(copy);
 
     const tags = createElement("div", "lore-feed-session-meta");
-    tags.append(
-      createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"),
-      createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"),
-      createTag(`${session.items.length} event${session.items.length === 1 ? "" : "s"}`),
-      createTag(formatCapturedAt(session.startedAt)),
+    tags.appendChild(
+      createStatus(
+        getSessionStatusLabel(session),
+        session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn",
+      ),
     );
-    if (typeof elapsedMs === "number") {
-      tags.appendChild(createTag(formatDurationShort(elapsedMs)));
-    }
-    if (session.resolvedConnectionId) {
-      tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
-    }
-    if (session.fallbackReason && session.status !== "failed") {
-      tags.appendChild(createTag("Fallback path", "warn"));
-    }
+    const sessionBits = [
+      session.controllerUsed ? "controller" : "deterministic",
+      `${session.items.length} event${session.items.length === 1 ? "" : "s"}`,
+      formatCapturedAt(session.startedAt),
+    ];
+    if (typeof elapsedMs === "number") sessionBits.push(formatDurationShort(elapsedMs));
+    if (session.resolvedConnectionId) sessionBits.push(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`);
+    if (session.fallbackReason && session.status !== "failed") sessionBits.push("Fallback path");
+    tags.appendChild(createElement("div", "lore-feed-session-meta-text", sessionBits.join(" • ")));
     head.appendChild(tags);
     wrap.appendChild(head);
 
@@ -1585,6 +1656,7 @@ export function setup(ctx: SpindleFrontendContext) {
     for (const [value, label] of [
       ["all", "All"],
       ["scope", "Scopes"],
+      ["search", "Search"],
       ["manifest", "Manifest"],
       ["reserved", "Reserved"],
       ["pulled", "Pulled"],
@@ -1606,7 +1678,7 @@ export function setup(ctx: SpindleFrontendContext) {
       feed.appendChild(
         createEmpty(
           "No retrieval activity yet",
-          "Send a message to watch Lore Recall stream scope choice, manifest selection, pulled entries, injection, and fallback events here.",
+          "Send a message to watch Lore Recall stream scope choice, global search, manifest selection, pulled entries, injection, and fallback events here.",
         ),
       );
       section.appendChild(feed);

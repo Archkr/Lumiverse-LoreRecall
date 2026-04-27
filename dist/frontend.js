@@ -306,24 +306,34 @@ var LORE_RECALL_CSS = `
   --lr-text: var(--lumiverse-text, #dde2ea);
   --lr-muted: var(--lumiverse-text-muted, #9aa0ae);
   --lr-dim: var(--lumiverse-text-dim, #686d7b);
+  --lr-icon: var(--lumiverse-icon, var(--lr-muted));
+  --lr-icon-dim: var(--lumiverse-icon-dim, var(--lr-dim));
 
-  --lr-bg-0: var(--lumiverse-fill, #12151c);
+  --lr-bg-0: var(--lumiverse-bg-elevated, #12151c);
+  --lr-bg-1: var(--lumiverse-fill, #171b23);
   --lr-panel: var(--lumiverse-fill-subtle, #191c24);
+  --lr-panel-hover: var(--lumiverse-fill-hover, #222734);
+  --lr-fill-strong: var(--lumiverse-fill-medium, #242a37);
 
   --lr-line: var(--lumiverse-border, #262a34);
   --lr-line-2: var(--lumiverse-border-hover, #363a46);
+  --lr-line-light: var(--lumiverse-border-light, #424957);
 
-  --lr-acc: var(--lumiverse-accent, #6b8ff0);
-  --lr-acc-fg: var(--lumiverse-accent-fg, #ffffff);
+  --lr-acc: var(--lumiverse-primary, #6b8ff0);
+  --lr-acc-hover: var(--lumiverse-primary-hover, #5a7ee2);
+  --lr-acc-soft: var(--lumiverse-primary-light, rgba(107, 143, 240, 0.18));
+  --lr-acc-muted: var(--lumiverse-primary-muted, rgba(107, 143, 240, 0.1));
+  --lr-acc-fg: var(--lumiverse-primary-text, #ffffff);
 
-  --lr-warn: #e07856;
-  --lr-good: #5fb380;
+  --lr-warn: var(--lumiverse-warning, #e07856);
+  --lr-good: var(--lumiverse-success, #5fb380);
+  --lr-danger: var(--lumiverse-danger, #d46a72);
 
-  --lr-r-sm: 5px;
-  --lr-r: 7px;
-  --lr-r-lg: 10px;
+  --lr-r-sm: var(--lumiverse-radius-sm, var(--lcs-radius-xs, 5px));
+  --lr-r: var(--lumiverse-radius-md, var(--lumiverse-radius, 7px));
+  --lr-r-lg: var(--lumiverse-radius-lg, var(--lcs-radius, 10px));
 
-  --lr-t: 120ms ease;
+  --lr-t: var(--lumiverse-transition-fast, var(--lcs-transition-fast, 120ms ease));
 
   color: var(--lr-text);
   font-family: inherit;
@@ -432,12 +442,12 @@ var LORE_RECALL_CSS = `
 
 .lore-nav-btn:hover {
   border-color: var(--lr-line-2);
-  background: color-mix(in srgb, var(--lr-text) 4%, transparent);
+  background: var(--lr-panel-hover);
 }
 
 .lore-nav-btn.active {
   border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
-  background: color-mix(in srgb, var(--lr-acc) 12%, transparent);
+  background: color-mix(in srgb, var(--lr-acc) 12%, var(--lr-bg-0));
 }
 
 .lore-nav-copy {
@@ -657,7 +667,7 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-btn:hover {
-  background: color-mix(in srgb, var(--lr-text) 4%, transparent);
+  background: var(--lr-panel-hover);
   border-color: var(--lr-line-2);
 }
 
@@ -666,7 +676,7 @@ var LORE_RECALL_CSS = `
 .lore-btn:focus-visible {
   outline: none;
   border-color: var(--lr-acc);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lr-acc) 25%, transparent);
+  box-shadow: 0 0 0 3px var(--lr-acc-muted);
 }
 
 .lore-btn[disabled] {
@@ -681,18 +691,18 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-btn-primary:hover {
-  background: color-mix(in srgb, var(--lr-acc) 88%, #000);
-  border-color: color-mix(in srgb, var(--lr-acc) 88%, #000);
+  background: var(--lr-acc-hover);
+  border-color: var(--lr-acc-hover);
 }
 
 .lore-btn-danger {
-  color: var(--lr-warn);
-  border-color: color-mix(in srgb, var(--lr-warn) 35%, var(--lr-line));
+  color: var(--lr-danger);
+  border-color: color-mix(in srgb, var(--lr-danger) 35%, var(--lr-line));
 }
 
 .lore-btn-danger:hover {
-  background: color-mix(in srgb, var(--lr-warn) 10%, transparent);
-  border-color: color-mix(in srgb, var(--lr-warn) 50%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--lr-danger) 50%, var(--lr-line));
 }
 
 .lore-btn-sm {
@@ -901,7 +911,7 @@ var LORE_RECALL_CSS = `
 
 .lore-note.warn { border-left-color: var(--lr-warn); }
 .lore-note.info { border-left-color: var(--lr-acc); }
-.lore-note.error { border-left-color: var(--lr-warn); }
+.lore-note.error { border-left-color: var(--lr-danger); }
 
 .lore-note-title {
   font-size: 12.5px;
@@ -930,7 +940,7 @@ var LORE_RECALL_CSS = `
 .lore-banner.info { border-left-color: var(--lr-acc); }
 .lore-banner.success { border-left-color: var(--lr-good); }
 .lore-banner.warn { border-left-color: var(--lr-warn); }
-.lore-banner.error { border-left-color: var(--lr-warn); }
+.lore-banner.error { border-left-color: var(--lr-danger); }
 
 .lore-banner-title {
   font-size: 12.5px;
@@ -1011,8 +1021,8 @@ var LORE_RECALL_CSS = `
   inset: 0 auto 0 0;
   min-width: 8%;
   border-radius: inherit;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--lr-acc) 85%, #fff), var(--lr-acc));
-  transition: width 160ms ease;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--lr-acc) 36%, var(--lr-bg-0)), var(--lr-acc));
+  transition: width var(--lr-t);
 }
 
 /* retrieval activity */
@@ -1047,11 +1057,86 @@ var LORE_RECALL_CSS = `
   gap: 8px;
 }
 
+.lore-search-events {
+  display: grid;
+  gap: 8px;
+}
+
+.lore-search-event {
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: color-mix(in srgb, var(--lr-bg-1) 90%, transparent);
+}
+
+.lore-search-event-summary {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.lore-search-event-summary::-webkit-details-marker {
+  display: none;
+}
+
+.lore-search-event-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lore-search-event-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-search-event-body,
+.lore-search-event-match-body {
+  font-size: 10.75px;
+  color: var(--lr-muted);
+  line-height: 1.45;
+}
+
+.lore-search-event-meta {
+  justify-content: flex-end;
+}
+
+.lore-search-event-matches {
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+.lore-search-event-match {
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: var(--lr-r-sm);
+  border: 1px solid var(--lr-line);
+  background: color-mix(in srgb, var(--lr-bg-0) 96%, transparent);
+}
+
+.lore-search-event-match-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-search-event-match-meta {
+  font-size: 10px;
+  color: var(--lr-dim);
+}
+
 .lore-search-scope {
   padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--lr-acc) 24%, var(--lr-line));
   border-radius: var(--lr-r);
-  background: color-mix(in srgb, var(--lr-bg-0) 84%, var(--lr-acc) 6%);
+  background: color-mix(in srgb, var(--lr-bg-1) 92%, var(--lr-acc) 8%);
 }
 
 .lore-search-scope-head {
@@ -1179,7 +1264,7 @@ var LORE_RECALL_CSS = `
 .lore-feed {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .lore-feed-filters {
@@ -1188,25 +1273,26 @@ var LORE_RECALL_CSS = `
 
 .lore-feed-filters .lore-chip {
   height: 24px;
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 10px;
+  font-size: 10.5px;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--lr-panel) 92%, transparent);
 }
 
 .lore-feed-session {
   display: flex;
   flex-direction: column;
-  gap: 8px;
   padding: 0;
   border: 1px solid var(--lr-line);
   border-radius: var(--lr-r);
   background: var(--lr-bg-0);
-  border-left: 2px solid var(--lr-line-2);
+  overflow: hidden;
 }
 
-.lore-feed-session.info { border-left-color: var(--lr-acc); }
-.lore-feed-session.warn { border-left-color: var(--lr-warn); }
-.lore-feed-session.success { border-left-color: var(--lr-good); }
-.lore-feed-session.error { border-left-color: var(--lr-warn); }
+.lore-feed-session.info { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--lr-acc) 58%, transparent); }
+.lore-feed-session.warn { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--lr-warn) 58%, transparent); }
+.lore-feed-session.success { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--lr-good) 58%, transparent); }
+.lore-feed-session.error { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--lr-danger) 58%, transparent); }
 
 .lore-feed-session-head {
   appearance: none;
@@ -1224,7 +1310,7 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-session-head:hover {
-  background: color-mix(in srgb, var(--lr-text) 2.5%, transparent);
+  background: var(--lr-panel-hover);
 }
 
 .lore-feed-session-copy {
@@ -1260,16 +1346,16 @@ var LORE_RECALL_CSS = `
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 5px;
+  gap: 7px;
+  min-width: 0;
 }
 
-.lore-feed-session-meta .lore-tag,
-.lore-feed-session-meta .lore-status,
-.lore-feed-item-stamps .lore-tag,
-.lore-feed-item-meta .lore-tag,
-.lore-feed-chip-row .lore-tag {
-  font-size: 10px;
+.lore-feed-session-meta-text {
+  font-size: 10.25px;
+  color: var(--lr-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .lore-feed-session-items {
@@ -1285,8 +1371,8 @@ var LORE_RECALL_CSS = `
 .lore-feed-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  padding: 8px 11px;
+  gap: 10px;
+  padding: 9px 11px;
   border-bottom: 1px solid var(--lr-line);
 }
 
@@ -1295,40 +1381,44 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-item-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
-  background: color-mix(in srgb, var(--lr-text) 8%, transparent);
-  color: var(--lr-text);
+  background: color-mix(in srgb, var(--lr-line-light) 45%, transparent);
+  color: var(--lr-icon);
   flex-shrink: 0;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .lore-feed-item.info .lore-feed-item-icon {
-  background: color-mix(in srgb, var(--lr-acc) 12%, transparent);
-  color: color-mix(in srgb, var(--lr-acc) 80%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-acc) 16%, transparent);
+  color: color-mix(in srgb, var(--lr-acc) 80%, var(--lr-icon));
 }
 
-.lore-feed-item.warn .lore-feed-item-icon,
+.lore-feed-item.warn .lore-feed-item-icon {
+  background: color-mix(in srgb, var(--lr-warn) 14%, transparent);
+  color: color-mix(in srgb, var(--lr-warn) 82%, var(--lr-icon));
+}
+
 .lore-feed-item.error .lore-feed-item-icon {
-  background: color-mix(in srgb, var(--lr-warn) 12%, transparent);
-  color: color-mix(in srgb, var(--lr-warn) 82%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-danger) 14%, transparent);
+  color: color-mix(in srgb, var(--lr-danger) 82%, var(--lr-icon));
 }
 
 .lore-feed-item.success .lore-feed-item-icon {
-  background: color-mix(in srgb, var(--lr-good) 12%, transparent);
-  color: color-mix(in srgb, var(--lr-good) 82%, var(--lr-text));
+  background: color-mix(in srgb, var(--lr-good) 14%, transparent);
+  color: color-mix(in srgb, var(--lr-good) 82%, var(--lr-icon));
 }
 
 .lore-feed-item-body {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -1340,7 +1430,7 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-item-label {
-  font-size: 11.75px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--lr-text);
   min-width: 0;
@@ -1363,18 +1453,19 @@ var LORE_RECALL_CSS = `
 .lore-feed-item-summary {
   font-size: 11px;
   color: var(--lr-muted);
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
 .lore-feed-item-meta {
-  gap: 5px;
+  font-size: 10px;
+  color: var(--lr-dim);
 }
 
 .lore-feed-details {
   margin-top: 2px;
   border: 1px solid var(--lr-line);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--lr-text) 1.5%, transparent);
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-panel) 88%, transparent);
 }
 
 .lore-feed-details-summary {
@@ -1438,10 +1529,10 @@ var LORE_RECALL_CSS = `
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  padding: 8px 9px;
+  padding: 7px 8px;
   border: 1px solid var(--lr-line);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--lr-panel) 85%, transparent);
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-bg-1) 88%, transparent);
 }
 
 .lore-feed-detail-main {
@@ -1487,8 +1578,8 @@ var LORE_RECALL_CSS = `
 
 .lore-feed-note {
   padding: 7px 9px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--lr-panel) 88%, transparent);
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-bg-1) 92%, transparent);
   border-left: 2px solid var(--lr-line-2);
   font-size: 10.75px;
   color: var(--lr-muted);
@@ -2741,6 +2832,23 @@ function setup(ctx) {
         manifestEntryCount: scope.manifestEntryCount,
         selectedEntryIds: scope.selectedEntryIds
       })),
+      searchEvents: (preview.searchEvents ?? []).map((event) => ({
+        query: event.query,
+        global: event.global,
+        resultCount: event.resultCount,
+        summary: event.summary,
+        matches: event.matches.map((node) => ({
+          entryId: node.entryId,
+          label: node.label,
+          worldBookId: node.worldBookId,
+          worldBookName: node.worldBookName,
+          breadcrumb: node.breadcrumb,
+          score: node.score,
+          reasons: node.reasons,
+          selectionRole: node.selectionRole ?? null,
+          previewText: node.previewText
+        }))
+      })),
       reservedConstantNodes: getPreviewReservedNodes(preview).map((node) => ({
         entryId: node.entryId,
         label: node.label,
@@ -2910,6 +3018,35 @@ function setup(ctx) {
     }
     return list;
   }
+  function renderSearchEvents(searchEvents) {
+    if (!searchEvents?.length)
+      return null;
+    const list = createElement("div", "lore-search-events");
+    for (const event of searchEvents) {
+      const item = createElement("details", "lore-search-event");
+      const summary = createElement("summary", "lore-search-event-summary");
+      const copy = createElement("div", "lore-search-event-copy");
+      copy.append(createElement("div", "lore-search-event-title", event.query), createElement("div", "lore-search-event-body", event.summary));
+      const meta = createElement("div", "lore-cluster lore-search-event-meta");
+      meta.append(createTag(event.global ? "Global" : "Scoped", "accent"), createTag(`${event.resultCount} result${event.resultCount === 1 ? "" : "s"}`));
+      summary.append(copy, meta);
+      item.appendChild(summary);
+      if (event.matches.length) {
+        const matches = createElement("div", "lore-search-event-matches");
+        for (const match of event.matches) {
+          const matchRow = createElement("div", "lore-search-event-match");
+          matchRow.append(createElement("div", "lore-search-event-match-title", match.label), createElement("div", "lore-search-event-match-meta", `${match.worldBookName} | ${match.breadcrumb || "Root"}`));
+          if (match.previewText?.trim()) {
+            matchRow.appendChild(createElement("div", "lore-search-event-match-body", clipText(match.previewText, 180)));
+          }
+          matches.appendChild(matchRow);
+        }
+        item.appendChild(matches);
+      }
+      list.appendChild(item);
+    }
+    return list;
+  }
   function renderSearchActivity(preview) {
     if (!preview)
       return null;
@@ -2920,7 +3057,12 @@ function setup(ctx) {
     const manifestCounts = renderScopeManifestCounts(preview.scopeManifestCounts ?? []);
     if (manifestCounts)
       wrap.appendChild(manifestCounts);
+    const searchEvents = renderSearchEvents(preview.searchEvents ?? []);
+    if (searchEvents)
+      wrap.appendChild(searchEvents);
     if (!preview.trace?.length) {
+      if (wrap.childElementCount)
+        return wrap;
       wrap.appendChild(createEmpty("No selection activity", "This turn did not record any traversal or retrieval steps."));
       return wrap;
     }
@@ -2979,7 +3121,7 @@ function setup(ctx) {
     }
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
-    searches.append(createElement("div", "lore-last-panel-title", "Selected nodes"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
+    searches.append(createElement("div", "lore-last-panel-title", "Search & scopes"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
     const pulled = createElement("div", "lore-last-panel");
     pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
     const reserved = createElement("div", "lore-last-panel");
@@ -2999,6 +3141,8 @@ function setup(ctx) {
     switch (item.kind) {
       case "scope":
         return "S";
+      case "search":
+        return "⌕";
       case "manifest":
         return "M";
       case "reserved":
@@ -3012,6 +3156,19 @@ function setup(ctx) {
       default:
         return "T";
     }
+  }
+  function getFeedMetaBits(item) {
+    const bits = [];
+    if (item.kind === "search" && item.searchQuery) {
+      bits.push(item.searchGlobal ? "global search" : "search");
+      bits.push(`query "${item.searchQuery}"`);
+    } else if (item.phase && item.phase !== "session") {
+      bits.push(item.phase.replace(/_/g, " "));
+    }
+    if (typeof item.count === "number") {
+      bits.push(item.kind === "search" ? `${item.count} match${item.count === 1 ? "" : "es"}` : `${item.count}`);
+    }
+    return bits;
   }
   function getFeedItemTone(item) {
     switch (item.tone) {
@@ -3200,7 +3357,7 @@ function setup(ctx) {
     }
     if (hasEntries) {
       const group = createElement("div", "lore-feed-detail-group");
-      group.append(createElement("div", "lore-feed-detail-title", `Entries (${item.entries.length})`), renderFeedEntryRows(item.entries));
+      group.append(createElement("div", "lore-feed-detail-title", `${item.kind === "search" ? "Matches" : "Entries"} (${item.entries.length})`), renderFeedEntryRows(item.entries));
       body.appendChild(group);
     }
     if (hasDetails) {
@@ -3229,16 +3386,11 @@ function setup(ctx) {
     stamps.appendChild(createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
     top.append(createElement("div", "lore-feed-item-label", item.label), stamps);
     body.append(top, createElement("div", "lore-feed-item-summary", item.summary));
-    const meta = createElement("div", "lore-cluster");
-    meta.classList.add("lore-feed-item-meta");
-    meta.appendChild(createTag(item.kind === "trace" ? "trace" : item.kind.replace(/_/g, " "), item.kind === "issue" ? "warn" : "accent"));
-    if (item.phase && item.phase !== "session") {
-      meta.appendChild(createTag(item.phase.replace(/_/g, " ")));
+    const metaBits = getFeedMetaBits(item);
+    if (metaBits.length) {
+      const meta = createElement("div", "lore-feed-item-meta", metaBits.join(" • "));
+      body.appendChild(meta);
     }
-    if (typeof item.count === "number") {
-      meta.appendChild(createTag(`${item.count}`));
-    }
-    body.appendChild(meta);
     const details = renderFeedItemDetails(item);
     if (details)
       body.appendChild(details);
@@ -3263,16 +3415,19 @@ function setup(ctx) {
     copy.append(createElement("span", "lore-feed-session-caret", expanded ? "▾" : "▸"), createElement("div", "lore-feed-session-title", session.mode === "traversal" ? "Traversal retrieval" : "Collapsed retrieval"));
     head.appendChild(copy);
     const tags = createElement("div", "lore-feed-session-meta");
-    tags.append(createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"), createTag(session.controllerUsed ? "Controller used" : "Deterministic only", session.controllerUsed ? "good" : "warn"), createTag(`${session.items.length} event${session.items.length === 1 ? "" : "s"}`), createTag(formatCapturedAt(session.startedAt)));
-    if (typeof elapsedMs === "number") {
-      tags.appendChild(createTag(formatDurationShort(elapsedMs)));
-    }
-    if (session.resolvedConnectionId) {
-      tags.appendChild(createTag(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`));
-    }
-    if (session.fallbackReason && session.status !== "failed") {
-      tags.appendChild(createTag("Fallback path", "warn"));
-    }
+    tags.appendChild(createStatus(getSessionStatusLabel(session), session.status === "running" ? "accent" : session.status === "completed" ? "on" : "warn"));
+    const sessionBits = [
+      session.controllerUsed ? "controller" : "deterministic",
+      `${session.items.length} event${session.items.length === 1 ? "" : "s"}`,
+      formatCapturedAt(session.startedAt)
+    ];
+    if (typeof elapsedMs === "number")
+      sessionBits.push(formatDurationShort(elapsedMs));
+    if (session.resolvedConnectionId)
+      sessionBits.push(`Conn ${truncateMiddle(session.resolvedConnectionId, 8, 6)}`);
+    if (session.fallbackReason && session.status !== "failed")
+      sessionBits.push("Fallback path");
+    tags.appendChild(createElement("div", "lore-feed-session-meta-text", sessionBits.join(" • ")));
     head.appendChild(tags);
     wrap.appendChild(head);
     if (expanded && session.fallbackReason) {
@@ -3297,6 +3452,7 @@ function setup(ctx) {
     for (const [value, label] of [
       ["all", "All"],
       ["scope", "Scopes"],
+      ["search", "Search"],
       ["manifest", "Manifest"],
       ["reserved", "Reserved"],
       ["pulled", "Pulled"],
@@ -3312,7 +3468,7 @@ function setup(ctx) {
     const feed = createElement("div", "lore-feed");
     const sessions = state.retrievalFeed?.sessions ?? [];
     if (!sessions.length) {
-      feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch Lore Recall stream scope choice, manifest selection, pulled entries, injection, and fallback events here."));
+      feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch Lore Recall stream scope choice, global search, manifest selection, pulled entries, injection, and fallback events here."));
       section.appendChild(feed);
       return section;
     }

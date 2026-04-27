@@ -181,6 +181,14 @@ export interface PreviewScopeManifest {
   selectedEntryIds: string[];
 }
 
+export interface RetrievalSearchEvent {
+  query: string;
+  global: boolean;
+  resultCount: number;
+  summary: string;
+  matches: PreviewNode[];
+}
+
 export interface TraversalTraceStep {
   step: number;
   phase: TraversalTracePhase;
@@ -209,6 +217,7 @@ export interface RetrievalPreview {
   selectedScopes: PreviewScope[];
   retrievedScopes: PreviewScope[];
   scopeManifestCounts: PreviewScopeManifest[];
+  searchEvents: RetrievalSearchEvent[];
   reservedConstantNodes: PreviewNode[];
   pulledNodes: PreviewNode[];
   injectedNodes: PreviewNode[];
@@ -225,7 +234,7 @@ export interface RetrievalPreview {
   resolvedConnectionId?: string | null;
 }
 
-export type RetrievalFeedItemKind = "trace" | "scope" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
+export type RetrievalFeedItemKind = "trace" | "scope" | "search" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
 export type RetrievalFeedItemTone = "info" | "warn" | "error" | "success";
 export type RetrievalSessionStatus = "running" | "completed" | "fallback" | "failed";
 
@@ -240,6 +249,8 @@ export interface RetrievalFeedItem {
   count?: number | null;
   scopes?: PreviewScope[];
   entries?: PreviewNode[];
+  searchQuery?: string | null;
+  searchGlobal?: boolean | null;
   details?: string[];
   tone?: RetrievalFeedItemTone;
 }
