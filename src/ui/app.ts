@@ -1673,24 +1673,25 @@ export function setup(ctx: SpindleFrontendContext) {
     return null;
   }
 
-  function renderFlowStrip(session: RetrievalSession): HTMLElement {
+  function renderFlowLine(session: RetrievalSession): HTMLElement {
     const counts = getSessionFlowCounts(session);
-    const strip = createElement("div", "lore-flow-strip");
+    const wrap = createElement("div", "lore-flow-line");
     const steps: Array<[string, string, number]> = [
-      ["scope", "Scope", counts.scopes],
-      ["manifest", "Manifest", counts.manifest],
-      ["pulled", "Pulled", counts.pulled],
-      ["injected", "Injected", counts.injected],
+      ["scope", "scope", counts.scopes],
+      ["manifest", "manifest", counts.manifest],
+      ["pulled", "pulled", counts.pulled],
+      ["injected", "injected", counts.injected],
     ];
-    for (const [kind, label, value] of steps) {
-      const step = createElement("div", `lore-flow-step ${kind}${value === 0 ? " empty" : ""}`);
-      step.append(
-        createElement("div", "lore-flow-step-label", label),
-        createElement("div", "lore-flow-step-value", String(value)),
+    steps.forEach(([kind, label, value], i) => {
+      if (i > 0) wrap.appendChild(createElement("span", "lore-flow-line-arrow", "→"));
+      const cell = createElement("span", `lore-flow-line-cell ${kind}${value === 0 ? " empty" : ""}`);
+      cell.append(
+        createElement("span", "lore-flow-line-num", String(value)),
+        createElement("span", "lore-flow-line-label", label),
       );
-      strip.appendChild(step);
-    }
-    return strip;
+      wrap.appendChild(cell);
+    });
+    return wrap;
   }
 
   function renderFeedSession(session: RetrievalSession, index: number): HTMLElement | null {
@@ -1715,22 +1716,24 @@ export function setup(ctx: SpindleFrontendContext) {
       render();
     });
 
-    // Row 1: mode title + elapsed
+    // Row 1: mode title + elapsed + caret
     const topRow = createElement("div", "lore-feed-session-row top");
-    const modeWrap = createElement("div", "lore-feed-session-mode");
-    modeWrap.appendChild(document.createTextNode(session.mode === "traversal" ? "Traversal" : "Collapsed"));
-    if (session.controllerUsed) {
-      modeWrap.appendChild(createElement("span", "accent", "controller"));
-    } else {
-      modeWrap.appendChild(createElement("span", "accent", "deterministic"));
-    }
-    topRow.appendChild(modeWrap);
+    topRow.appendChild(
+      createElement(
+        "div",
+        "lore-feed-session-mode",
+        session.mode === "traversal" ? "Traversal" : "Collapsed",
+      ),
+    );
+    const trailing = createElement("div", "lore-feed-session-trailing");
     if (typeof elapsedMs === "number") {
-      topRow.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
+      trailing.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
     }
+    trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
+    topRow.appendChild(trailing);
     head.appendChild(topRow);
 
-    // Row 2: status + stamps + caret
+    // Row 2: status + compact meta
     const midRow = createElement("div", "lore-feed-session-row");
     const status = createStatus(
       getSessionStatusLabel(session),
@@ -1738,36 +1741,19 @@ export function setup(ctx: SpindleFrontendContext) {
     );
     if (isRunning) status.classList.add("live");
     midRow.appendChild(status);
-
-    const stamps = createElement("div", "lore-feed-session-stamps");
-    stamps.appendChild(createElement("span", "", formatCapturedAt(session.startedAt)));
-    stamps.appendChild(createElement("span", "", "·"));
-    stamps.appendChild(
-      createElement("span", "", `${session.items.length} event${session.items.length === 1 ? "" : "s"}`),
-    );
-    if (session.fallbackReason && session.status !== "failed") {
-      stamps.appendChild(createElement("span", "", "·"));
-      stamps.appendChild(createElement("span", "", "fallback"));
-    }
-    midRow.appendChild(stamps);
-
-    const trailing = createElement("div", "lore-feed-session-trailing");
-    trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
-    midRow.appendChild(trailing);
+    const stampBits: string[] = [formatCapturedAt(session.startedAt)];
+    stampBits.push(session.controllerUsed ? "controller" : "deterministic");
+    if (session.fallbackReason && session.status !== "failed") stampBits.push("fallback");
+    midRow.appendChild(createElement("div", "lore-feed-session-stamps", stampBits.join(" · ")));
     head.appendChild(midRow);
 
-    // Row 3: timeline
-    if (session.items.length) {
-      const timelineRow = createElement("div", "lore-feed-session-row");
-      timelineRow.appendChild(renderFeedTimeline(session));
-      head.appendChild(timelineRow);
-    }
+    // Row 3: flow line - compact one-line summary
+    if (hasFlow) head.appendChild(renderFlowLine(session));
 
     wrap.appendChild(head);
 
-    // ---- Body (always visible when there's data) ----
+    // ---- Body (top-injected preview + fallback + events toggle) ----
     const body = createElement("div", "lore-feed-session-body");
-    if (hasFlow) body.appendChild(renderFlowStrip(session));
 
     if (topInjected) {
       const top = createElement("div", "lore-feed-session-top-injected");
@@ -2189,7 +2175,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const ws = createElement("div", "lore-cluster");
     const openBtn = createElement(
       "button",
-      "lore-btn lore-btn-primary lore-btn-sm lore-btn-trailing-icon lore-btn-full",
+      "lore-btn lore-btn-primary lore-btn-sm lore-btn-trailing-icon",
     ) as HTMLButtonElement;
     openBtn.type = "button";
     openBtn.appendChild(createElement("span", "", "Open tree workspace"));
