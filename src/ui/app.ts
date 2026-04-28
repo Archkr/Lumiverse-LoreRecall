@@ -1639,14 +1639,73 @@ export function setup(ctx: SpindleFrontendContext) {
     return row;
   }
 
+  function getSessionFlowCounts(session: RetrievalSession): {
+    scopes: number;
+    manifest: number;
+    pulled: number;
+    injected: number;
+  } {
+    const last: Record<string, number | undefined> = {};
+    const occurrences: Record<string, number> = {};
+    for (const item of session.items) {
+      occurrences[item.kind] = (occurrences[item.kind] ?? 0) + 1;
+      if (typeof item.count === "number" && Number.isFinite(item.count)) {
+        last[item.kind] = item.count;
+      }
+    }
+    const pick = (kind: string): number => last[kind] ?? occurrences[kind] ?? 0;
+    return {
+      scopes: pick("scope"),
+      manifest: pick("manifest"),
+      pulled: pick("pulled"),
+      injected: pick("injected"),
+    };
+  }
+
+  function getSessionTopInjected(session: RetrievalSession): PreviewNode | null {
+    for (let i = session.items.length - 1; i >= 0; i -= 1) {
+      const item = session.items[i];
+      if (item.kind === "injected" && item.entries?.length) return item.entries[0];
+    }
+    for (const item of session.items) {
+      if (item.kind === "injected" && item.entries?.length) return item.entries[0];
+    }
+    return null;
+  }
+
+  function renderFlowStrip(session: RetrievalSession): HTMLElement {
+    const counts = getSessionFlowCounts(session);
+    const strip = createElement("div", "lore-flow-strip");
+    const steps: Array<[string, string, number]> = [
+      ["scope", "Scope", counts.scopes],
+      ["manifest", "Manifest", counts.manifest],
+      ["pulled", "Pulled", counts.pulled],
+      ["injected", "Injected", counts.injected],
+    ];
+    for (const [kind, label, value] of steps) {
+      const step = createElement("div", `lore-flow-step ${kind}${value === 0 ? " empty" : ""}`);
+      step.append(
+        createElement("div", "lore-flow-step-label", label),
+        createElement("div", "lore-flow-step-value", String(value)),
+      );
+      strip.appendChild(step);
+    }
+    return strip;
+  }
+
   function renderFeedSession(session: RetrievalSession, index: number): HTMLElement | null {
     const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
     if (drawerFeedFilter !== "all" && !visibleItems.length) return null;
     const expanded = isSessionExpanded(session, index);
     const elapsedMs = getSessionElapsedMs(session);
     const isRunning = session.status === "running";
+    const counts = getSessionFlowCounts(session);
+    const hasFlow = counts.scopes + counts.manifest + counts.pulled + counts.injected > 0;
+    const topInjected = getSessionTopInjected(session);
 
-    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}${isRunning ? " live" : ""}`);
+    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}${isRunning ? " live" : ""}${expanded ? " expanded" : " collapsed"}`);
+
+    // ---- Card head (stacked rows) ----
     const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle") as HTMLButtonElement;
     head.type = "button";
     head.setAttribute("aria-expanded", expanded ? "true" : "false");
@@ -1656,40 +1715,80 @@ export function setup(ctx: SpindleFrontendContext) {
       render();
     });
 
+    // Row 1: mode title + elapsed
+    const topRow = createElement("div", "lore-feed-session-row top");
+    const modeWrap = createElement("div", "lore-feed-session-mode");
+    modeWrap.appendChild(document.createTextNode(session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    if (session.controllerUsed) {
+      modeWrap.appendChild(createElement("span", "accent", "controller"));
+    } else {
+      modeWrap.appendChild(createElement("span", "accent", "deterministic"));
+    }
+    topRow.appendChild(modeWrap);
+    if (typeof elapsedMs === "number") {
+      topRow.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
+    }
+    head.appendChild(topRow);
+
+    // Row 2: status + stamps + caret
+    const midRow = createElement("div", "lore-feed-session-row");
     const status = createStatus(
       getSessionStatusLabel(session),
       isRunning ? "accent" : session.status === "completed" ? "on" : "warn",
     );
     if (isRunning) status.classList.add("live");
-    head.appendChild(status);
+    midRow.appendChild(status);
 
-    const mode = createElement(
-      "span",
-      "lore-feed-session-mode",
-      session.mode === "traversal" ? "Traversal" : "Collapsed",
+    const stamps = createElement("div", "lore-feed-session-stamps");
+    stamps.appendChild(createElement("span", "", formatCapturedAt(session.startedAt)));
+    stamps.appendChild(createElement("span", "", "·"));
+    stamps.appendChild(
+      createElement("span", "", `${session.items.length} event${session.items.length === 1 ? "" : "s"}`),
     );
-    head.appendChild(mode);
-
-    head.appendChild(renderFeedTimeline(session));
-
-    const meta = createElement("div", "lore-feed-session-meta");
-    if (typeof elapsedMs === "number") {
-      meta.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
+    if (session.fallbackReason && session.status !== "failed") {
+      stamps.appendChild(createElement("span", "", "·"));
+      stamps.appendChild(createElement("span", "", "fallback"));
     }
-    const extraBits: string[] = [];
-    extraBits.push(session.controllerUsed ? "controller" : "deterministic");
-    extraBits.push(`${session.items.length} event${session.items.length === 1 ? "" : "s"}`);
-    if (session.resolvedConnectionId) extraBits.push(truncateMiddle(session.resolvedConnectionId, 6, 4));
-    if (session.fallbackReason && session.status !== "failed") extraBits.push("fallback");
-    meta.appendChild(createElement("span", "lore-feed-session-extra", extraBits.join(" · ")));
-    const caret = makeIconSpan("caret", "lore-feed-session-caret");
-    meta.appendChild(caret);
-    head.appendChild(meta);
+    midRow.appendChild(stamps);
+
+    const trailing = createElement("div", "lore-feed-session-trailing");
+    trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
+    midRow.appendChild(trailing);
+    head.appendChild(midRow);
+
+    // Row 3: timeline
+    if (session.items.length) {
+      const timelineRow = createElement("div", "lore-feed-session-row");
+      timelineRow.appendChild(renderFeedTimeline(session));
+      head.appendChild(timelineRow);
+    }
 
     wrap.appendChild(head);
 
-    if (expanded && session.fallbackReason) {
-      wrap.appendChild(
+    // ---- Body (always visible when there's data) ----
+    const body = createElement("div", "lore-feed-session-body");
+    if (hasFlow) body.appendChild(renderFlowStrip(session));
+
+    if (topInjected) {
+      const top = createElement("div", "lore-feed-session-top-injected");
+      top.append(
+        createElement("div", "lore-feed-session-top-injected-kicker", "Top injected"),
+        createElement(
+          "div",
+          "lore-feed-session-top-injected-label",
+          topInjected.label || "Untitled entry",
+        ),
+        createElement(
+          "div",
+          "lore-feed-session-top-injected-meta",
+          [topInjected.worldBookName, topInjected.breadcrumb || "Root"].filter(Boolean).join(" · "),
+        ),
+      );
+      body.appendChild(top);
+    }
+
+    if (session.fallbackReason) {
+      body.appendChild(
         createBanner(
           session.status === "failed" ? "error" : "warn",
           session.status === "failed" ? "Retrieval failed" : "Fallback path active",
@@ -1698,6 +1797,28 @@ export function setup(ctx: SpindleFrontendContext) {
       );
     }
 
+    const toggleLabel = createElement("div", "lore-feed-session-toggle-label");
+    toggleLabel.appendChild(makeIconSpan("caret", "caret"));
+    toggleLabel.appendChild(
+      createElement(
+        "span",
+        "",
+        expanded
+          ? `Hide ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`
+          : `Show ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`,
+      ),
+    );
+    toggleLabel.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      drawerSessionExpansion.set(session.id, !expanded);
+      render();
+    });
+    body.appendChild(toggleLabel);
+
+    if (body.childElementCount) wrap.appendChild(body);
+
+    // ---- Events list (collapsible) ----
     const items = createElement("div", "lore-feed-session-items");
     items.hidden = !expanded;
     for (const item of visibleItems) {
@@ -1725,6 +1846,34 @@ export function setup(ctx: SpindleFrontendContext) {
       rail.appendChild(marker);
     }
     return rail;
+  }
+
+  function renderHealthStrip(state: FrontendState): HTMLElement | null {
+    const diagnostics = state.diagnosticsResults ?? [];
+    const errorCount = diagnostics.filter((d) => d.severity === "error").length;
+    const warnCount = diagnostics.filter((d) => d.severity === "warn").length;
+    const total = diagnostics.length;
+    if (total === 0) return null;
+    const tone = errorCount > 0 ? "error" : "warn";
+    const strip = createElement("div", `lore-health-strip ${tone}`);
+    strip.appendChild(makeIconSpan("issue", "lore-health-strip-icon"));
+    const body = createElement("div", "lore-health-strip-body");
+    const headline =
+      errorCount > 0
+        ? `${errorCount} error${errorCount === 1 ? "" : "s"} · ${warnCount} warning${warnCount === 1 ? "" : "s"}`
+        : `${warnCount} warning${warnCount === 1 ? "" : "s"}`;
+    body.appendChild(createElement("div", "lore-health-strip-title", headline));
+    const top = diagnostics[0];
+    if (top) {
+      body.appendChild(createElement("div", "lore-health-strip-detail", clipText(top.title || top.detail || "", 120)));
+    }
+    strip.appendChild(body);
+    const cta = createButton("Open", "lore-btn lore-btn-sm", () => {
+      workspaceSection = "maintenance";
+      openSettingsWorkspace();
+    });
+    strip.appendChild(cta);
+    return strip;
   }
 
   function renderRetrievalFeedSection(state: FrontendState): HTMLElement {
@@ -1965,6 +2114,12 @@ export function setup(ctx: SpindleFrontendContext) {
       shell.appendChild(operationSection);
     }
 
+    // Health strip - surfaces diagnostics at a glance
+    if (state) {
+      const healthStrip = renderHealthStrip(state);
+      if (healthStrip) shell.appendChild(healthStrip);
+    }
+
     if (state) {
       shell.appendChild(renderRetrievalFeedSection(state));
     } else {
@@ -1995,33 +2150,35 @@ export function setup(ctx: SpindleFrontendContext) {
         ),
       );
     } else {
-      const list = createElement("div", "lore-rows");
+      const grid = createElement("div", "lore-source-grid");
       for (const bookId of managed) {
         const book = state?.allWorldBooks.find((item) => item.id === bookId);
         const status = state?.bookStatuses[bookId];
+        const isWriteOnly = state?.bookConfigs[bookId]?.permission === "write_only";
+        let tone: "ok" | "warn" | "error" = "ok";
+        if (status?.treeMissing || isWriteOnly) tone = "warn";
 
-        const row = createElement("div", "lore-row");
-        const body = createElement("div", "lore-row-body");
-        body.append(
-          createElement("div", "lore-row-title", book?.name || bookId),
-          createElement(
-            "div",
-            "lore-row-meta",
-            `${status?.entryCount ?? 0} entries · ${status?.categoryCount ?? 0} categories · ${status?.unassignedCount ?? 0} unassigned`,
-          ),
-        );
-        row.appendChild(body);
+        const pill = createElement("div", `lore-source-pill ${tone === "ok" ? "" : tone}`.trim());
+        pill.appendChild(createElement("span", "lore-source-pill-dot"));
 
-        const rowTags = createElement("div", "lore-row-tags");
-        if (status?.treeMissing) rowTags.appendChild(createTag("No tree", "warn"));
-        if (status?.attachedToCharacter) rowTags.appendChild(createTag("Attached", "neutral"));
-        if (state?.bookConfigs[bookId]?.permission === "write_only") rowTags.appendChild(createTag("Write only", "warn"));
-        if (!rowTags.childElementCount) rowTags.appendChild(createTag("Ready", "good"));
-        row.appendChild(rowTags);
+        const pillBody = createElement("div", "lore-source-pill-body");
+        pillBody.appendChild(createElement("div", "lore-source-pill-name", book?.name || bookId));
+        const metaBits: string[] = [];
+        metaBits.push(`${status?.entryCount ?? 0}e`);
+        metaBits.push(`${status?.categoryCount ?? 0}c`);
+        if ((status?.unassignedCount ?? 0) > 0) metaBits.push(`${status?.unassignedCount} unassigned`);
+        pillBody.appendChild(createElement("div", "lore-source-pill-meta", metaBits.join(" · ")));
+        pill.appendChild(pillBody);
 
-        list.appendChild(row);
+        const tags = createElement("div", "lore-source-pill-tags");
+        if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
+        if (isWriteOnly) tags.appendChild(createTag("Write only", "warn"));
+        if (!tags.childElementCount && status?.attachedToCharacter) tags.appendChild(createTag("Attached", "neutral"));
+        pill.appendChild(tags);
+
+        grid.appendChild(pill);
       }
-      sources.appendChild(list);
+      sources.appendChild(grid);
     }
 
     shell.appendChild(sources);

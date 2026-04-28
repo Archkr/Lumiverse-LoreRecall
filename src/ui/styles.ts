@@ -14,22 +14,29 @@ export const LORE_RECALL_CSS = `
   --lr-icon: var(--lumiverse-icon, var(--lr-muted));
   --lr-icon-dim: var(--lumiverse-icon-dim, var(--lr-dim));
 
-  /* Surfaces - two elevation layers */
-  --lr-bg-page: var(--lumiverse-bg-elevated, #13110f);
-  --lr-bg-panel: var(--lumiverse-fill, #1a1816);
-  --lr-bg-raised: var(--lumiverse-fill-hover, #211e1b);
+  /* Surfaces - two elevation layers.
+   * Host surface tokens: --lumiverse-bg-deep (opaque deepest), -bg-elevated
+   * (elevated surface, may be translucent), -bg-hover (raised state).
+   * --lumiverse-fill is a translucent OVERLAY (rgba black w/ alpha), not a
+   * surface, so we don't anchor a panel to it. */
+  --lr-bg-page: var(--lumiverse-bg-deep, #13110f);
+  --lr-bg-panel: var(--lumiverse-bg-elevated, #1a1816);
+  --lr-bg-raised: var(--lumiverse-bg-hover, #211e1b);
 
   /* Hairlines */
   --lr-line: var(--lumiverse-border, #2d2925);
   --lr-line-2: var(--lumiverse-border-hover, #3a3530);
   --lr-line-light: var(--lumiverse-border-light, #4a443d);
 
-  /* Accent - host primary still wins */
+  /* Accent - host primary still wins.
+   * --lr-acc-fg uses --lumiverse-primary-contrast (WCAG-aware, computed by the
+   * host via contrastFor()), NOT --lumiverse-primary-text which is a tinted
+   * translucent prose accent, never meant to sit on top of primary backgrounds. */
   --lr-acc: var(--lumiverse-primary, #6b8ff0);
   --lr-acc-hover: var(--lumiverse-primary-hover, #5a7ee2);
   --lr-acc-soft: var(--lumiverse-primary-light, rgba(107, 143, 240, 0.18));
   --lr-acc-muted: var(--lumiverse-primary-muted, rgba(107, 143, 240, 0.10));
-  --lr-acc-fg: var(--lumiverse-primary-text, #ffffff);
+  --lr-acc-fg: var(--lumiverse-primary-contrast, #ffffff);
 
   /* Lore - amber brand-only highlight, never on buttons/borders */
   --lr-lore: #d4a35a;
@@ -536,13 +543,20 @@ export const LORE_RECALL_CSS = `
   color: var(--lr-acc-fg);
   background: var(--lr-acc);
   border-color: var(--lr-acc);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  box-shadow: var(--lumiverse-highlight-inset-md, inset 0 1px 0 rgba(255, 255, 255, 0.18));
 }
 
 .lore-btn-primary:hover {
   background: var(--lr-acc-hover);
   border-color: var(--lr-acc-hover);
   color: var(--lr-acc-fg);
+}
+
+.lore-btn-primary:focus-visible {
+  border-color: var(--lr-acc);
+  box-shadow:
+    var(--lumiverse-highlight-inset-md, inset 0 1px 0 rgba(255, 255, 255, 0.18)),
+    0 0 0 3px color-mix(in srgb, var(--lr-acc) 32%, transparent);
 }
 
 .lore-btn-danger {
@@ -1281,23 +1295,32 @@ export const LORE_RECALL_CSS = `
 .lore-feed-session.live { box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-lore) 24%, transparent); }
 .lore-feed-session.live::before { background: var(--lr-lore); }
 
-/* Session lane (collapsed head) */
+/* Session card - vertical stacked layout, dense but legible at narrow widths */
 .lore-feed-session-head {
   appearance: none;
   width: 100%;
   border: 0;
   background: transparent;
   color: inherit;
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 11px 13px 11px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px 11px 18px;
   text-align: left;
   cursor: pointer;
+  transition: background var(--lr-t);
 }
 
 .lore-feed-session-head:hover { background: var(--lr-bg-raised); }
+
+.lore-feed-session-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.lore-feed-session-row.top { justify-content: space-between; }
 
 .lore-feed-session-caret {
   width: 12px;
@@ -1307,6 +1330,7 @@ export const LORE_RECALL_CSS = `
   align-items: center;
   justify-content: center;
   transition: transform var(--lr-t-slow);
+  flex-shrink: 0;
 }
 
 .lore-feed-session-toggle[aria-expanded="true"] .lore-feed-session-caret {
@@ -1315,12 +1339,23 @@ export const LORE_RECALL_CSS = `
 
 .lore-feed-session-mode {
   font-family: var(--lr-font-display);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   font-variant: small-caps;
   letter-spacing: 0.04em;
   color: var(--lr-text);
   white-space: nowrap;
+  line-height: 1.1;
+}
+
+.lore-feed-session-mode .accent {
+  color: var(--lr-lore);
+  font-style: italic;
+  font-variant: normal;
+  font-size: 11.5px;
+  margin-left: 4px;
+  letter-spacing: 0;
+  font-weight: 500;
 }
 
 .lore-feed-session-timeline {
@@ -1328,6 +1363,7 @@ export const LORE_RECALL_CSS = `
   height: 5px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--lr-text) 6%, transparent);
+  flex: 1 1 auto;
   min-width: 60px;
   overflow: hidden;
 }
@@ -1347,29 +1383,173 @@ export const LORE_RECALL_CSS = `
 .lore-feed-session-timeline-marker.error { background: var(--lr-danger); }
 .lore-feed-session-timeline-marker.success { background: var(--lr-good); }
 
-.lore-feed-session-meta {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  white-space: nowrap;
-}
-
 .lore-feed-session-elapsed {
   font-family: var(--lr-font-mono);
-  font-size: 11px;
-  color: var(--lr-muted);
+  font-size: 11.5px;
+  color: var(--lr-text);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.lore-feed-session-extra {
+.lore-feed-session-stamps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.lore-feed-session-stamps > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-feed-session-trailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Body of the session card - the new "more stuff" area */
+.lore-feed-session-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px 18px;
+  border-bottom: 1px solid var(--lr-line);
+}
+
+.lore-feed-session.collapsed .lore-feed-session-body { display: none; }
+
+.lore-flow-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  align-items: stretch;
+}
+
+.lore-flow-step {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--lr-r-sm);
+  background: var(--lr-bg-page);
+  border: 1px solid var(--lr-line);
+  position: relative;
+  min-width: 0;
+}
+
+.lore-flow-step + .lore-flow-step::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 1px;
+  background: var(--lr-line-2);
+}
+
+.lore-flow-step-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lr-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-flow-step-value {
+  font-family: var(--lr-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--lr-text);
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.lore-flow-step.empty .lore-flow-step-value { color: var(--lr-dim); }
+.lore-flow-step.scope { border-color: color-mix(in srgb, var(--lr-acc) 24%, var(--lr-line)); }
+.lore-flow-step.manifest { border-color: color-mix(in srgb, var(--lr-warn) 22%, var(--lr-line)); }
+.lore-flow-step.pulled { border-color: color-mix(in srgb, var(--lr-acc) 28%, var(--lr-line)); }
+.lore-flow-step.injected { border-color: color-mix(in srgb, var(--lr-good) 32%, var(--lr-line)); }
+
+.lore-feed-session-top-injected {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-good) 7%, var(--lr-bg-page));
+  border-left: 2px solid color-mix(in srgb, var(--lr-good) 60%, var(--lr-line));
+}
+
+.lore-feed-session-top-injected-kicker {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--lr-good) 70%, var(--lr-text));
+}
+
+.lore-feed-session-top-injected-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--lr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-feed-session-top-injected-meta {
   font-size: 10.5px;
   color: var(--lr-dim);
   font-family: var(--lr-font-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 200px;
+}
+
+.lore-feed-session-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lr-muted);
+  cursor: pointer;
+  padding: 8px 0 0;
+  user-select: none;
+}
+
+.lore-feed-session-toggle-label:hover { color: var(--lr-text); }
+
+.lore-feed-session-toggle-label .caret {
+  width: 10px;
+  height: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--lr-t-slow);
+}
+
+.lore-feed-session-toggle[aria-expanded="true"] + .lore-feed-session-body .lore-feed-session-toggle-label .caret,
+.lore-feed-session.expanded .lore-feed-session-toggle-label .caret {
+  transform: rotate(90deg);
 }
 
 .lore-feed-session-items {
@@ -2152,6 +2332,142 @@ export const LORE_RECALL_CSS = `
     top: 0;
   }
   .lore-metric { padding: 10px 16px; }
+}
+
+/* ---------- Source pills (compact managed-sources grid) --- */
+
+.lore-source-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr;
+}
+
+.lore-source-pill {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--lr-line);
+  border-radius: var(--lr-r);
+  background: var(--lr-bg-page);
+  position: relative;
+  transition: border-color var(--lr-t), background var(--lr-t);
+}
+
+.lore-source-pill:hover {
+  border-color: var(--lr-line-2);
+  background: var(--lr-bg-raised);
+}
+
+.lore-source-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lr-good);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-good) 28%, transparent);
+  flex-shrink: 0;
+}
+
+.lore-source-pill.warn .lore-source-pill-dot {
+  background: var(--lr-warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-warn) 28%, transparent);
+}
+
+.lore-source-pill.error .lore-source-pill-dot {
+  background: var(--lr-danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-danger) 28%, transparent);
+}
+
+.lore-source-pill-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lore-source-pill-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--lr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-source-pill-meta {
+  font-size: 10.75px;
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-source-pill-tags {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.lore-source-pill-tags .lore-tag {
+  font-size: 9.5px;
+  padding: 1px 7px;
+}
+
+/* ---------- Health strip (drawer diagnostics summary) --- */
+
+.lore-health-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--lr-r);
+  border: 1px solid color-mix(in srgb, var(--lr-warn) 28%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-warn) 6%, var(--lr-bg-page));
+}
+
+.lore-health-strip.error {
+  border-color: color-mix(in srgb, var(--lr-danger) 32%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-danger) 6%, var(--lr-bg-page));
+}
+
+.lore-health-strip.ok {
+  border-color: color-mix(in srgb, var(--lr-good) 26%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-good) 5%, var(--lr-bg-page));
+}
+
+.lore-health-strip-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lr-warn);
+  flex-shrink: 0;
+}
+
+.lore-health-strip.error .lore-health-strip-icon { color: var(--lr-danger); }
+.lore-health-strip.ok .lore-health-strip-icon { color: var(--lr-good); }
+
+.lore-health-strip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.lore-health-strip-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lr-text);
+}
+
+.lore-health-strip-detail {
+  font-size: 11px;
+  color: var(--lr-muted);
+  line-height: 1.4;
 }
 
 /* ---------- Number input polish --------------------------- */
