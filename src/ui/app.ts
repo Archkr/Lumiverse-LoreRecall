@@ -2685,7 +2685,7 @@ export function setup(ctx: SpindleFrontendContext) {
       { entries: 0, categories: 0, unassigned: 0, missingTrees: 0 },
     );
 
-    const metrics = createElement("div", "lore-metrics");
+    const metrics = createElement("div", "lore-metrics cols-4");
     const metric = (value: string | number, label: string) => {
       const m = createElement("div", "lore-metric");
       m.append(

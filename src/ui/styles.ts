@@ -455,13 +455,14 @@ export const LORE_RECALL_CSS = `
 }
 
 .lore-metrics.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.lore-metrics.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .lore-metric {
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: flex-start;
-  padding: 0 16px;
+  padding: 0 14px;
   min-width: 0;
   position: relative;
 }
@@ -482,9 +483,13 @@ export const LORE_RECALL_CSS = `
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--lr-text);
-  line-height: 1;
+  line-height: 1.05;
   font-variant-numeric: tabular-nums;
   text-transform: capitalize;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .lore-metric-value.numeric { font-variant-numeric: tabular-nums; }
@@ -495,7 +500,19 @@ export const LORE_RECALL_CSS = `
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--lr-dim);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
+
+/* Drawer is narrow (~380px) - scale the metric strip down so 3-4 columns fit */
+.lore-drawer .lore-metrics { padding: 12px 2px; }
+.lore-drawer .lore-metric { padding: 0 10px; }
+.lore-drawer .lore-metric-value { font-size: 19px; }
+.lore-drawer .lore-metric-label {
+  font-size: 9.75px;
+  letter-spacing: 0.06em;
+}
+.lore-drawer .lore-metrics.cols-4 .lore-metric { padding: 0 8px; }
 
 /* ---------- Buttons --------------------------------------- */
 
