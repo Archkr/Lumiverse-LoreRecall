@@ -584,7 +584,7 @@ const ENTRY_SUMMARIES_SCHEMA = {
           summary: { type: "string" },
           collapsedText: { type: "string" },
         },
-        required: ["entryId"],
+        required: ["entryId", "summary", "collapsedText"],
       },
     },
   },
@@ -684,7 +684,10 @@ async function generateCategorySummary(
 function buildEntrySummaryPrompt(entries: IndexedEntry[]): string {
   return [
     "Write short retrieval summaries for these lore entries.",
-    'Return ONLY JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
+    "For each entry produce a 1 to 2 sentence `summary` (used for ranking) and a 2 to 4 sentence `collapsedText` (the compact body injected during retrieval).",
+    'Return ONLY valid JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
+    "Do not wrap the JSON in markdown fences. Do not include any explanation before or after the JSON.",
+    "Every entry in the input must appear in the output with the same entryId.",
     "",
     "Entries:",
     ...entries.map((entry) =>
@@ -697,6 +700,19 @@ function buildEntrySummaryPrompt(entries: IndexedEntry[]): string {
       }),
     ),
   ].join("\n");
+}
+
+/**
+ * Compute a token budget that scales with batch size so multi-entry batches don't
+ * silently truncate mid-JSON. Single entry needs ~1800 tokens of headroom; each
+ * additional entry adds ~320. Always clamped to the user's controllerMaxTokens.
+ */
+function computeEntrySummaryTokenBudget(
+  settings: GlobalLoreRecallSettings,
+  entryCount: number,
+): number {
+  const requested = Math.max(1800, entryCount * 320);
+  return Math.min(settings.controllerMaxTokens, requested);
 }
 
 async function generateEntrySummaryBatch(
@@ -715,7 +731,7 @@ async function generateEntrySummaryBatch(
     ENTRY_SUMMARIES_SCHEMA,
     {
       systemPrompt: SUMMARY_SYSTEM_PROMPT,
-      maxTokensOverride: Math.min(settings.controllerMaxTokens, 1400),
+      maxTokensOverride: computeEntrySummaryTokenBudget(settings, entries.length),
     },
   );
   const parsed = controllerResult.parsed;
@@ -731,6 +747,68 @@ async function generateEntrySummaryBatch(
       collapsedText: typeof update.collapsedText === "string" ? update.collapsedText.trim() : undefined,
     }))
     .filter((update) => !!update.entryId);
+}
+
+/**
+ * Resilient summary generation. If the controller returns malformed JSON for a
+ * batch, recursively bisect down to single-entry calls so one bad entry can't
+ * lose the rest. Returns both the successful updates and the entryIds that
+ * could not be summarized after exhaustive retries.
+ */
+async function generateEntrySummariesResilient(
+  entries: IndexedEntry[],
+  settings: GlobalLoreRecallSettings,
+  userId: string,
+): Promise<{
+  updates: Array<{ entryId: string; summary?: string; collapsedText?: string }>;
+  failedEntryIds: string[];
+}> {
+  if (!entries.length) return { updates: [], failedEntryIds: [] };
+
+  try {
+    const updates = await generateEntrySummaryBatch(entries, settings, userId);
+    // Detect partial success: controller returned JSON, but for fewer entries than we sent.
+    if (updates.length >= entries.length) {
+      return { updates, failedEntryIds: [] };
+    }
+    if (entries.length === 1) {
+      return {
+        updates,
+        failedEntryIds: updates.length ? [] : [entries[0].entryId],
+      };
+    }
+    // Partial result: keep what we got, bisect to retry the missing ones.
+    const seen = new Set(updates.map((u) => u.entryId));
+    const missing = entries.filter((entry) => !seen.has(entry.entryId));
+    if (!missing.length) return { updates, failedEntryIds: [] };
+    const retry = await bisectAndRetry(missing, settings, userId);
+    return {
+      updates: [...updates, ...retry.updates],
+      failedEntryIds: retry.failedEntryIds,
+    };
+  } catch {
+    if (entries.length === 1) {
+      return { updates: [], failedEntryIds: [entries[0].entryId] };
+    }
+    return bisectAndRetry(entries, settings, userId);
+  }
+}
+
+async function bisectAndRetry(
+  entries: IndexedEntry[],
+  settings: GlobalLoreRecallSettings,
+  userId: string,
+): Promise<{
+  updates: Array<{ entryId: string; summary?: string; collapsedText?: string }>;
+  failedEntryIds: string[];
+}> {
+  const mid = Math.floor(entries.length / 2);
+  const left = await generateEntrySummariesResilient(entries.slice(0, mid), settings, userId);
+  const right = await generateEntrySummariesResilient(entries.slice(mid), settings, userId);
+  return {
+    updates: [...left.updates, ...right.updates],
+    failedEntryIds: [...left.failedEntryIds, ...right.failedEntryIds],
+  };
 }
 
 export async function updateEntryMeta(entryId: string, meta: EntryRecallMeta, userId: string): Promise<void> {
@@ -1301,8 +1379,22 @@ export async function buildTreeWithLlm(
         });
 
         try {
-          updates.push(...(await generateEntrySummaryBatch(entryBatch, settings, userId)));
+          const result = await generateEntrySummariesResilient(entryBatch, settings, userId);
+          updates.push(...result.updates);
+          if (result.failedEntryIds.length) {
+            const issue: OperationIssue = {
+              severity: "warn",
+              message: `Entry summary batch ${batchIndex + 1} for ${bookName}: ${result.failedEntryIds.length} of ${entryBatch.length} entries returned unusable JSON after retries.`,
+              bookId,
+              bookName,
+              phase: "entry_controller",
+            };
+            issues.push(issue);
+            operation?.addIssue(issue);
+          }
         } catch (error: unknown) {
+          // Should not happen since generateEntrySummariesResilient handles errors internally,
+          // but guard against unexpected throws (e.g. abort signal, network failure).
           const issue: OperationIssue = {
             severity: "warn",
             message: `Entry summary batch ${batchIndex + 1} failed for ${bookName}: ${describeError(error)}`,
@@ -1566,7 +1658,8 @@ export async function regenerateSummaries(
     });
 
     try {
-      const updates = await generateEntrySummaryBatch(targetEntries, settings, userId);
+      const result = await generateEntrySummariesResilient(targetEntries, settings, userId);
+      const updates = result.updates;
 
       for (const update of updates) {
         const entryId = typeof update.entryId === "string" ? update.entryId : "";
@@ -1598,9 +1691,10 @@ export async function regenerateSummaries(
 
       await invalidateBookCache(bookId, userId);
       completed += targetEntries.length;
+      const successCount = targetEntries.length - result.failedEntryIds.length;
       operation?.progress({
         phase: "entries_complete",
-        message: `Updated ${targetEntries.length} entry summary${targetEntries.length === 1 ? "" : "ies"} for ${bookName}.`,
+        message: `Updated ${successCount} entry summary${successCount === 1 ? "" : "ies"} for ${bookName}${result.failedEntryIds.length ? ` (${result.failedEntryIds.length} failed after retries)` : ""}.`,
         current: completed,
         total: totalTargets,
         percent: Math.round((completed / totalTargets) * 100),
@@ -1609,6 +1703,17 @@ export async function regenerateSummaries(
         chunkCurrent: 1,
         chunkTotal: 1,
       });
+      if (result.failedEntryIds.length) {
+        const issue: OperationIssue = {
+          severity: "warn",
+          message: `${result.failedEntryIds.length} of ${targetEntries.length} entries returned unusable JSON after retries.`,
+          bookId,
+          bookName,
+          phase: "controller",
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+      }
     } catch (error: unknown) {
       const issue: OperationIssue = {
         severity: "error",

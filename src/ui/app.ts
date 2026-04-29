@@ -169,6 +169,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let modalDismissUnsub: (() => void) | null = null;
   let advancedOpen = false;
   let importInput: HTMLInputElement | null = null;
+  const buildSelection = new Set<string>();
   const operations = new Map<string, OperationUpdate>();
   const operationRequests = new Map<string, TrackedFrontendMessage>();
   const dismissedOperationIds = new Set<string>();
@@ -794,10 +795,16 @@ export function setup(ctx: SpindleFrontendContext) {
     return input;
   }
 
-  function createTextInput(value: string, placeholder: string, onChange: (next: string) => void): HTMLInputElement {
+  function createTextInput(
+    value: string,
+    placeholder: string,
+    onChange: (next: string) => void,
+    focusId?: string,
+  ): HTMLInputElement {
     const input = createElement("input", "lore-input") as HTMLInputElement;
     input.value = value;
     input.placeholder = placeholder;
+    if (focusId) input.dataset.loreFocusId = focusId;
     input.addEventListener("input", () => onChange(input.value));
     return input;
   }
@@ -2263,7 +2270,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (v) => {
       sourceFilter = v;
       render();
-    });
+    }, "sources-filter-picker");
     filterInput.type = "search";
     filterInput.className = "lore-input lore-search";
     tools.appendChild(filterInput);
@@ -2391,7 +2398,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (value) => {
       sourceFilter = value;
       render();
-    });
+    }, "sources-filter-panel");
     filterInput.type = "search";
     filterInput.className = "lore-input lore-search";
     searchWrap.appendChild(filterInput);
@@ -2584,10 +2591,137 @@ export function setup(ctx: SpindleFrontendContext) {
     return wrap;
   }
 
+  function isBookActivelyBuilding(bookId: string, activeOperation: OperationUpdate | null): boolean {
+    if (!activeOperation) return false;
+    if (activeOperation.kind !== "build_tree_with_llm" && activeOperation.kind !== "build_tree_from_metadata") {
+      return false;
+    }
+    if (activeOperation.scope?.bookId === bookId) return true;
+    return !!activeOperation.scope?.bookIds?.includes(bookId);
+  }
+
+  function getBookBuildBlocker(
+    state: FrontendState,
+    bookId: string,
+    kind: "metadata" | "llm",
+  ): string | null {
+    const status = state.bookStatuses[bookId];
+    if (state.bookConfigs[bookId]?.permission === "read_only") {
+      return "Book is read-only.";
+    }
+    if (status && status.entryCount === 0) {
+      return "Book has no entries yet.";
+    }
+    if (kind === "llm") {
+      const selectedConnectionMissing =
+        !!state.globalSettings.controllerConnectionId &&
+        !state.availableConnections.some(
+          (connection) => connection.id === state.globalSettings.controllerConnectionId,
+        );
+      if (selectedConnectionMissing) return "Controller connection is unavailable.";
+      if (!state.availableConnections.length && !state.globalSettings.controllerConnectionId) {
+        return "No controller connection available.";
+      }
+    }
+    return null;
+  }
+
+  function describeBookBuildStatus(state: FrontendState, bookId: string): string {
+    const status = state.bookStatuses[bookId];
+    const tree = getBookTree(bookId);
+    const entryCount = status?.entryCount ?? 0;
+    const built = hasBuiltTree(bookId);
+    const parts: string[] = [];
+    if (built && tree?.buildSource) {
+      parts.push(`Built · ${formatBuildSource(tree.buildSource)}`);
+      if (tree.lastBuiltAt) parts.push(formatCapturedAt(tree.lastBuiltAt));
+    } else if (built) {
+      parts.push("Built");
+    } else {
+      parts.push("No tree");
+    }
+    parts.push(`${entryCount} entr${entryCount === 1 ? "y" : "ies"}`);
+    return parts.join(" · ");
+  }
+
+  function renderBookBuildRow(
+    state: FrontendState,
+    bookId: string,
+    activeOperation: OperationUpdate | null,
+  ): HTMLElement {
+    const book = state.allWorldBooks.find((item) => item.id === bookId);
+    const isBuilding = isBookActivelyBuilding(bookId, activeOperation);
+    const isReadOnly = isBookReadOnly(bookId);
+    const isLocked = !!activeOperation && (isBuilding || activeOperation.scope?.bookIds?.includes(bookId));
+    const isSelected = buildSelection.has(bookId);
+    const metaBlocker = getBookBuildBlocker(state, bookId, "metadata");
+    const llmBlocker = getBookBuildBlocker(state, bookId, "llm");
+
+    const row = createElement(
+      "div",
+      `lore-build-row${isBuilding ? " building" : ""}${isSelected ? " selected" : ""}`,
+    );
+
+    const checkLabel = createElement("label", "lore-build-row-check") as HTMLLabelElement;
+    const check = createElement("input") as HTMLInputElement;
+    check.type = "checkbox";
+    check.checked = isSelected;
+    check.disabled = !!activeOperation || isReadOnly;
+    check.addEventListener("change", () => {
+      if (check.checked) buildSelection.add(bookId);
+      else buildSelection.delete(bookId);
+      render();
+    });
+    checkLabel.appendChild(check);
+    row.appendChild(checkLabel);
+
+    const body = createElement("div", "lore-build-row-body");
+    body.appendChild(createElement("div", "lore-build-row-name", book?.name || bookId));
+    const status = createElement(
+      "div",
+      `lore-build-row-status${isBuilding ? " active" : ""}`,
+      isBuilding ? `Building... ${activeOperation?.message ?? ""}` : describeBookBuildStatus(state, bookId),
+    );
+    body.appendChild(status);
+    row.appendChild(body);
+
+    const actions = createElement("div", "lore-build-row-actions");
+    const metaBtn = createElement("button", "lore-btn lore-btn-sm") as HTMLButtonElement;
+    metaBtn.type = "button";
+    metaBtn.appendChild(createElement("span", "", "Metadata"));
+    metaBtn.disabled = isLocked || !!activeOperation || !!metaBlocker;
+    if (metaBlocker) metaBtn.title = metaBlocker;
+    metaBtn.addEventListener("click", () => {
+      dispatchTracked({
+        type: "build_tree_from_metadata",
+        bookIds: [bookId],
+        chatId: state.activeChatId,
+      });
+    });
+
+    const llmBtn = createElement("button", "lore-btn lore-btn-primary lore-btn-sm") as HTMLButtonElement;
+    llmBtn.type = "button";
+    llmBtn.appendChild(createElement("span", "", "LLM"));
+    llmBtn.disabled = isLocked || !!activeOperation || !!llmBlocker;
+    if (llmBlocker) llmBtn.title = llmBlocker;
+    llmBtn.addEventListener("click", () => {
+      dispatchTracked({
+        type: "build_tree_with_llm",
+        bookIds: [bookId],
+        chatId: state.activeChatId,
+      });
+    });
+
+    actions.append(metaBtn, llmBtn);
+    row.appendChild(actions);
+
+    return row;
+  }
+
   function renderBuildTools(state: FrontendState): HTMLElement {
     const section = createElement("section", "lore-section");
     section.appendChild(
-      createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."),
+      createSectionHead("Build trees", "Build a single book, a selected set, or all of them at once."),
     );
     const managedBookIds = getManagedBookIds();
     const effectiveGranularity = getEffectiveTreeGranularity(
@@ -2595,79 +2729,133 @@ export function setup(ctx: SpindleFrontendContext) {
       managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0),
     );
     const hasManaged = managedBookIds.length > 0;
-    const metadataMessage: TrackedFrontendMessage = {
-      type: "build_tree_from_metadata",
-      bookIds: managedBookIds,
-      chatId: state.activeChatId,
-    };
-    const llmMessage: TrackedFrontendMessage = {
-      type: "build_tree_with_llm",
-      bookIds: managedBookIds,
-      chatId: state.activeChatId,
-    };
-    const metadataWarnings = getPreflightWarnings(metadataMessage).filter((warning) => !warning.includes("still running"));
-    const llmWarnings = getPreflightWarnings(llmMessage).filter((warning) => !warning.includes("still running"));
     const activeOperation = getActiveOperation();
     const lastBuildOperation = getTrackedOperations().find(
       (operation) => operation.kind === "build_tree_with_llm" || operation.kind === "build_tree_from_metadata",
     );
-    const totalManagedEntries = managedBookIds.reduce(
-      (sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0),
-      0,
+
+    // Prune selection to only currently-managed books (in case user removed one)
+    for (const id of [...buildSelection]) {
+      if (!managedBookIds.includes(id)) buildSelection.delete(id);
+    }
+
+    // Tuning summary
+    section.appendChild(
+      createFieldNote(
+        `Tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail · ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries/leaf) · ${state.globalSettings.chunkTokens.toLocaleString()} chunk size.`,
+      ),
     );
-    const noEntriesReason =
-      hasManaged && totalManagedEntries === 0
-        ? "Managed book has no entries yet — add lorebook entries before building."
-        : null;
+
+    if (!hasManaged) {
+      section.appendChild(
+        createEmpty("No managed books", "Manage at least one lorebook before building a tree.", null, "book"),
+      );
+      return section;
+    }
+
+    // Per-book list
+    const list = createElement("div", "lore-build-list");
+    for (const bookId of managedBookIds) {
+      list.appendChild(renderBookBuildRow(state, bookId, activeOperation));
+    }
+    section.appendChild(list);
+
+    // Selection / bulk action bar
+    const selectedIds = managedBookIds.filter((id) => buildSelection.has(id));
+    const selectedCount = selectedIds.length;
+    const targetIds = selectedCount > 0 ? selectedIds : managedBookIds;
+    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${managedBookIds.length}`;
+
+    const metadataMessage: TrackedFrontendMessage = {
+      type: "build_tree_from_metadata",
+      bookIds: targetIds,
+      chatId: state.activeChatId,
+    };
+    const llmMessage: TrackedFrontendMessage = {
+      type: "build_tree_with_llm",
+      bookIds: targetIds,
+      chatId: state.activeChatId,
+    };
+    const metadataWarnings = getPreflightWarnings(metadataMessage).filter(
+      (warning) => !warning.includes("still running"),
+    );
+    const llmWarnings = getPreflightWarnings(llmMessage).filter(
+      (warning) => !warning.includes("still running"),
+    );
+
+    // Aggregate per-book blockers for the bulk action
+    const allTargetsHaveNoEntries = targetIds.every(
+      (id) => (state.bookStatuses[id]?.entryCount ?? 0) === 0,
+    );
+    const allTargetsReadOnly = targetIds.every(
+      (id) => state.bookConfigs[id]?.permission === "read_only",
+    );
+    const noEntriesReason = allTargetsHaveNoEntries
+      ? `${targetIds.length === 1 ? "This book has" : "All targeted books have"} no entries yet — add lorebook entries before building.`
+      : null;
+    const readOnlyReason = allTargetsReadOnly
+      ? `${targetIds.length === 1 ? "This book is" : "All targeted books are"} read-only — Lore Recall can't rebuild their trees.`
+      : null;
     const metaBlocker =
-      noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
+      readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
     const llmBlocker =
-      noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
+      readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
 
-    const actions = createElement("div", "lore-cluster");
-    const metaBtn = createButton(
-      activeOperation?.kind === "build_tree_from_metadata" ? "Building..." : "Build from metadata",
-      "lore-btn",
-      () => dispatchTracked(metadataMessage),
-    ) as HTMLButtonElement;
-    const llmBtn = createButton(
-      activeOperation?.kind === "build_tree_with_llm" ? "Building..." : "Build with LLM",
-      "lore-btn lore-btn-primary",
-      () => dispatchTracked(llmMessage),
-    ) as HTMLButtonElement;
-    if (!hasManaged || !!activeOperation || metadataWarnings.length || !!noEntriesReason) {
-      metaBtn.disabled = true;
+    const bulkBar = createElement("div", "lore-build-bulkbar");
+    const bulkLabel = createElement("div", "lore-build-bulkbar-label");
+    if (selectedCount > 0) {
+      bulkLabel.appendChild(createElement("span", "", `${selectedCount} of ${managedBookIds.length} selected`));
+      const clearBtn = createElement("button", "lore-btn-link") as HTMLButtonElement;
+      clearBtn.type = "button";
+      clearBtn.textContent = "Clear";
+      clearBtn.addEventListener("click", () => {
+        buildSelection.clear();
+        render();
+      });
+      bulkLabel.appendChild(clearBtn);
+    } else {
+      bulkLabel.appendChild(
+        createElement("span", "", `${managedBookIds.length} book${managedBookIds.length === 1 ? "" : "s"} managed`),
+      );
+      const selectAllBtn = createElement("button", "lore-btn-link") as HTMLButtonElement;
+      selectAllBtn.type = "button";
+      selectAllBtn.textContent = "Select all";
+      selectAllBtn.addEventListener("click", () => {
+        for (const id of managedBookIds) buildSelection.add(id);
+        render();
+      });
+      bulkLabel.appendChild(selectAllBtn);
     }
-    if (!hasManaged || !!activeOperation || llmWarnings.length || !!noEntriesReason) {
-      llmBtn.disabled = true;
-    }
-    if (metaBlocker) metaBtn.title = metaBlocker;
-    if (llmBlocker) llmBtn.title = llmBlocker;
-    actions.append(
-      metaBtn,
-      llmBtn,
-      createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()),
-    );
-    section.appendChild(actions);
+    bulkBar.appendChild(bulkLabel);
 
-    // Inline blocker reasons - impossible to miss, sit right under the buttons
+    const bulkActions = createElement("div", "lore-cluster");
+    const bulkMetaBtn = createElement("button", "lore-btn lore-btn-sm") as HTMLButtonElement;
+    bulkMetaBtn.type = "button";
+    bulkMetaBtn.textContent =
+      activeOperation?.kind === "build_tree_from_metadata"
+        ? "Building..."
+        : `Build ${targetLabel} from metadata`;
+    bulkMetaBtn.disabled = !!activeOperation || !!metaBlocker;
+    if (metaBlocker) bulkMetaBtn.title = metaBlocker;
+    bulkMetaBtn.addEventListener("click", () => dispatchTracked(metadataMessage));
+
+    const bulkLlmBtn = createElement("button", "lore-btn lore-btn-primary lore-btn-sm") as HTMLButtonElement;
+    bulkLlmBtn.type = "button";
+    bulkLlmBtn.textContent =
+      activeOperation?.kind === "build_tree_with_llm"
+        ? "Building..."
+        : `Build ${targetLabel} with LLM`;
+    bulkLlmBtn.disabled = !!activeOperation || !!llmBlocker;
+    if (llmBlocker) bulkLlmBtn.title = llmBlocker;
+    bulkLlmBtn.addEventListener("click", () => dispatchTracked(llmMessage));
+
+    bulkActions.append(bulkMetaBtn, bulkLlmBtn);
+    bulkBar.appendChild(bulkActions);
+    section.appendChild(bulkBar);
+
+    // Inline blocker hints for the bulk action
     if (metaBlocker || llmBlocker) {
       const blockerStack = createElement("div", "lore-build-blockers");
-      const seen = new Set<string>();
-      const addBlocker = (label: string, reason: string | null) => {
-        if (!reason) return;
-        const key = `${label}::${reason}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        const row = createElement("div", "lore-build-blocker");
-        row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
-        const body = createElement("div", "lore-build-blocker-body");
-        body.appendChild(createElement("span", "lore-build-blocker-label", label));
-        body.appendChild(createElement("span", "lore-build-blocker-text", reason));
-        row.appendChild(body);
-        blockerStack.appendChild(row);
-      };
-      // If both buttons share the same reason, show it once without a per-button label
       if (metaBlocker && llmBlocker && metaBlocker === llmBlocker) {
         const row = createElement("div", "lore-build-blocker");
         row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
@@ -2676,21 +2864,31 @@ export function setup(ctx: SpindleFrontendContext) {
         row.appendChild(body);
         blockerStack.appendChild(row);
       } else {
+        const seen = new Set<string>();
+        const addBlocker = (label: string, reason: string | null) => {
+          if (!reason) return;
+          const key = `${label}::${reason}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          const blockerRow = createElement("div", "lore-build-blocker");
+          blockerRow.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
+          const body = createElement("div", "lore-build-blocker-body");
+          body.appendChild(createElement("span", "lore-build-blocker-label", label));
+          body.appendChild(createElement("span", "lore-build-blocker-text", reason));
+          blockerRow.appendChild(body);
+          blockerStack.appendChild(blockerRow);
+        };
         addBlocker("Metadata build", metaBlocker);
         addBlocker("LLM build", llmBlocker);
       }
       section.appendChild(blockerStack);
     }
 
-    section.appendChild(
-      createFieldNote(
-        `Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`,
-      ),
-    );
-
-    const buildOperation = activeOperation && (activeOperation.kind === "build_tree_from_metadata" || activeOperation.kind === "build_tree_with_llm")
-      ? activeOperation
-      : lastBuildOperation;
+    // Active build operation progress
+    const buildOperation =
+      activeOperation && (activeOperation.kind === "build_tree_from_metadata" || activeOperation.kind === "build_tree_with_llm")
+        ? activeOperation
+        : lastBuildOperation;
     if (buildOperation) {
       section.appendChild(createOperationSummary(buildOperation));
     }
@@ -3654,6 +3852,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderWorkspaceModal(): void {
     if (!workspaceModal) return;
+    const savedFocus = captureFocusState();
     workspaceModal.root.replaceChildren();
     workspaceModal.setTitle(
       currentState?.activeCharacterName
@@ -3670,7 +3869,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const search = createTextInput(workspaceSearch, "Filter categories and entries...", (v) => {
       workspaceSearch = v;
       renderWorkspaceModal();
-    });
+    }, "workspace-search");
     search.type = "search";
     search.className = "lore-input lore-search";
     searchWrap.appendChild(search);
@@ -3769,13 +3968,64 @@ export function setup(ctx: SpindleFrontendContext) {
     body.append(rail, editor);
     shell.appendChild(body);
     workspaceModal.root.appendChild(shell);
+    restoreFocusState(savedFocus);
+  }
+
+  /**
+   * Capture the focus state of any input/textarea that opted in via
+   * `data-lore-focus-id`, so we can restore focus after a full re-render.
+   * Without this, every keystroke in a search/filter input loses focus
+   * because the input element itself is destroyed and recreated.
+   */
+  function captureFocusState(): {
+    focusId: string;
+    selectionStart: number | null;
+    selectionEnd: number | null;
+  } | null {
+    const active = document.activeElement;
+    if (!active || !(active instanceof HTMLElement)) return null;
+    const focusId = active.dataset?.loreFocusId;
+    if (!focusId) return null;
+    let selectionStart: number | null = null;
+    let selectionEnd: number | null = null;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = active.selectionStart;
+        selectionEnd = active.selectionEnd;
+      } catch {
+        // Some input types (search, email, etc.) throw when reading selection - ignore.
+      }
+    }
+    return { focusId, selectionStart, selectionEnd };
+  }
+
+  function restoreFocusState(
+    saved: { focusId: string; selectionStart: number | null; selectionEnd: number | null } | null,
+  ): void {
+    if (!saved) return;
+    const target = document.querySelector(`[data-lore-focus-id="${CSS.escape(saved.focusId)}"]`);
+    if (!(target instanceof HTMLElement)) return;
+    target.focus();
+    if (
+      saved.selectionStart != null &&
+      saved.selectionEnd != null &&
+      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
+    ) {
+      try {
+        target.setSelectionRange(saved.selectionStart, saved.selectionEnd);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   function render(): void {
+    const savedFocus = captureFocusState();
     ensureSelection();
     renderSettings();
     renderDrawer();
     renderWorkspaceModal();
+    restoreFocusState(savedFocus);
   }
 
   const onBackendMessage = ctx.onBackendMessage((raw) => {

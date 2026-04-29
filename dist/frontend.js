@@ -2710,6 +2710,168 @@ var LORE_RECALL_CSS = `
   padding: 1px 7px;
 }
 
+/* ---------- Per-book build list ---------------------------- */
+
+.lore-build-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lore-build-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--lr-r);
+  border: 1px solid var(--lr-line);
+  background: var(--lr-bg-page);
+  transition: border-color var(--lr-t), background var(--lr-t);
+  position: relative;
+}
+
+.lore-build-row:hover {
+  border-color: var(--lr-line-2);
+  background: var(--lr-bg-raised);
+}
+
+.lore-build-row.selected {
+  border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-acc) 6%, var(--lr-bg-page));
+}
+
+.lore-build-row.building {
+  border-color: color-mix(in srgb, var(--lr-lore) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-lore) 5%, var(--lr-bg-page));
+}
+
+.lore-build-row.building::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--lr-lore);
+  border-radius: 2px 0 0 2px;
+}
+
+.lore-build-row-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px;
+  margin: -4px;
+}
+
+.lore-build-row-check input[type="checkbox"] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--lr-line-2);
+  border-radius: 4px;
+  background: var(--lr-bg-panel);
+  cursor: pointer;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--lr-t), border-color var(--lr-t);
+}
+
+.lore-build-row-check input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--lr-line-light);
+}
+
+.lore-build-row-check input[type="checkbox"]:checked {
+  background: var(--lr-acc);
+  border-color: var(--lr-acc);
+}
+
+.lore-build-row-check input[type="checkbox"]:checked::after {
+  content: "";
+  width: 4px;
+  height: 8px;
+  border: solid var(--lr-acc-fg);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.lore-build-row-check input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.lore-build-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lore-build-row-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0;
+}
+
+.lore-build-row-status {
+  font-size: 11px;
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-build-row-status.active {
+  color: var(--lr-lore);
+  font-style: italic;
+  font-family: inherit;
+}
+
+.lore-build-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---------- Build bulk-action bar ------------------------- */
+
+.lore-build-bulkbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  margin-top: 4px;
+  border-radius: var(--lr-r);
+  border: 1px solid var(--lr-line);
+  background: var(--lr-bg-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.lore-build-bulkbar-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--lr-muted);
+}
+
+.lore-build-bulkbar-label > span {
+  font-weight: 500;
+  color: var(--lr-text);
+}
+
 /* ---------- Build blocker hints (inline reasons under disabled buttons) --- */
 
 .lore-build-blockers {
@@ -2933,6 +3095,7 @@ function setup(ctx) {
   let modalDismissUnsub = null;
   let advancedOpen = false;
   let importInput = null;
+  const buildSelection = new Set;
   const operations = new Map;
   const operationRequests = new Map;
   const dismissedOperationIds = new Set;
@@ -3521,10 +3684,12 @@ function setup(ctx) {
     input.addEventListener("input", () => onChange(Number.parseFloat(input.value) || 0));
     return input;
   }
-  function createTextInput(value, placeholder, onChange) {
+  function createTextInput(value, placeholder, onChange, focusId) {
     const input = createElement("input", "lore-input");
     input.value = value;
     input.placeholder = placeholder;
+    if (focusId)
+      input.dataset.loreFocusId = focusId;
     input.addEventListener("input", () => onChange(input.value));
     return input;
   }
@@ -4669,7 +4834,7 @@ function setup(ctx) {
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (v) => {
       sourceFilter = v;
       render();
-    });
+    }, "sources-filter-picker");
     filterInput.type = "search";
     filterInput.className = "lore-input lore-search";
     tools.appendChild(filterInput);
@@ -4758,7 +4923,7 @@ function setup(ctx) {
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (value) => {
       sourceFilter = value;
       render();
-    });
+    }, "sources-filter-panel");
     filterInput.type = "search";
     filterInput.className = "lore-input lore-search";
     searchWrap.appendChild(filterInput);
@@ -4914,63 +5079,200 @@ function setup(ctx) {
     wrap.append(renderDiagnostics(state), renderBackup(state), renderAdvancedSettings(state));
     return wrap;
   }
+  function isBookActivelyBuilding(bookId, activeOperation) {
+    if (!activeOperation)
+      return false;
+    if (activeOperation.kind !== "build_tree_with_llm" && activeOperation.kind !== "build_tree_from_metadata") {
+      return false;
+    }
+    if (activeOperation.scope?.bookId === bookId)
+      return true;
+    return !!activeOperation.scope?.bookIds?.includes(bookId);
+  }
+  function getBookBuildBlocker(state, bookId, kind) {
+    const status = state.bookStatuses[bookId];
+    if (state.bookConfigs[bookId]?.permission === "read_only") {
+      return "Book is read-only.";
+    }
+    if (status && status.entryCount === 0) {
+      return "Book has no entries yet.";
+    }
+    if (kind === "llm") {
+      const selectedConnectionMissing = !!state.globalSettings.controllerConnectionId && !state.availableConnections.some((connection) => connection.id === state.globalSettings.controllerConnectionId);
+      if (selectedConnectionMissing)
+        return "Controller connection is unavailable.";
+      if (!state.availableConnections.length && !state.globalSettings.controllerConnectionId) {
+        return "No controller connection available.";
+      }
+    }
+    return null;
+  }
+  function describeBookBuildStatus(state, bookId) {
+    const status = state.bookStatuses[bookId];
+    const tree = getBookTree(bookId);
+    const entryCount = status?.entryCount ?? 0;
+    const built = hasBuiltTree(bookId);
+    const parts = [];
+    if (built && tree?.buildSource) {
+      parts.push(`Built · ${formatBuildSource(tree.buildSource)}`);
+      if (tree.lastBuiltAt)
+        parts.push(formatCapturedAt(tree.lastBuiltAt));
+    } else if (built) {
+      parts.push("Built");
+    } else {
+      parts.push("No tree");
+    }
+    parts.push(`${entryCount} entr${entryCount === 1 ? "y" : "ies"}`);
+    return parts.join(" · ");
+  }
+  function renderBookBuildRow(state, bookId, activeOperation) {
+    const book = state.allWorldBooks.find((item) => item.id === bookId);
+    const isBuilding = isBookActivelyBuilding(bookId, activeOperation);
+    const isReadOnly = isBookReadOnly(bookId);
+    const isLocked = !!activeOperation && (isBuilding || activeOperation.scope?.bookIds?.includes(bookId));
+    const isSelected = buildSelection.has(bookId);
+    const metaBlocker = getBookBuildBlocker(state, bookId, "metadata");
+    const llmBlocker = getBookBuildBlocker(state, bookId, "llm");
+    const row = createElement("div", `lore-build-row${isBuilding ? " building" : ""}${isSelected ? " selected" : ""}`);
+    const checkLabel = createElement("label", "lore-build-row-check");
+    const check = createElement("input");
+    check.type = "checkbox";
+    check.checked = isSelected;
+    check.disabled = !!activeOperation || isReadOnly;
+    check.addEventListener("change", () => {
+      if (check.checked)
+        buildSelection.add(bookId);
+      else
+        buildSelection.delete(bookId);
+      render();
+    });
+    checkLabel.appendChild(check);
+    row.appendChild(checkLabel);
+    const body = createElement("div", "lore-build-row-body");
+    body.appendChild(createElement("div", "lore-build-row-name", book?.name || bookId));
+    const status = createElement("div", `lore-build-row-status${isBuilding ? " active" : ""}`, isBuilding ? `Building... ${activeOperation?.message ?? ""}` : describeBookBuildStatus(state, bookId));
+    body.appendChild(status);
+    row.appendChild(body);
+    const actions = createElement("div", "lore-build-row-actions");
+    const metaBtn = createElement("button", "lore-btn lore-btn-sm");
+    metaBtn.type = "button";
+    metaBtn.appendChild(createElement("span", "", "Metadata"));
+    metaBtn.disabled = isLocked || !!activeOperation || !!metaBlocker;
+    if (metaBlocker)
+      metaBtn.title = metaBlocker;
+    metaBtn.addEventListener("click", () => {
+      dispatchTracked({
+        type: "build_tree_from_metadata",
+        bookIds: [bookId],
+        chatId: state.activeChatId
+      });
+    });
+    const llmBtn = createElement("button", "lore-btn lore-btn-primary lore-btn-sm");
+    llmBtn.type = "button";
+    llmBtn.appendChild(createElement("span", "", "LLM"));
+    llmBtn.disabled = isLocked || !!activeOperation || !!llmBlocker;
+    if (llmBlocker)
+      llmBtn.title = llmBlocker;
+    llmBtn.addEventListener("click", () => {
+      dispatchTracked({
+        type: "build_tree_with_llm",
+        bookIds: [bookId],
+        chatId: state.activeChatId
+      });
+    });
+    actions.append(metaBtn, llmBtn);
+    row.appendChild(actions);
+    return row;
+  }
   function renderBuildTools(state) {
     const section = createElement("section", "lore-section");
-    section.appendChild(createSectionHead("Build tree", "Seed categories from metadata or rebuild with your controller connection."));
+    section.appendChild(createSectionHead("Build trees", "Build a single book, a selected set, or all of them at once."));
     const managedBookIds = getManagedBookIds();
     const effectiveGranularity = getEffectiveTreeGranularity(state.globalSettings.treeGranularity, managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0));
     const hasManaged = managedBookIds.length > 0;
+    const activeOperation = getActiveOperation();
+    const lastBuildOperation = getTrackedOperations().find((operation) => operation.kind === "build_tree_with_llm" || operation.kind === "build_tree_from_metadata");
+    for (const id of [...buildSelection]) {
+      if (!managedBookIds.includes(id))
+        buildSelection.delete(id);
+    }
+    section.appendChild(createFieldNote(`Tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail · ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries/leaf) · ${state.globalSettings.chunkTokens.toLocaleString()} chunk size.`));
+    if (!hasManaged) {
+      section.appendChild(createEmpty("No managed books", "Manage at least one lorebook before building a tree.", null, "book"));
+      return section;
+    }
+    const list = createElement("div", "lore-build-list");
+    for (const bookId of managedBookIds) {
+      list.appendChild(renderBookBuildRow(state, bookId, activeOperation));
+    }
+    section.appendChild(list);
+    const selectedIds = managedBookIds.filter((id) => buildSelection.has(id));
+    const selectedCount = selectedIds.length;
+    const targetIds = selectedCount > 0 ? selectedIds : managedBookIds;
+    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${managedBookIds.length}`;
     const metadataMessage = {
       type: "build_tree_from_metadata",
-      bookIds: managedBookIds,
+      bookIds: targetIds,
       chatId: state.activeChatId
     };
     const llmMessage = {
       type: "build_tree_with_llm",
-      bookIds: managedBookIds,
+      bookIds: targetIds,
       chatId: state.activeChatId
     };
     const metadataWarnings = getPreflightWarnings(metadataMessage).filter((warning) => !warning.includes("still running"));
     const llmWarnings = getPreflightWarnings(llmMessage).filter((warning) => !warning.includes("still running"));
-    const activeOperation = getActiveOperation();
-    const lastBuildOperation = getTrackedOperations().find((operation) => operation.kind === "build_tree_with_llm" || operation.kind === "build_tree_from_metadata");
-    const totalManagedEntries = managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0);
-    const noEntriesReason = hasManaged && totalManagedEntries === 0 ? "Managed book has no entries yet — add lorebook entries before building." : null;
-    const metaBlocker = noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
-    const llmBlocker = noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
-    const actions = createElement("div", "lore-cluster");
-    const metaBtn = createButton(activeOperation?.kind === "build_tree_from_metadata" ? "Building..." : "Build from metadata", "lore-btn", () => dispatchTracked(metadataMessage));
-    const llmBtn = createButton(activeOperation?.kind === "build_tree_with_llm" ? "Building..." : "Build with LLM", "lore-btn lore-btn-primary", () => dispatchTracked(llmMessage));
-    if (!hasManaged || !!activeOperation || metadataWarnings.length || !!noEntriesReason) {
-      metaBtn.disabled = true;
+    const allTargetsHaveNoEntries = targetIds.every((id) => (state.bookStatuses[id]?.entryCount ?? 0) === 0);
+    const allTargetsReadOnly = targetIds.every((id) => state.bookConfigs[id]?.permission === "read_only");
+    const noEntriesReason = allTargetsHaveNoEntries ? `${targetIds.length === 1 ? "This book has" : "All targeted books have"} no entries yet — add lorebook entries before building.` : null;
+    const readOnlyReason = allTargetsReadOnly ? `${targetIds.length === 1 ? "This book is" : "All targeted books are"} read-only — Lore Recall can't rebuild their trees.` : null;
+    const metaBlocker = readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
+    const llmBlocker = readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
+    const bulkBar = createElement("div", "lore-build-bulkbar");
+    const bulkLabel = createElement("div", "lore-build-bulkbar-label");
+    if (selectedCount > 0) {
+      bulkLabel.appendChild(createElement("span", "", `${selectedCount} of ${managedBookIds.length} selected`));
+      const clearBtn = createElement("button", "lore-btn-link");
+      clearBtn.type = "button";
+      clearBtn.textContent = "Clear";
+      clearBtn.addEventListener("click", () => {
+        buildSelection.clear();
+        render();
+      });
+      bulkLabel.appendChild(clearBtn);
+    } else {
+      bulkLabel.appendChild(createElement("span", "", `${managedBookIds.length} book${managedBookIds.length === 1 ? "" : "s"} managed`));
+      const selectAllBtn = createElement("button", "lore-btn-link");
+      selectAllBtn.type = "button";
+      selectAllBtn.textContent = "Select all";
+      selectAllBtn.addEventListener("click", () => {
+        for (const id of managedBookIds)
+          buildSelection.add(id);
+        render();
+      });
+      bulkLabel.appendChild(selectAllBtn);
     }
-    if (!hasManaged || !!activeOperation || llmWarnings.length || !!noEntriesReason) {
-      llmBtn.disabled = true;
-    }
+    bulkBar.appendChild(bulkLabel);
+    const bulkActions = createElement("div", "lore-cluster");
+    const bulkMetaBtn = createElement("button", "lore-btn lore-btn-sm");
+    bulkMetaBtn.type = "button";
+    bulkMetaBtn.textContent = activeOperation?.kind === "build_tree_from_metadata" ? "Building..." : `Build ${targetLabel} from metadata`;
+    bulkMetaBtn.disabled = !!activeOperation || !!metaBlocker;
     if (metaBlocker)
-      metaBtn.title = metaBlocker;
+      bulkMetaBtn.title = metaBlocker;
+    bulkMetaBtn.addEventListener("click", () => dispatchTracked(metadataMessage));
+    const bulkLlmBtn = createElement("button", "lore-btn lore-btn-primary lore-btn-sm");
+    bulkLlmBtn.type = "button";
+    bulkLlmBtn.textContent = activeOperation?.kind === "build_tree_with_llm" ? "Building..." : `Build ${targetLabel} with LLM`;
+    bulkLlmBtn.disabled = !!activeOperation || !!llmBlocker;
     if (llmBlocker)
-      llmBtn.title = llmBlocker;
-    actions.append(metaBtn, llmBtn, createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()));
-    section.appendChild(actions);
+      bulkLlmBtn.title = llmBlocker;
+    bulkLlmBtn.addEventListener("click", () => dispatchTracked(llmMessage));
+    bulkActions.append(bulkMetaBtn, bulkLlmBtn);
+    bulkBar.appendChild(bulkActions);
+    section.appendChild(bulkBar);
     if (metaBlocker || llmBlocker) {
       const blockerStack = createElement("div", "lore-build-blockers");
-      const seen = new Set;
-      const addBlocker = (label, reason) => {
-        if (!reason)
-          return;
-        const key = `${label}::${reason}`;
-        if (seen.has(key))
-          return;
-        seen.add(key);
-        const row = createElement("div", "lore-build-blocker");
-        row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
-        const body = createElement("div", "lore-build-blocker-body");
-        body.appendChild(createElement("span", "lore-build-blocker-label", label));
-        body.appendChild(createElement("span", "lore-build-blocker-text", reason));
-        row.appendChild(body);
-        blockerStack.appendChild(row);
-      };
       if (metaBlocker && llmBlocker && metaBlocker === llmBlocker) {
         const row = createElement("div", "lore-build-blocker");
         row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
@@ -4979,12 +5281,27 @@ function setup(ctx) {
         row.appendChild(body);
         blockerStack.appendChild(row);
       } else {
+        const seen = new Set;
+        const addBlocker = (label, reason) => {
+          if (!reason)
+            return;
+          const key = `${label}::${reason}`;
+          if (seen.has(key))
+            return;
+          seen.add(key);
+          const blockerRow = createElement("div", "lore-build-blocker");
+          blockerRow.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
+          const body = createElement("div", "lore-build-blocker-body");
+          body.appendChild(createElement("span", "lore-build-blocker-label", label));
+          body.appendChild(createElement("span", "lore-build-blocker-text", reason));
+          blockerRow.appendChild(body);
+          blockerStack.appendChild(blockerRow);
+        };
         addBlocker("Metadata build", metaBlocker);
         addBlocker("LLM build", llmBlocker);
       }
       section.appendChild(blockerStack);
     }
-    section.appendChild(createFieldNote(`Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`));
     const buildOperation = activeOperation && (activeOperation.kind === "build_tree_from_metadata" || activeOperation.kind === "build_tree_with_llm") ? activeOperation : lastBuildOperation;
     if (buildOperation) {
       section.appendChild(createOperationSummary(buildOperation));
@@ -5615,6 +5932,7 @@ function setup(ctx) {
   function renderWorkspaceModal() {
     if (!workspaceModal)
       return;
+    const savedFocus = captureFocusState();
     workspaceModal.root.replaceChildren();
     workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree workspace` : "Lore Recall workspace");
     const shell = createElement("div", "lore-root lore-modal");
@@ -5622,7 +5940,7 @@ function setup(ctx) {
     const search = createTextInput(workspaceSearch, "Filter categories and entries...", (v) => {
       workspaceSearch = v;
       renderWorkspaceModal();
-    });
+    }, "workspace-search");
     search.type = "search";
     search.className = "lore-input lore-search";
     const searchWrap = createElement("div", "lore-search-wrap");
@@ -5691,12 +6009,47 @@ function setup(ctx) {
     body.append(rail, editor);
     shell.appendChild(body);
     workspaceModal.root.appendChild(shell);
+    restoreFocusState(savedFocus);
+  }
+  function captureFocusState() {
+    const active = document.activeElement;
+    if (!active || !(active instanceof HTMLElement))
+      return null;
+    const focusId = active.dataset?.loreFocusId;
+    if (!focusId)
+      return null;
+    let selectionStart = null;
+    let selectionEnd = null;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = active.selectionStart;
+        selectionEnd = active.selectionEnd;
+      } catch {
+      }
+    }
+    return { focusId, selectionStart, selectionEnd };
+  }
+  function restoreFocusState(saved) {
+    if (!saved)
+      return;
+    const target = document.querySelector(`[data-lore-focus-id="${CSS.escape(saved.focusId)}"]`);
+    if (!(target instanceof HTMLElement))
+      return;
+    target.focus();
+    if (saved.selectionStart != null && saved.selectionEnd != null && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+      try {
+        target.setSelectionRange(saved.selectionStart, saved.selectionEnd);
+      } catch {
+      }
+    }
   }
   function render() {
+    const savedFocus = captureFocusState();
     ensureSelection();
     renderSettings();
     renderDrawer();
     renderWorkspaceModal();
+    restoreFocusState(savedFocus);
   }
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw;

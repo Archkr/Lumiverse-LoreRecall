@@ -3370,7 +3370,7 @@ var ENTRY_SUMMARIES_SCHEMA = {
           summary: { type: "string" },
           collapsedText: { type: "string" }
         },
-        required: ["entryId"]
+        required: ["entryId", "summary", "collapsedText"]
       }
     }
   },
@@ -3433,7 +3433,10 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
 function buildEntrySummaryPrompt(entries) {
   return [
     "Write short retrieval summaries for these lore entries.",
-    'Return ONLY JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
+    "For each entry produce a 1 to 2 sentence `summary` (used for ranking) and a 2 to 4 sentence `collapsedText` (the compact body injected during retrieval).",
+    'Return ONLY valid JSON in this exact shape: {"entries":[{"entryId":"...","summary":"...","collapsedText":"..."}]}',
+    "Do not wrap the JSON in markdown fences. Do not include any explanation before or after the JSON.",
+    "Every entry in the input must appear in the output with the same entryId.",
     "",
     "Entries:",
     ...entries.map((entry) => JSON.stringify({
@@ -3446,12 +3449,16 @@ function buildEntrySummaryPrompt(entries) {
   ].join(`
 `);
 }
+function computeEntrySummaryTokenBudget(settings, entryCount) {
+  const requested = Math.max(1800, entryCount * 320);
+  return Math.min(settings.controllerMaxTokens, requested);
+}
 async function generateEntrySummaryBatch(entries, settings, userId) {
   if (!entries.length)
     return [];
   const controllerResult = await runControllerJson3(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
     systemPrompt: SUMMARY_SYSTEM_PROMPT,
-    maxTokensOverride: Math.min(settings.controllerMaxTokens, 1400)
+    maxTokensOverride: computeEntrySummaryTokenBudget(settings, entries.length)
   });
   const parsed = controllerResult.parsed;
   if (!parsed || !Array.isArray(parsed.entries)) {
@@ -3462,6 +3469,45 @@ async function generateEntrySummaryBatch(entries, settings, userId) {
     summary: typeof update.summary === "string" ? update.summary.trim() : undefined,
     collapsedText: typeof update.collapsedText === "string" ? update.collapsedText.trim() : undefined
   })).filter((update) => !!update.entryId);
+}
+async function generateEntrySummariesResilient(entries, settings, userId) {
+  if (!entries.length)
+    return { updates: [], failedEntryIds: [] };
+  try {
+    const updates = await generateEntrySummaryBatch(entries, settings, userId);
+    if (updates.length >= entries.length) {
+      return { updates, failedEntryIds: [] };
+    }
+    if (entries.length === 1) {
+      return {
+        updates,
+        failedEntryIds: updates.length ? [] : [entries[0].entryId]
+      };
+    }
+    const seen = new Set(updates.map((u) => u.entryId));
+    const missing = entries.filter((entry) => !seen.has(entry.entryId));
+    if (!missing.length)
+      return { updates, failedEntryIds: [] };
+    const retry = await bisectAndRetry(missing, settings, userId);
+    return {
+      updates: [...updates, ...retry.updates],
+      failedEntryIds: retry.failedEntryIds
+    };
+  } catch {
+    if (entries.length === 1) {
+      return { updates: [], failedEntryIds: [entries[0].entryId] };
+    }
+    return bisectAndRetry(entries, settings, userId);
+  }
+}
+async function bisectAndRetry(entries, settings, userId) {
+  const mid = Math.floor(entries.length / 2);
+  const left = await generateEntrySummariesResilient(entries.slice(0, mid), settings, userId);
+  const right = await generateEntrySummariesResilient(entries.slice(mid), settings, userId);
+  return {
+    updates: [...left.updates, ...right.updates],
+    failedEntryIds: [...left.failedEntryIds, ...right.failedEntryIds]
+  };
 }
 async function updateEntryMeta(entryId, meta, userId) {
   const entry = await spindle.world_books.entries.get(entryId, userId);
@@ -3934,7 +3980,19 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           chunkTotal: entrySummaryBatches.length
         });
         try {
-          updates.push(...await generateEntrySummaryBatch(entryBatch, settings, userId));
+          const result = await generateEntrySummariesResilient(entryBatch, settings, userId);
+          updates.push(...result.updates);
+          if (result.failedEntryIds.length) {
+            const issue = {
+              severity: "warn",
+              message: `Entry summary batch ${batchIndex + 1} for ${bookName}: ${result.failedEntryIds.length} of ${entryBatch.length} entries returned unusable JSON after retries.`,
+              bookId,
+              bookName,
+              phase: "entry_controller"
+            };
+            issues.push(issue);
+            operation?.addIssue(issue);
+          }
         } catch (error) {
           const issue = {
             severity: "warn",
@@ -4173,7 +4231,8 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation)
       chunkTotal: 1
     });
     try {
-      const updates = await generateEntrySummaryBatch(targetEntries, settings, userId);
+      const result = await generateEntrySummariesResilient(targetEntries, settings, userId);
+      const updates = result.updates;
       for (const update of updates) {
         const entryId = typeof update.entryId === "string" ? update.entryId : "";
         if (!entryId)
@@ -4200,9 +4259,10 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation)
       }
       await invalidateBookCache(bookId, userId);
       completed += targetEntries.length;
+      const successCount = targetEntries.length - result.failedEntryIds.length;
       operation?.progress({
         phase: "entries_complete",
-        message: `Updated ${targetEntries.length} entry summary${targetEntries.length === 1 ? "" : "ies"} for ${bookName}.`,
+        message: `Updated ${successCount} entry summary${successCount === 1 ? "" : "ies"} for ${bookName}${result.failedEntryIds.length ? ` (${result.failedEntryIds.length} failed after retries)` : ""}.`,
         current: completed,
         total: totalTargets,
         percent: Math.round(completed / totalTargets * 100),
@@ -4211,6 +4271,17 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation)
         chunkCurrent: 1,
         chunkTotal: 1
       });
+      if (result.failedEntryIds.length) {
+        const issue = {
+          severity: "warn",
+          message: `${result.failedEntryIds.length} of ${targetEntries.length} entries returned unusable JSON after retries.`,
+          bookId,
+          bookName,
+          phase: "controller"
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+      }
     } catch (error) {
       const issue = {
         severity: "error",

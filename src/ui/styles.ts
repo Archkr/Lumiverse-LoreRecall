@@ -2394,6 +2394,168 @@ export const LORE_RECALL_CSS = `
   padding: 1px 7px;
 }
 
+/* ---------- Per-book build list ---------------------------- */
+
+.lore-build-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lore-build-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--lr-r);
+  border: 1px solid var(--lr-line);
+  background: var(--lr-bg-page);
+  transition: border-color var(--lr-t), background var(--lr-t);
+  position: relative;
+}
+
+.lore-build-row:hover {
+  border-color: var(--lr-line-2);
+  background: var(--lr-bg-raised);
+}
+
+.lore-build-row.selected {
+  border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-acc) 6%, var(--lr-bg-page));
+}
+
+.lore-build-row.building {
+  border-color: color-mix(in srgb, var(--lr-lore) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-lore) 5%, var(--lr-bg-page));
+}
+
+.lore-build-row.building::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--lr-lore);
+  border-radius: 2px 0 0 2px;
+}
+
+.lore-build-row-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px;
+  margin: -4px;
+}
+
+.lore-build-row-check input[type="checkbox"] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--lr-line-2);
+  border-radius: 4px;
+  background: var(--lr-bg-panel);
+  cursor: pointer;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--lr-t), border-color var(--lr-t);
+}
+
+.lore-build-row-check input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--lr-line-light);
+}
+
+.lore-build-row-check input[type="checkbox"]:checked {
+  background: var(--lr-acc);
+  border-color: var(--lr-acc);
+}
+
+.lore-build-row-check input[type="checkbox"]:checked::after {
+  content: "";
+  width: 4px;
+  height: 8px;
+  border: solid var(--lr-acc-fg);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.lore-build-row-check input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.lore-build-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lore-build-row-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0;
+}
+
+.lore-build-row-status {
+  font-size: 11px;
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lore-build-row-status.active {
+  color: var(--lr-lore);
+  font-style: italic;
+  font-family: inherit;
+}
+
+.lore-build-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---------- Build bulk-action bar ------------------------- */
+
+.lore-build-bulkbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  margin-top: 4px;
+  border-radius: var(--lr-r);
+  border: 1px solid var(--lr-line);
+  background: var(--lr-bg-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.lore-build-bulkbar-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--lr-muted);
+}
+
+.lore-build-bulkbar-label > span {
+  font-weight: 500;
+  color: var(--lr-text);
+}
+
 /* ---------- Build blocker hints (inline reasons under disabled buttons) --- */
 
 .lore-build-blockers {
