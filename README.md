@@ -429,7 +429,7 @@ TunnelVision is a separate project with its own codebase and license. This READM
 
 | Project | License |
 |---|---|
-| Lore Recall | See [`LICENSE`](./LICENSE) in this repository |
+| Lore Recall | AGPL-3.0 |
 | TunnelVision | AGPL-3.0 (in its own repository) |
 
 Each license applies to its own repository independently.
