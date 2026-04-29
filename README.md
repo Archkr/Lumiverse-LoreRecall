@@ -1,285 +1,305 @@
 # Lore Recall
 
-Lore Recall is a Lumiverse-native Spindle extension for tree-aware world book retrieval. It lets each character manage their own retrieval sources, build navigable book trees, choose between collapsed and traversal retrieval, and inject selected lore through the prompt interceptor path while exposing a live Retrieval feed for debugging.
+**Tree-aware retrieval for Lumiverse worldbooks.** Lore Recall turns flat lorebook entries into a navigable, character-scoped knowledge tree, then retrieves only the slices that matter for the current scene — through either a fast collapsed lookup or a controller-guided traversal.
 
-## Testing Status
+It is a curator for narrative knowledge: build a structured index of your world once, and let the right entries surface at the right moment instead of brute-keyword-matching every turn.
 
-Lore Recall is currently packaged as an early testing release.
+> Inspired by [TunnelVision](https://github.com/Coneja-Chibi/TunnelVision)'s philosophy of giving the AI an actual map of what it knows. Lore Recall is a Lumiverse-native take on the same idea.
 
-- Version: `0.1.1`
-- Minimum Lumiverse version: `0.9.0`
-- Status: usable for testing, but retrieval behavior, diagnostics, and UI polish are still evolving
+---
 
-This release is meant to make real-world testing easier, not to claim that every workflow is final.
+## What it does
 
-## What Lore Recall Does
+- **Character-scoped sources.** Each character maintains its own list of managed lorebooks. Retrieval pulls only from those, not from every book attached to the character.
+- **Tree organization.** Build a hierarchical index per book — automatically from existing metadata, or with LLM-assisted categorization. The tree gives retrieval something it can actually navigate.
+- **Two retrieval modes.** `Collapsed` retrieval picks scopes from the full manifest in one fast pass. `Traversal` retrieval has the controller drill through branches step by step.
+- **Constant entries reserved out of budget.** Native `constant`-flagged entries always inject. Dynamic retrieval fills the remaining slots from the chosen scopes.
+- **Selective retrieval.** Lets the controller pick the final injected entry IDs from the chosen-scope manifests, instead of injecting everything that survived the cutoffs.
+- **Live retrieval feed.** A rolling, per-chat stream of every scope choice, search, manifest selection, pulled entry, and injection — visible while retrieval is running, not just after.
+- **Editable tree workspace.** Browse categories and entries side-by-side, move them around, edit labels/aliases/tags/summaries/collapsed text, regenerate summaries for a whole book or a single entry, and apply bulk flag changes to whole branches.
+- **Per-book permissions.** `Read + write`, `Read only`, and `Write only` modes prevent accidental edits to books you only want to consume from.
+- **Snapshot export and import.** Move your Lore Recall state between machines or back it up before a risky build.
+- **Diagnostics with auto-cleanup.** Surfaces missing trees, write-only conflicts, attached-but-unmanaged warnings, and prunes stale references when a managed book is deleted natively in Lumiverse.
 
-Lore Recall is built around a few core ideas:
+---
 
-### Character-scoped source management
+## Why this exists
 
-- Each character can maintain their own `managed books` list
-- Retrieval is driven by those managed books, not by Lumiverse's normal attachment list alone
-- You can use an `auto-detect pattern` to quickly pick up books that match a naming rule
-- Natively attached books are still surfaced to you as warnings or context clues so setup mistakes are easier to spot
+Default worldbook injection fires on keywords. Type "Yuki" and entries with "Yuki" as a key fire — even if the scene isn't about her. Don't type "Yuki" and her backstory never lands — even if the scene clearly *is* about her. Keywords are brittle.
 
-This makes it much easier to run different retrieval setups for different characters without pretending every attached book should always participate equally.
+The alternatives:
 
-### Tree-based lore organization
+- **Vector RAG** is closer, but still pattern-matching on embeddings. It finds text that *looks similar* to the query. It has no concept of *what the scene needs*.
+- **Manual constants** force entries to always inject. Fine for a few core entries; useless when you have hundreds of scoped lore items.
 
-- Lore Recall builds a navigable tree index for each managed book
-- Trees can be built from metadata or with an LLM-assisted builder
-- Build tuning includes:
-  - build detail levels: `names`, `lite`, `full`
-  - tree granularity presets, including `auto`
-  - chunk sizing for larger books
-  - dedup modes: `none`, `lexical`, `llm`
+Lore Recall's bet: if you give the controller LLM a structured tree of your world, it can *reason* about which scopes are relevant to the current scene, and inject the entries that actually matter for the next reply. The tree is built once. Retrieval is contextual. The user maintains the world; the controller chooses what to surface.
 
-The goal is to turn flat lorebook entries into something retrieval can actually navigate instead of only brute-searching the full manifest every time.
+---
 
-### Editable tree workspace
+## Compatibility
 
-- Browse categories and entries in a dedicated tree workspace
-- Create child categories
-- Move categories and entries between branches
-- Delete categories and send their contents to a safe target
-- Edit entry labels, aliases, tags, summaries, collapsed text, and location
-- Regenerate summaries for a whole book, selected categories, or selected entries
+- **Lumiverse** version `0.9.0` or newer
+- **Spindle permissions used:** `world_books`, `characters`, `chats`, `chat_mutation`, `generation`, `interceptor`
+- **A controller connection is strongly recommended** for:
+  - LLM-assisted tree building
+  - Summary regeneration
+  - Traversal-mode retrieval
 
-This means Lore Recall is not only a retriever. It also gives you tools to maintain the retrieval structure over time.
+The metadata-build path and collapsed-mode retrieval can run without a controller, but most of Lore Recall's intelligence comes from the controller-driven flows.
 
-### Retrieval modes and controls
+---
 
-- `collapsed` retrieval for fast scoped selection from the built tree
-- `traversal` retrieval for controller-guided branch exploration
-- Per-character controls for:
-  - collapsed depth
-  - max results
-  - traversal depth
-  - traversal step limit
-  - injection budget
-  - context message count
-  - `unified` vs `per_book` multi-book behavior
-  - reranking
-  - selective retrieval
+## Installation
 
-That lets you tune Lore Recall more like a retrieval workflow than a simple on/off switch.
+### From GitHub inside Lumiverse
 
-### Prompt injection and visibility
+1. Copy the repository URL: `https://github.com/archkr/Lumiverse-LoreRecall`
+2. Open Lumiverse → **Extensions** tab → **Install**
+3. Paste the URL and press **Install**
+4. Enable Lore Recall and grant the requested permissions
+5. Verify Lore Recall appears in your extension list and a `Lore Recall` tab shows up in the Extensions drawer
 
-- Injects selected lore through the interceptor path during generation
-- Preserves a final retrieval preview/report for debugging
-- Shows a live `Retrieval feed` while retrieval is running instead of only after it finishes
-- The feed exposes scopes, manifest selection, pulled entries, injected entries, and issue events like timeouts or fallbacks
+### Manual / local checkout (development)
 
-If Lore Recall makes a weird choice, the extension is designed to give you a trail you can actually inspect.
+Clone the repo, then either:
 
-### Diagnostics, safety rails, and maintenance
+- Point Lumiverse at the local folder, or
+- Run `bun run build` from the repo root to regenerate `dist/backend.js` and `dist/frontend.js`, then reload the extension
 
-- Warns about missing trees, attached-but-unmanaged books, metadata gaps, and unavailable controller connections
-- Respects per-book permissions:
-  - `read_write`
-  - `read_only`
-  - `write_only`
-- Blocks rebuild or rewrite actions when a book is `read_only`
-- Includes snapshot export and import so you can back up or move Lore Recall state
+---
 
-The permission model and warnings are there to help prevent accidental destructive edits or confusing mixed setups.
+## Quick start
 
-## Credits & Inspiration
+1. **Open a character chat in Lumiverse.** Lore Recall settings are per-character, so most actions are no-ops without an active character.
+2. **Open Lore Recall** from the Extensions drawer.
+3. **Pick managed lorebooks.** Open the workspace, go to **Sources**, and click `Manage` on the books you want this character to retrieve from. Use the refresh button if a freshly-created book doesn't appear.
+4. **Build trees.** Go to **Build** and click **Build from metadata** (free, instant) or **Build with LLM** (better categorization, requires a controller connection). Each managed book needs a tree before it can be retrieved from.
+5. **Enable retrieval.** Go to **Retrieval** and toggle `Enable retrieval for this character`.
+6. **Pick a retrieval mode.** `Collapsed` is the fast default. Switch to `Traversal` for larger or deeper trees.
+7. **Pick a controller connection** under **Maintenance → Advanced** if you want LLM-driven flows (you almost certainly do).
+8. **Send a message.** Watch the live retrieval feed in the drawer to see what Lore Recall picked and why.
 
-Lore Recall is a Lumiverse-native project, but it was meaningfully inspired by [TunnelVision](https://github.com/Coneja-Chibi/TunnelVision).
+---
 
-In particular, Lore Recall draws inspiration from:
+## Concepts
+
+### Sources
+
+Use **Sources** to decide which lorebooks the active character can retrieve from.
+
+- **Managed books** are the actual retrieval set. Only managed books participate.
+- **Suggested books** are auto-detected from your global pattern (default `*recall*`).
+- **Attached** indicates a book is also natively wired to the character via Lumiverse's normal worldbook attachment. Native attachment is independent of Lore Recall management — usually you want them detached so Lore Recall is the sole retrieval path.
+- **Per-book settings** include a `description` (helps the controller during multi-book retrieval), permission mode, and an enable toggle.
+
+### Build
+
+Use **Build** to create or rebuild trees for managed books.
+
+- **Build from metadata** uses each entry's existing keys, tags, and group hints. Instant, free, no LLM calls. Works well when your lorebook already has decent metadata.
+- **Build with LLM** uses your controller connection to categorize entries by content. Slower and costs tokens, but produces much better trees for messy or sparsely-tagged books.
+- **Build tuning:**
+  - **Build detail** — how much of each entry the controller sees (`Names`, `Lite`, `Full`)
+  - **Tree granularity** — `Auto` scales with book size; manual presets (`Minimal` through `Extensive`) target different category counts
+  - **LLM chunk size** — characters per categorization call. Larger chunks mean fewer calls
+  - **Dedup mode** — `None`, `Lexical`, or `LLM` deduplication during build
+- The build button explains itself when disabled. The most common gotcha: **a brand-new book with no entries cannot be built** — there's nothing to organize. Add some entries first.
+
+### Retrieval
+
+Use **Retrieval** to configure per-character behavior:
+
+- `Search mode` — `Collapsed` or `Traversal`
+- `Multi-book mode` — `Unified` (all managed books merged into one manifest) or `Per book` (controller picks which book to navigate)
+- `Collapsed depth`, `Traversal depth`, `Traversal step limit` — bound how far the controller can drill
+- `Pull limit` — max scoped candidates kept after retrieval
+- `Inject limit` — max entries written into the prompt
+- `Context messages` — how many recent chat messages become retrieval context
+- `Rerank top candidates` — reorder candidates before the final cutoff
+- `Selective retrieval` — let the controller pick exact entry IDs from the chosen scopes (vs injecting everything that survived the cutoffs)
+
+### Book
+
+Use **Book** to inspect the selected lorebook and access its tree.
+
+- See managed/attached/tree-built status, last build source, entry/category/unassigned counts
+- Edit per-book settings (enable, permission, description)
+- Open the **tree workspace** to navigate and edit the actual tree
+
+### Tree workspace
+
+The tree workspace is the modal editor for a managed book's tree:
+
+- **Tree sidebar** with collapsible categories, an Unassigned section, and Collapse all / Expand all controls
+- **Editor pane** with breadcrumbs, label and parent selectors, summary and collapsed-text fields, native flags (`disabled`, `constant`, `selective`), aliases, and tags
+- **Bulk entry-flag actions** at the category level — set/clear `constant`, enable/disable all descendants, set/clear `selective`
+- **Regenerate summary** for a category, an entry, or a whole book
+- **Move/delete categories** with safe targets for orphaned entries
+- **Read-only books** disable destructive controls; the editor is browse-only
+
+### Retrieval feed
+
+The retrieval feed lives in the drawer and surfaces what Lore Recall is doing in real time. Each session card shows:
+
+- Mode (Collapsed / Traversal), status, controller-vs-deterministic path, elapsed time
+- A flow strip: `scope → manifest → pulled → injected` counts
+- The top injected entry preview
+- An expandable thread of every event: scope choices, search calls, manifest selections, reservations, pulls, injections, and any issue events
+- Filter chips to show only one event kind
+
+Live sessions get a subtle pulse and an amber outer edge so you can see retrieval is happening *now*.
+
+### Maintenance
+
+Use **Maintenance** for the wider extension state:
+
+- **Diagnostics** — warnings about missing trees, write-only conflicts, attached-but-unmanaged books, metadata gaps, missing controller connections, and information about auto-cleaned stale references
+- **Backup & restore** — snapshot export (downloads a JSON) and import (uploads one)
+- **Advanced** — global settings: master enable, auto-detect pattern, controller connection, controller temperature, controller max tokens, build detail, tree granularity, chunk size, dedup mode
+
+---
+
+## Settings reference
+
+### Per-character (Retrieval panel)
+
+| Setting | Default | Notes |
+|---|---|---|
+| `Enable retrieval for this character` | Off | Master toggle for the character |
+| `Search mode` | `Collapsed` | `Collapsed` is faster; `Traversal` is more exploratory |
+| `Multi-book mode` | `Unified` | `Unified` merges all managed books; `Per book` lets the controller pick |
+| `Collapsed depth` | 2 | Tree depth shown to the controller in collapsed mode |
+| `Pull limit` | 6 | Max scoped candidates after retrieval |
+| `Traversal depth` | 3 | Max tree depth in traversal mode |
+| `Traversal step limit` | 5 | Max controller drill-down calls per turn |
+| `Inject limit` | 6 | Max entries injected into the prompt |
+| `Context messages` | 10 | Recent chat messages used as retrieval context |
+| `Rerank top candidates` | Off | Reorder before final cutoff |
+| `Selective retrieval` | On | Controller picks exact entry IDs from chosen scopes |
+
+### Per-book
+
+| Setting | Default | Notes |
+|---|---|---|
+| `Enable this managed source` | On | Per-book disable switch |
+| `Permission` | `Read + write` | `Read only` blocks all rebuild/edit; `Write only` is for write-oriented workflows |
+| `Description` | (empty) | Helps the controller route between books in multi-book retrieval |
+
+### Global (Advanced panel)
+
+| Setting | Default | Notes |
+|---|---|---|
+| `Master enable` | On | Global kill switch |
+| `Auto-detect pattern` | `*recall*` | Books matching this glob get suggested |
+| `Controller connection` | (default) | Which connection profile to use for LLM flows |
+| `Controller temperature` | 0.2 | Sampling for controller calls |
+| `Controller max tokens` | 8192 | Output cap for controller calls |
+| `LLM chunk size` | 30,000 | Characters per categorization call during LLM build |
+| `Build detail` | `Lite` | `Names` / `Lite` / `Full` — how much entry content the LLM sees |
+| `Tree granularity` | `Auto` | Auto scales with book size; manual presets target different category counts |
+| `Dedup mode` | `None` | `None` / `Lexical` / `LLM` |
+
+---
+
+## Tips & best practices
+
+- **Detach managed books from native attachment.** Once a book is managed by Lore Recall, you usually want it *not* natively attached to the character. Native attachment fires keyword triggers in parallel with Lore Recall's retrieval, leading to double-injection and confusing prompt breakdowns. The `Attached` tag on the book panel is a heads-up, not an error.
+- **Use metadata build first.** It's instant and lets you confirm the tree pipeline works end-to-end before paying for an LLM build.
+- **Constants are budget-aware.** Native `constant`-flagged entries are reserved *outside* the dynamic retrieval budget. Use them for must-always-inject anchors (current location tracker, party stats, season-of-the-story flags). Don't use constants for general lore — that defeats the point of dynamic retrieval.
+- **Per-book descriptions matter for multi-book retrieval.** When the controller has to choose which book to consult, the description is its main signal. Write descriptions that explain what kind of content lives in each book, not just what the book is called.
+- **Watch the retrieval feed during the first few turns.** It tells you whether the controller is making sensible scope choices. If you see consistently bad picks, the tree summaries are probably too vague — regenerate them.
+- **Read-only managed books are a real workflow.** Use `Read only` permission for community lorebooks you want to retrieve from but never edit. Lore Recall blocks rebuild and rewrite operations cleanly.
+- **Selective retrieval on is the better default.** It lets the controller make the final call about *which* entries inject, rather than just *which scopes* survive. Turn it off only if you want a pure scope-then-cap behavior.
+
+---
+
+## Troubleshooting
+
+### "I clicked Build and nothing happens"
+
+The most common cause is an empty book. Lore Recall builds the tree out of the existing entries, so a book with zero entries has nothing to organize. Add a few entries to the book in Lumiverse, then build.
+
+If the book has entries and the button is still disabled, check the inline reason directly under the buttons. It will tell you whether the issue is a missing controller connection, a read-only book, or no active character.
+
+### "I made a new book in Lumiverse and Lore Recall doesn't see it"
+
+Click the refresh button in the Sources panel toolbar. Lore Recall caches the world-book list for 5 seconds; the refresh button busts that cache and re-pulls the full list.
+
+### "A book I deleted in Lumiverse still shows as managed"
+
+This auto-cleans on the next state refresh. You'll see an info diagnostic in Maintenance reading *"Removed N stale managed-book reference(s)"*. If you want to force it immediately, open Maintenance and run diagnostics.
+
+### "Retrieval feed is empty"
+
+Make sure:
+- The character has retrieval enabled (Retrieval panel)
+- At least one managed book has a built tree (Sources / Build panels)
+- You actually sent a message (the feed only populates during a real generation; opening Lore Recall doesn't trigger retrieval)
+
+### "Controller fell back to deterministic"
+
+This is logged in the feed as a fallback event. Common causes:
+- The controller connection is missing or invalid (check Advanced settings)
+- The controller returned malformed output (some smaller models do this — try a bigger model)
+- The controller exceeded the interceptor timeout (default 180s; bump in `spindle.json` if your provider is slow)
+
+### "It works, but the choices are bad"
+
+Almost always a tree quality problem. Try in this order:
+1. Regenerate summaries on the worst-offending categories (Tree workspace → Regenerate summary)
+2. Switch from metadata build to LLM build for those books
+3. Bump build detail to `Full` and rebuild
+4. Tighten `Tree granularity` so categories are more specific
+
+---
+
+## Architecture (for the curious)
+
+Lore Recall is a TypeScript Spindle extension with separate backend and frontend bundles.
+
+```
+src/
+  backend.ts            entrypoint — registers messages, interceptor, lifecycle
+  backend/
+    index.ts            state assembly, message dispatch, interceptor wiring
+    operations.ts       all long-running operations (build, summarize, snapshots)
+    retrieval.ts        the actual retrieval pipeline (collapsed + traversal)
+    runtime.ts          shared runtime state, send helpers, storage paths
+    storage.ts          per-extension storage layer (configs, trees, caches)
+    contracts.ts        backend-only DTO helpers
+    controller-json.ts  resilient JSON parsing for controller responses
+  frontend.ts           entrypoint — re-exports the UI setup
+  ui/
+    app.ts              all rendering: drawer, settings workspace, tree modal, feed
+    helpers.ts          formatting + small DOM utilities
+    styles.ts           the Codex CSS template (loaded via spindle.dom.addStyle)
+  shared.ts             types and normalizers used by both sides
+  types.ts              wire-format DTOs
+dist/
+  backend.js            built backend bundle
+  frontend.js           built frontend bundle
+spindle.json            extension manifest
+```
+
+The build process writes the bundles Lumiverse loads. After source changes, run `bun run build` (or `bun run build:backend` / `bun run build:frontend`) and reload the extension in Lumiverse.
+
+---
+
+## Credits & inspiration
+
+Lore Recall is meaningfully inspired by [TunnelVision](https://github.com/Coneja-Chibi/TunnelVision), in particular:
 
 - TunnelVision's AI-directed retrieval philosophy, where the model actively helps decide what context it needs
 - TunnelVision's activity-feed style UX for making retrieval behavior visible and debuggable
 
-TunnelVision is a separate project with its own codebase and license. This README is intentionally crediting influence and inspiration, not claiming that Lore Recall is a direct code port or a shared-code derivative.
+TunnelVision is a separate project with its own codebase and license. This README is crediting influence and inspiration; Lore Recall is a Lumiverse-native rebuild of similar ideas, not a code port or shared-code derivative.
 
-License note:
+License notes:
+- Lore Recall ships under the license in this repository
+- TunnelVision ships under AGPL-3.0
+- Each license applies to its own repository independently
 
-- Lore Recall uses the license included in this repository
-- TunnelVision uses AGPL-3.0
-
-Those licenses apply to their respective repositories independently.
-
-## Compatibility & Requirements
-
-Lore Recall is a [Lumiverse](https://lumiverse.chat) Spindle extension.
-
-Requirements:
-
-- Lumiverse `0.1.0` or newer
-- A controller connection is strongly recommended for:
-  - LLM-based tree building
-  - summary regeneration
-  - traversal-heavy retrieval workflows
-
-The extension currently requests these Spindle permissions in [`spindle.json`](./spindle.json):
-
-- `world_books`
-- `characters`
-- `chats`
-- `chat_mutation`
-- `generation`
-- `interceptor`
-
-## Installation
-
-### Install From GitHub in Lumiverse / Spindle
-
-1. Copy the repository URL:
-   - `https://github.com/archkr/Lumiverse-LoreRecall`
-2. Open Lumiverse and go to the Extensions tab.
-3. Click `Install`.
-4. Paste the repository URL into the repo URL field.
-5. Press `Install`.
-6. Enable Lore Recall and grant the requested permissions if Lumiverse prompts you.
-7. Verify that `Lore Recall` now appears in your extension list.
-8. Open a character chat and access Lore Recall through the Extensions drawer.
-
-## Quick Start
-
-1. Open a character chat in Lumiverse.
-2. Open Lore Recall and add one or more lorebooks as that character's `managed books`.
-3. Build trees for those managed books.
-4. Enable retrieval for the active character.
-5. Choose a retrieval mode:
-   - `collapsed`
-   - `traversal`
-6. Optionally choose a `controller connection` for traversal and other LLM-powered operations.
-7. Generate a reply.
-8. Inspect the live `Retrieval feed` to see what Lore Recall selected and why.
-
-## How The Workflow Is Organized
-
-### Sources
-
-Use `Sources` to decide which lorebooks the active character is allowed to retrieve from.
-
-Important behavior:
-
-- `managed books` are the actual retrieval sources
-- natively attached books are shown as warnings or context clues, not as Lore Recall's source-of-truth retrieval set
-
-This distinction matters. If a book is merely attached in Lumiverse but not managed in Lore Recall, retrieval may not use it the way you expect.
-
-Sources also gives you book-level configuration, including:
-
-- whether the book is enabled for Lore Recall
-- a per-book description that helps explain its role during multi-book retrieval
-- the book permission mode: `read_write`, `read_only`, or `write_only`
-- global auto-detection rules for bringing matching books into view more quickly
-
-### Build
-
-Use `Build` to create or rebuild trees for managed books.
-
-- Metadata build is the cheaper path
-- LLM build is the stronger path when you want better categorization
-- Tree quality has a direct effect on retrieval quality
-- Build tuning includes detail level, auto/manual granularity, chunk sizing, and dedup behavior
-- Lore Recall shows preflight warnings when builds are blocked by missing controller connections or read-only books
-
-If you are working with large or messy books, this section is where most retrieval quality gains come from.
-
-### Retrieval
-
-Use `Retrieval` to configure per-character behavior such as:
-
-- `collapsed` vs `traversal`
-- retrieval depth and step limits
-- pull count and injection budget
-- reranking and selective retrieval
-- unified vs per-book behavior
-- how many recent chat messages become retrieval context
-
-In practice:
-
-- `collapsed` is the simpler and faster mode
-- `traversal` is the more exploratory mode and depends more on controller behavior
-- `selective retrieval` lets Lore Recall return fewer entries when a smaller set is more useful
-- `rerank` helps reorder the top candidates before final selection
-
-### Book
-
-Use `Book` to inspect and maintain a selected managed source.
-
-This is also where permission differences become important:
-
-- `read_write` books can be rebuilt and updated by Lore Recall
-- `read_only` books can be read for retrieval, but not rewritten
-- `write_only` books are for write-oriented workflows and are not normal read sources
-
-This area is also where you spend time actually shaping the tree:
-
-- inspect built vs missing tree state
-- review attached/detached status
-- browse category hierarchy
-- edit entry metadata
-- assign entries to categories
-- regenerate summaries for specific targets
-
-If retrieval feels off for one specific book, this is usually the first place to inspect.
-
-### Retrieval Feed
-
-The live `Retrieval feed` is the fastest way to understand what Lore Recall is doing during a generation.
-
-It is designed to help you inspect:
-
-- scope selection
-- manifest selection
-- pulled entries
-- injected entries
-- controller issues, fallbacks, and timeouts
-
-The feed keeps a rolling history for the active chat and is meant for debugging real retrieval behavior, not just showing a final snapshot.
-
-### Maintenance
-
-Lore Recall also includes maintenance tools for the whole extension state.
-
-These include:
-
-- snapshot export
-- snapshot import
-- diagnostics for missing trees, write-only sources, attached-book warnings, and metadata gaps
-- operation tracking for builds, summary regeneration, and snapshot actions
-
-This is especially useful when you are testing multiple books and characters and want a safer way to move or inspect your setup.
-
-## Testing Focus / Current Caveats
-
-This testing release is especially interested in reports around retrieval quality and visibility.
-
-Current caveats:
-
-- Retrieval quality depends heavily on tree quality
-- `traversal` mode depends more on controller behavior than `collapsed` mode
-- `read_only` books cannot be rebuilt or rewritten by Lore Recall
-- setup is per character, not purely global
-- diagnostics are improving, but there may still be cases where the retrieval feed and Prompt Breakdown need cross-checking
-
-Please report issues like:
-
-- bad scope choices
-- wrong or missing injected entries
-- controller timeouts or controller-path oddities
-- UI feed issues
-- Prompt Breakdown mismatches
-
-## Development
-
-Lore Recall is a TypeScript Spindle extension with separate backend and frontend bundle entrypoints.
-
-The build process writes the extension bundles Lumiverse loads:
-
-- `dist/backend.js`
-- `dist/frontend.js`
-
-Those outputs are referenced by [`spindle.json`](./spindle.json), so if you are testing a local checkout, rebuild after source changes before reloading the extension in Lumiverse.
+---
 
 ## License
 
