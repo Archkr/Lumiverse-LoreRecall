@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.1.6-6b8ff0)](./spindle.json)
 [![Lumiverse](https://img.shields.io/badge/Lumiverse-%E2%89%A5%200.9.0-d4a35a)](https://lumiverse.chat)
 [![Status](https://img.shields.io/badge/status-stable-7fb380)](https://github.com/archkr/Lumiverse-LoreRecall)
-[![License](https://img.shields.io/badge/license-see%20repo-9aa0ae)](./LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg)](LICENSE)
 
 *A curator for narrative knowledge.*
 
@@ -429,8 +429,8 @@ TunnelVision is a separate project with its own codebase and license. This READM
 
 | Project | License |
 |---|---|
-| Lore Recall | See [`LICENSE`](./LICENSE) in this repository |
-| TunnelVision | AGPL-3.0 (in its own repository) |
+| Lore Recall | AGPL-3.0 |
+| TunnelVision | AGPL-3.0 |
 
 Each license applies to its own repository independently.
 
