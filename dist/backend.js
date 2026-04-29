@@ -648,6 +648,13 @@ async function ensureStorageFolders(userId) {
 // src/backend/storage.ts
 var WORLD_BOOK_LIST_TTL_MS = 5000;
 var worldBookListCache = new Map;
+function invalidateWorldBookListCache(userId) {
+  if (typeof userId === "string") {
+    worldBookListCache.delete(userId);
+    return;
+  }
+  worldBookListCache.clear();
+}
 function getLoreRecallCharacterPayload(character) {
   const value = character?.extensions?.[EXTENSION_KEY];
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -5178,8 +5185,11 @@ spindle.onFrontendMessage(async (payload, userId) => {
     await ensureStorageFolders(userId);
     switch (message.type) {
       case "ready":
+        await pushState(userId, message.chatId);
+        break;
       case "refresh":
       case "run_diagnostics":
+        invalidateWorldBookListCache(userId);
         await pushState(userId, message.chatId);
         break;
       case "save_global_settings":

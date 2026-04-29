@@ -2394,6 +2394,82 @@ export const LORE_RECALL_CSS = `
   padding: 1px 7px;
 }
 
+/* ---------- Build blocker hints (inline reasons under disabled buttons) --- */
+
+.lore-build-blockers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.lore-build-blocker {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-warn) 7%, var(--lr-bg-page));
+  border-left: 2px solid color-mix(in srgb, var(--lr-warn) 55%, var(--lr-line));
+}
+
+.lore-build-blocker-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--lr-warn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.lore-build-blocker-icon svg { width: 14px; height: 14px; }
+
+.lore-build-blocker-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.lore-build-blocker-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--lr-warn) 75%, var(--lr-text));
+  white-space: nowrap;
+}
+
+.lore-build-blocker-text {
+  font-size: 12px;
+  color: var(--lr-text);
+  line-height: 1.45;
+}
+
+/* ---------- Sources panel - new-book hint --- */
+
+.lore-sources-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--lr-dim);
+  font-style: italic;
+}
+
+.lore-sources-tip-icon {
+  width: 11px;
+  height: 11px;
+  color: var(--lr-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* ---------- Health strip (drawer diagnostics summary) --- */
 
 .lore-health-strip {

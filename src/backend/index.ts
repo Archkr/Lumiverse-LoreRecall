@@ -44,6 +44,7 @@ import {
   buildConnectionOption,
   computeSuggestedBookIds,
   getRuntimeBooks,
+  invalidateWorldBookListCache,
   listAllWorldBooks,
   loadCharacterConfig,
   loadGlobalSettings,
@@ -709,8 +710,14 @@ spindle.onFrontendMessage(async (payload, userId) => {
 
     switch (message.type) {
       case "ready":
+        await pushState(userId, message.chatId);
+        break;
+
       case "refresh":
       case "run_diagnostics":
+        // User-initiated refresh always sees fresh data — bust the world-book list cache
+        // so brand-new lorebooks created in Lumiverse surface immediately.
+        invalidateWorldBookListCache(userId);
         await pushState(userId, message.chatId);
         break;
 
