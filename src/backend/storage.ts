@@ -48,6 +48,14 @@ import {
 const WORLD_BOOK_LIST_TTL_MS = 5000;
 const worldBookListCache = new Map<string, { expiresAt: number; books: WorldBookDTO[] }>();
 
+export function invalidateWorldBookListCache(userId?: string): void {
+  if (typeof userId === "string") {
+    worldBookListCache.delete(userId);
+    return;
+  }
+  worldBookListCache.clear();
+}
+
 function getLoreRecallCharacterPayload(character: CharacterDTO | null | undefined): Record<string, unknown> {
   const value = character?.extensions?.[EXTENSION_KEY];
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};

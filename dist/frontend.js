@@ -2710,6 +2710,82 @@ var LORE_RECALL_CSS = `
   padding: 1px 7px;
 }
 
+/* ---------- Build blocker hints (inline reasons under disabled buttons) --- */
+
+.lore-build-blockers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.lore-build-blocker {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-warn) 7%, var(--lr-bg-page));
+  border-left: 2px solid color-mix(in srgb, var(--lr-warn) 55%, var(--lr-line));
+}
+
+.lore-build-blocker-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--lr-warn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.lore-build-blocker-icon svg { width: 14px; height: 14px; }
+
+.lore-build-blocker-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.lore-build-blocker-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--lr-warn) 75%, var(--lr-text));
+  white-space: nowrap;
+}
+
+.lore-build-blocker-text {
+  font-size: 12px;
+  color: var(--lr-text);
+  line-height: 1.45;
+}
+
+/* ---------- Sources panel - new-book hint --- */
+
+.lore-sources-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--lr-dim);
+  font-style: italic;
+}
+
+.lore-sources-tip-icon {
+  width: 11px;
+  height: 11px;
+  color: var(--lr-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* ---------- Health strip (drawer diagnostics summary) --- */
 
 .lore-health-strip {
@@ -4677,13 +4753,25 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Sources", "Pick the lorebooks this character can retrieve from."));
     const tools = createElement("div", "lore-cluster");
+    const searchWrap = createElement("div", "lore-search-wrap");
+    searchWrap.appendChild(makeIconSpan("search", "lore-search-wrap-icon"));
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (value) => {
       sourceFilter = value;
       render();
     });
     filterInput.type = "search";
     filterInput.className = "lore-input lore-search";
-    tools.appendChild(filterInput);
+    searchWrap.appendChild(filterInput);
+    tools.appendChild(searchWrap);
+    const refreshBtn = createElement("button", "lore-btn lore-btn-sm lore-btn-icon-only");
+    refreshBtn.type = "button";
+    refreshBtn.title = "Refresh lorebook list";
+    refreshBtn.setAttribute("aria-label", "Refresh lorebook list");
+    refreshBtn.innerHTML = iconHtml("refresh");
+    refreshBtn.addEventListener("click", () => {
+      sendToBackend(ctx, { type: "refresh", chatId: state.activeChatId });
+    });
+    tools.appendChild(refreshBtn);
     if (state.suggestedBookIds.length && state.activeCharacterId) {
       tools.appendChild(createButton(`Add ${state.suggestedBookIds.length} suggested`, "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
         type: "apply_suggested_books",
@@ -4694,6 +4782,10 @@ function setup(ctx) {
       })));
     }
     section.appendChild(tools);
+    const tip = createElement("div", "lore-sources-tip");
+    tip.appendChild(makeIconSpan("refresh", "lore-sources-tip-icon"));
+    tip.appendChild(createElement("span", "", "Don't see a lorebook you just created? Click refresh."));
+    section.appendChild(tip);
     const bookIds = filterBooks(state, sourceFilter);
     if (!bookIds.length) {
       section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
@@ -4842,30 +4934,57 @@ function setup(ctx) {
     const llmWarnings = getPreflightWarnings(llmMessage).filter((warning) => !warning.includes("still running"));
     const activeOperation = getActiveOperation();
     const lastBuildOperation = getTrackedOperations().find((operation) => operation.kind === "build_tree_with_llm" || operation.kind === "build_tree_from_metadata");
+    const totalManagedEntries = managedBookIds.reduce((sum, bookId) => sum + (state.bookStatuses[bookId]?.entryCount ?? 0), 0);
+    const noEntriesReason = hasManaged && totalManagedEntries === 0 ? "Managed book has no entries yet — add lorebook entries before building." : null;
+    const metaBlocker = noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
+    const llmBlocker = noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
     const actions = createElement("div", "lore-cluster");
     const metaBtn = createButton(activeOperation?.kind === "build_tree_from_metadata" ? "Building..." : "Build from metadata", "lore-btn", () => dispatchTracked(metadataMessage));
     const llmBtn = createButton(activeOperation?.kind === "build_tree_with_llm" ? "Building..." : "Build with LLM", "lore-btn lore-btn-primary", () => dispatchTracked(llmMessage));
-    if (!hasManaged || !!activeOperation || metadataWarnings.length) {
+    if (!hasManaged || !!activeOperation || metadataWarnings.length || !!noEntriesReason) {
       metaBtn.disabled = true;
     }
-    if (!hasManaged || !!activeOperation || llmWarnings.length) {
+    if (!hasManaged || !!activeOperation || llmWarnings.length || !!noEntriesReason) {
       llmBtn.disabled = true;
     }
+    if (metaBlocker)
+      metaBtn.title = metaBlocker;
+    if (llmBlocker)
+      llmBtn.title = llmBlocker;
     actions.append(metaBtn, llmBtn, createButton("Open tree workspace", "lore-btn-link", () => openWorkspace()));
     section.appendChild(actions);
-    section.appendChild(createFieldNote(`Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`));
-    if (!hasManaged) {
-      section.appendChild(createElement("div", "lore-hint", "Manage at least one lorebook before building a tree."));
-    }
-    const warnings = [...metadataWarnings, ...llmWarnings].filter((value, index, all) => all.indexOf(value) === index);
-    if (warnings.length) {
-      const warningList = createElement("div", "lore-stack");
-      warningList.style.gap = "8px";
-      for (const warning of warnings) {
-        warningList.appendChild(createBanner("warn", "Build blocked", warning));
+    if (metaBlocker || llmBlocker) {
+      const blockerStack = createElement("div", "lore-build-blockers");
+      const seen = new Set;
+      const addBlocker = (label, reason) => {
+        if (!reason)
+          return;
+        const key = `${label}::${reason}`;
+        if (seen.has(key))
+          return;
+        seen.add(key);
+        const row = createElement("div", "lore-build-blocker");
+        row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
+        const body = createElement("div", "lore-build-blocker-body");
+        body.appendChild(createElement("span", "lore-build-blocker-label", label));
+        body.appendChild(createElement("span", "lore-build-blocker-text", reason));
+        row.appendChild(body);
+        blockerStack.appendChild(row);
+      };
+      if (metaBlocker && llmBlocker && metaBlocker === llmBlocker) {
+        const row = createElement("div", "lore-build-blocker");
+        row.appendChild(makeIconSpan("issue", "lore-build-blocker-icon"));
+        const body = createElement("div", "lore-build-blocker-body");
+        body.appendChild(createElement("span", "lore-build-blocker-text", metaBlocker));
+        row.appendChild(body);
+        blockerStack.appendChild(row);
+      } else {
+        addBlocker("Metadata build", metaBlocker);
+        addBlocker("LLM build", llmBlocker);
       }
-      section.appendChild(warningList);
+      section.appendChild(blockerStack);
     }
+    section.appendChild(createFieldNote(`Current build tuning: ${getBuildDetailLabel(state.globalSettings.buildDetail)} detail, ${effectiveGranularity.label}${effectiveGranularity.isAuto ? " (auto)" : ""} granularity (${effectiveGranularity.targetCategories} top-level categories, ~${effectiveGranularity.maxEntries} entries per leaf), ${state.globalSettings.chunkTokens.toLocaleString()} chunk-size setting.`));
     const buildOperation = activeOperation && (activeOperation.kind === "build_tree_from_metadata" || activeOperation.kind === "build_tree_with_llm") ? activeOperation : lastBuildOperation;
     if (buildOperation) {
       section.appendChild(createOperationSummary(buildOperation));
