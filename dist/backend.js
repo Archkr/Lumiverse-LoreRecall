@@ -4826,9 +4826,18 @@ async function buildState(userId, chatId) {
   if (!character) {
     return { state: baseState };
   }
-  const characterConfig = await loadCharacterConfig(character.id, userId, character);
+  const rawCharacterConfig = await loadCharacterConfig(character.id, userId, character);
   const validBookIds = new Set(allBooks.map((book) => book.id));
-  const selectedBookIds = characterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
+  const selectedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
+  const removedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => !validBookIds.has(bookId));
+  let characterConfig = rawCharacterConfig;
+  if (removedBookIds.length > 0) {
+    try {
+      await saveCharacterConfig(character.id, { managedBookIds: selectedBookIds }, userId, character);
+      characterConfig = { ...rawCharacterConfig, managedBookIds: selectedBookIds };
+    } catch (error) {
+    }
+  }
   const attachedWorldBookIds = character.world_book_ids;
   const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
@@ -4883,7 +4892,16 @@ async function buildState(userId, chatId) {
       }
     ] : []
   ] : [];
-  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(previewDiagnostics);
+  const cleanupDiagnostics = removedBookIds.length > 0 ? [
+    {
+      id: "managed-book-cleanup",
+      severity: "info",
+      bookId: null,
+      title: `Removed ${removedBookIds.length} stale managed-book reference${removedBookIds.length === 1 ? "" : "s"}`,
+      detail: "One or more lorebooks that were managed by this character were deleted in Lumiverse. Their references have been cleaned up automatically."
+    }
+  ] : [];
+  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(cleanupDiagnostics, previewDiagnostics);
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
   const nextState = {
     ...baseState,
