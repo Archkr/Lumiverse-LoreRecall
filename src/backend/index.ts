@@ -273,9 +273,25 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     return { state: baseState };
   }
 
-  const characterConfig = await loadCharacterConfig(character.id, userId, character);
+  const rawCharacterConfig = await loadCharacterConfig(character.id, userId, character);
   const validBookIds = new Set(allBooks.map((book) => book.id));
-  const selectedBookIds = characterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
+  const selectedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
+  const removedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => !validBookIds.has(bookId));
+
+  // Auto-prune stale managed-book references when the underlying book has been
+  // deleted natively in Lumiverse. Otherwise the UI keeps showing it as "managed"
+  // and there's no way for the user to clear it.
+  let characterConfig = rawCharacterConfig;
+  if (removedBookIds.length > 0) {
+    try {
+      await saveCharacterConfig(character.id, { managedBookIds: selectedBookIds }, userId, character);
+      characterConfig = { ...rawCharacterConfig, managedBookIds: selectedBookIds };
+    } catch (error) {
+      // Cleanup save failed - keep raw config so we don't pretend to have cleaned up
+      // when we didn't. Stale IDs will continue to surface, which is the lesser evil.
+    }
+  }
+
   const attachedWorldBookIds = character.world_book_ids;
   const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
 
@@ -353,7 +369,21 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
             : []),
         ]
       : [];
+  const cleanupDiagnostics =
+    removedBookIds.length > 0
+      ? [
+          {
+            id: "managed-book-cleanup",
+            severity: "info" as const,
+            bookId: null,
+            title: `Removed ${removedBookIds.length} stale managed-book reference${removedBookIds.length === 1 ? "" : "s"}`,
+            detail:
+              "One or more lorebooks that were managed by this character were deleted in Lumiverse. Their references have been cleaned up automatically.",
+          },
+        ]
+      : [];
   const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(
+    cleanupDiagnostics,
     previewDiagnostics,
   );
   const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
