@@ -2003,6 +2003,63 @@ function buildTraceScopeSummary(scopes) {
 function buildFallbackReason(fallbackPath) {
   return fallbackPath.length ? fallbackPath.join(" ") : null;
 }
+function collectAllScopedEntries(scopes, excludedEntryIds = EMPTY_ENTRY_ID_SET) {
+  const seen = new Set;
+  const selected = [];
+  for (const scope of scopes) {
+    const entriesById = new Map(scope.book.cache.entries.map((entry) => [entry.entryId, entry]));
+    for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
+      if (seen.has(entryId))
+        continue;
+      if (excludedEntryIds.has(entryId))
+        continue;
+      const entry = entriesById.get(entryId);
+      if (!entry || entry.disabled)
+        continue;
+      seen.add(entryId);
+      selected.push({
+        entry,
+        score: 1,
+        reasons: ["scope"]
+      });
+    }
+  }
+  return selected;
+}
+async function selectScopesSinglePass(recentConversation, books, controller, allowController, excludedEntryIds, maxDynamicEntries, trace) {
+  const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const fallbackPath = [];
+  let scopes = [];
+  let selectionReason = "Controller selected retrieval scopes.";
+  if (allowController) {
+    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose scopes");
+    const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+    scopes = resolveScopeChoices(requestedNodeIds, books);
+    const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : selectionReason;
+    if (scopes.length) {
+      selectionReason = controllerReason;
+    } else {
+      fallbackPath.push(response.error ?? (requestedNodeIds.length ? "Scope selection returned nodeIds that did not map to visible scopes; nothing was injected." : "Scope selection returned an empty nodeIds array; nothing was injected."));
+      selectionReason = fallbackPath[fallbackPath.length - 1];
+    }
+  } else {
+    fallbackPath.push("Scope selection skipped the controller; nothing was injected.");
+    selectionReason = fallbackPath[fallbackPath.length - 1];
+  }
+  pushTrace(trace, "choose_scope", "Choose scopes", `${selectionReason} Selected ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`, {
+    bookId: scopes[0]?.book.summary.id ?? null,
+    nodeId: scopes[0]?.nodeId ?? null,
+    entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
+  });
+  if (!scopes.length) {
+    return { scopes: [], candidates: [], selected: [], manifests: [], selectionReason, fallbackPath };
+  }
+  const candidates = collectAllScopedEntries(scopes, excludedEntryIds);
+  const manifests = buildScopedManifests(candidates, scopes);
+  const selected = candidates.slice(0, Math.max(0, maxDynamicEntries));
+  pushTrace(trace, "retrieve", "Retrieve entries", `Resolved ${candidates.length} entr${candidates.length === 1 ? "y" : "ies"} from ${scopes.length} chosen scope(s); kept ${selected.length} for injection.`, { entryCount: selected.length });
+  return { scopes, candidates, selected, manifests, selectionReason, fallbackPath };
+}
 async function chooseCollapsedScopes(recentConversation, books, config, controller, allowController, deterministicById, trace) {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
   const fallbackPath = [];
@@ -2817,87 +2874,45 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   } else {
     steps.push(`No native constant entries were reserved; ${remainingDynamicSlots} dynamic slot(s) are available.`);
   }
-  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
-  const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes = [];
   let pulledCandidates = [];
   let selected = [];
   let manifests = [];
-  let searchEvents = [];
+  const searchEvents = [];
   let selectionReason = "";
   let entrySelectionDurationMs = null;
-  let usedSearchFrontier = false;
+  const usedSearchFrontier = false;
   const fallbackPath = [];
   if (remainingDynamicSlots <= 0) {
     steps.push("Reserved constants consumed the full injection budget, so Lore Recall skipped dynamic retrieval.");
-  } else if (!deterministic.length) {
-    fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
-    pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
     const scopeSelectionStartedAt = Date.now();
-    const scopeSelection = config.searchMode === "traversal" ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace) : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
-    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
-    const initiallySelectedScopes = scopeSelection.scopes;
-    selectedScopes = scopeSelection.scopes;
-    selectionReason = scopeSelection.selectionReason;
-    fallbackPath.push(...scopeSelection.fallbackPath);
-    steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
-    const initialSelectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map, initialSelectionReasons);
-    if (initialScopePreviews.length) {
+    const passResult = await selectScopesSinglePass(recentConversation, chosenBooks, controller, allowController, reservedEntryIds, maxDynamicEntries, trace);
+    entrySelectionDurationMs = Date.now() - scopeSelectionStartedAt;
+    selectedScopes = passResult.scopes;
+    pulledCandidates = passResult.candidates;
+    selected = passResult.selected;
+    manifests = passResult.manifests;
+    selectionReason = passResult.selectionReason;
+    fallbackPath.push(...passResult.fallbackPath);
+    steps.push(`Single-pass retrieval selected ${selectedScopes.length} scope(s).`);
+    const selectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+    const scopePreviews = buildPreviewScopes(selectedScopes, new Map, selectionReasons);
+    if (scopePreviews.length) {
       emitProgress(reportProgress, {
         type: "item",
-        item: createFeedItem("scope", "Selected scopes", `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`, {
+        item: createFeedItem("scope", "Selected scopes", `Working from ${scopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`, {
           phase: "choose_scope",
-          count: initialScopePreviews.length,
-          scopes: initialScopePreviews,
+          count: scopePreviews.length,
+          scopes: scopePreviews,
           details: selectionReason ? [selectionReason] : undefined,
           tone: "info",
-          durationMs: scopeSelectionDurationMs
+          durationMs: entrySelectionDurationMs
         })
       });
     }
-    const entrySelectionStartedAt = Date.now();
-    const entrySelection = config.searchMode === "traversal" ? await selectTraversalEntries(recentConversation, readableBooks, selectedScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, reservedEntryIds) : await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, reservedEntryIds);
-    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
-    selectedScopes = entrySelection.scopes;
-    pulledCandidates = entrySelection.candidates;
-    selected = entrySelection.selected;
-    manifests = entrySelection.manifests;
-    if ("fallbackPath" in entrySelection && Array.isArray(entrySelection.fallbackPath)) {
-      fallbackPath.push(...entrySelection.fallbackPath);
-    }
-    if ("fallbackReason" in entrySelection && entrySelection.fallbackReason) {
-      fallbackPath.push(entrySelection.fallbackReason);
-    }
-    if (Array.isArray(entrySelection.searchEvents) && entrySelection.searchEvents.length) {
-      searchEvents = entrySelection.searchEvents;
-    }
-    if (entrySelection.usedSearchFrontier) {
-      usedSearchFrontier = true;
-    }
-    if (entrySelection.selectionReason) {
-      selectionReason = entrySelection.selectionReason;
-    }
-    steps.push(usedSearchFrontier ? `Resolved ${pulledCandidates.length} pulled entry candidate(s) from the global search frontier.` : `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
+    steps.push(`Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
     steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
-    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
-      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map, refinedReasons);
-      if (refinedScopePreviews.length) {
-        emitProgress(reportProgress, {
-          type: "item",
-          item: createFeedItem("scope", "Refined scopes", `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`, {
-            phase: "refine_scope",
-            count: refinedScopePreviews.length,
-            scopes: refinedScopePreviews,
-            details: selectionReason ? [selectionReason] : undefined,
-            tone: "info",
-            durationMs: scopeSelectionDurationMs
-          })
-        });
-      }
-    }
   }
   const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
   if (pulledNodes.length) {
