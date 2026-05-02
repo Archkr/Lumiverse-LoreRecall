@@ -1307,7 +1307,57 @@ function summarizeSelection(selection, reservedConstantCount = 0, remainingDynam
   return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
 }
 function getEntryBody(entry) {
-  return entry.collapsedText.trim() || entry.content.trim();
+  const collapsed = entry.collapsedText.trim();
+  const content = entry.content.trim();
+  const label = entry.label?.trim().toLowerCase() ?? "";
+  const isLabelEcho = (text) => !!label && text.trim().toLowerCase() === label;
+  const collapsedUseful = !!collapsed && !isLabelEcho(collapsed);
+  const contentUseful = !!content && !isLabelEcho(content);
+  if (collapsedUseful && contentUseful) {
+    return content.length > collapsed.length * 1.5 ? content : collapsed;
+  }
+  if (collapsedUseful)
+    return collapsed;
+  if (contentUseful)
+    return content;
+  return collapsed || content;
+}
+var REFINE_MIN_SCORED_CANDIDATES = 8;
+function countScopedScoredCandidates(scopes, deterministicById) {
+  const seen = new Set;
+  let count = 0;
+  for (const scope of scopes) {
+    for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
+      if (seen.has(entryId))
+        continue;
+      if (!deterministicById.has(entryId))
+        continue;
+      seen.add(entryId);
+      count += 1;
+    }
+  }
+  return count;
+}
+function broadenScopesIfThin(refinedScopes, candidateChoices, deterministicById, minCandidates = REFINE_MIN_SCORED_CANDIDATES) {
+  const refinedYield = countScopedScoredCandidates(refinedScopes, deterministicById);
+  if (refinedYield >= minCandidates || !candidateChoices.length) {
+    return { scopes: refinedScopes, broadened: [], refinedYield };
+  }
+  const refinedKeys = new Set(refinedScopes.map(makeScopeKey));
+  const sortedSiblings = sortScopeChoices(candidateChoices).filter((choice) => !refinedKeys.has(`${choice.book.summary.id}:${choice.nodeId}`));
+  const added = [];
+  let working = refinedScopes.slice();
+  for (const choice of sortedSiblings) {
+    const sibling = { book: choice.book, nodeId: choice.nodeId };
+    added.push(sibling);
+    working = dedupeScopes([...working, sibling]);
+    if (countScopedScoredCandidates(working, deterministicById) >= minCandidates)
+      break;
+  }
+  if (!added.length) {
+    return { scopes: refinedScopes, broadened: [], refinedYield };
+  }
+  return { scopes: working, broadened: added, refinedYield };
 }
 function getEntryBreadcrumb(entry, tree) {
   const path = getEntryCategoryPath(tree, entry.entryId).map((node) => node.label).filter((label) => label && label !== "Root");
@@ -1902,7 +1952,7 @@ function collectChildScopeChoices(scopes, deterministicById, config) {
         childCount: child.childIds.length,
         entryCount: getScopedEntryIds(scope.book, child.id, true).length,
         relevance: matchMeta.relevance,
-        matchHints: []
+        matchHints: matchMeta.matchHints
       });
     }
   }
@@ -1961,10 +2011,11 @@ function buildInitialScopePrompt(recentConversation, treeOverview) {
     'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
     `Pick 1-${MAX_SCOPE_CHOICES} nodeIds maximum.`,
     "Rules:",
-    "- Prefer specific leaves over broad branches.",
     "- Pick only nodeIds exactly as shown in the knowledge tree index.",
     "- If document selectors like doc:<bookId> are shown, you may pick them to narrow to a single lorebook before refining deeper.",
     "- Pick nodes whose content would be most useful for the next reply.",
+    `- When relevant material is spread across multiple sibling categories, pick several nodeIds (up to ${MAX_SCOPE_CHOICES}) instead of forcing one. A broader pick is fine — entry-level filtering happens later.`,
+    "- Prefer a specific branch only when its summary clearly covers the topic; otherwise stay one level higher to keep neighbouring lore reachable.",
     "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
     "- If nothing seems relevant, return an empty nodeIds array.",
     "",
@@ -1983,15 +2034,25 @@ function buildChildScopePrompt(recentConversation, scopes, categories, step, con
     `- Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum from the choices below.`,
     '- Use action "refine" when child categories should be opened before retrieval.',
     '- Use action "retrieve" when the chosen nodeIds are already specific enough to resolve entries.',
-    "- Prefer specific leaves over broad branches.",
+    "- When relevant content is spread across siblings, pick multiple nodeIds rather than forcing a single leaf. Over-narrowing produces sparse results.",
+    '- Prefer "retrieve" once the chosen scope covers ~8+ entries that match the query; otherwise either pick more siblings or refine.',
     "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
     "",
     buildPromptContext(recentConversation),
     `Current scopes: ${scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ")}`,
     "",
     "CATEGORY CHOICES:",
-    ...categories.length ? categories.map((category) => `- [${category.nodeId}] ${category.label} [${category.childCount > 0 ? "branch" : "leaf"}] (${category.entryCount} entries)
-  ${category.summary || "No summary."}`) : ["- none"]
+    ...categories.length ? categories.map((category) => {
+      const lines = [
+        `- [${category.nodeId}] ${category.label} [${category.childCount > 0 ? "branch" : "leaf"}] (${category.entryCount} entries)`,
+        `  ${category.summary || "No summary."}`
+      ];
+      if (category.matchHints.length) {
+        lines.push(`  Top entry matches: ${category.matchHints.slice(0, 5).join("; ")}`);
+      }
+      return lines.join(`
+`);
+    }) : ["- none"]
   ].filter(Boolean).join(`
 `);
 }
@@ -2051,9 +2112,11 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
         refinedReason = fallbackPath[fallbackPath.length - 1];
       }
       if (refinedScopes.length) {
-        scopes = refinedScopes;
+        const broaden = broadenScopesIfThin(refinedScopes, categories, deterministicById);
+        scopes = broaden.scopes;
         selectionReason = refinedReason;
-        pushTrace(trace, "refine_scope", "Refine scopes", `${refinedReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`, {
+        const broadenSuffix = broaden.broadened.length ? ` Refinement yielded only ${broaden.refinedYield} scored candidate(s); broadened with ${broaden.broadened.length} sibling scope(s) so retrieval still has enough material.` : "";
+        pushTrace(trace, "refine_scope", "Refine scopes", `${refinedReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.${broadenSuffix}`, {
           bookId: scopes[0]?.book.summary.id ?? null,
           nodeId: scopes[0]?.nodeId ?? null,
           entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
@@ -2119,9 +2182,11 @@ async function chooseTraversalScopes(recentConversation, books, config, controll
     }
     if (!nextScopes.length)
       break;
-    scopes = nextScopes;
+    const broaden = broadenScopesIfThin(nextScopes, categories, deterministicById);
+    scopes = broaden.scopes;
     selectionReason = nextReason;
-    pushTrace(trace, "refine_scope", "Refine scopes", `${nextReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`, {
+    const broadenSuffix = broaden.broadened.length ? ` Refinement yielded only ${broaden.refinedYield} scored candidate(s); broadened with ${broaden.broadened.length} sibling scope(s) so retrieval still has enough material.` : "";
+    pushTrace(trace, "refine_scope", "Refine scopes", `${nextReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.${broadenSuffix}`, {
       bookId: scopes[0]?.book.summary.id ?? null,
       nodeId: scopes[0]?.nodeId ?? null,
       entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
@@ -2369,7 +2434,10 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
     "",
     hasFullTreeOverview ? "Full tree index:" : "Category choices:",
-    ...hasFullTreeOverview ? [frontier.fullTreeOverview] : frontier.categories.length ? frontier.categories.map((category) => `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"]
+    ...hasFullTreeOverview ? [frontier.fullTreeOverview] : frontier.categories.length ? frontier.categories.map((category) => {
+      const hints = category.matchHints.length ? `; topMatches=${category.matchHints.slice(0, 5).join(" / ")}` : "";
+      return `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}${hints}`;
+    }) : ["- none"]
   ].join(`
 `);
 }
