@@ -158,6 +158,87 @@ const RECENT_MESSAGE_LIMIT = 500;
 const MAX_SCOPE_CHOICES = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
 const EMPTY_ENTRY_ID_SET = new Set<string>();
+const SEARCH_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "against",
+  "all",
+  "also",
+  "always",
+  "and",
+  "any",
+  "are",
+  "around",
+  "assistant",
+  "because",
+  "been",
+  "before",
+  "being",
+  "below",
+  "between",
+  "character",
+  "could",
+  "did",
+  "does",
+  "doing",
+  "down",
+  "each",
+  "everything",
+  "for",
+  "from",
+  "had",
+  "has",
+  "have",
+  "her",
+  "here",
+  "him",
+  "his",
+  "how",
+  "into",
+  "its",
+  "just",
+  "like",
+  "more",
+  "not",
+  "now",
+  "off",
+  "only",
+  "out",
+  "over",
+  "own",
+  "reason",
+  "she",
+  "should",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "think",
+  "this",
+  "through",
+  "turn",
+  "user",
+  "was",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "why",
+  "will",
+  "with",
+  "without",
+  "would",
+  "you",
+  "your",
+]);
 
 const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
   "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
@@ -270,7 +351,7 @@ function tokenize(value: string): string[] {
     new Set(
       normalizeSearchText(value)
         .split(" ")
-        .filter((token) => token.length >= 2),
+        .filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token)),
     ),
   );
 }
@@ -281,8 +362,10 @@ function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): s
     .slice(-contextMessages)
     .map((message) => {
       const role = message.role === "user" ? "User" : "Assistant";
-      return `${role}: ${truncateText(stripSearchMarkup(message.content), RECENT_MESSAGE_LIMIT)}`;
+      const sanitized = sanitizeRetrievalMessage(message.role, message.content);
+      return sanitized ? `${role}: ${sanitized}` : "";
     })
+    .filter(Boolean)
     .join("\n");
 }
 
@@ -311,13 +394,29 @@ function findNarrativeProtocolCutIndex(value: string): number {
   return cutIndex;
 }
 
+function findUserProtocolCutIndex(value: string): number {
+  const patterns = [
+    /always\s+think\s+and\s+reason/i,
+    /##\s*weave\s+planning/i,
+    /###\s*active\s+personality\s+matrix/i,
+    /private\s+workspace/i,
+    /the\s+human\s+never\s+sees/i,
+  ];
+
+  let cutIndex = -1;
+  for (const pattern of patterns) {
+    const match = pattern.exec(value);
+    if (!match || typeof match.index !== "number") continue;
+    cutIndex = cutIndex === -1 ? match.index : Math.min(cutIndex, match.index);
+  }
+  return cutIndex;
+}
+
 function sanitizeRetrievalMessage(role: ChatLikeMessage["role"], content: string): string {
   let text = stripSearchMarkup(content).replace(/\r\n?/g, "\n");
-  if (role !== "user") {
-    const cutIndex = findNarrativeProtocolCutIndex(text);
-    if (cutIndex >= 0) {
-      text = text.slice(0, cutIndex);
-    }
+  const cutIndex = role === "user" ? findUserProtocolCutIndex(text) : findNarrativeProtocolCutIndex(text);
+  if (cutIndex >= 0) {
+    text = text.slice(0, cutIndex);
   }
 
   return truncateText(text.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim(), RECENT_MESSAGE_LIMIT);
@@ -633,8 +732,8 @@ function summarizeSelection(
 ): string {
   if (!selection.length) {
     if (reservedConstantCount > 0) {
-      const free = typeof remainingDynamicSlots === "number" ? ` ${Math.max(0, remainingDynamicSlots)} dynamic slot(s) remained free.` : "";
-      return `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
+      const free = typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap was ${Math.max(0, remainingDynamicSlots)} entr${remainingDynamicSlots === 1 ? "y" : "ies"}.` : "";
+      return `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
     }
     return "No entries selected.";
   }
@@ -642,9 +741,9 @@ function summarizeSelection(
     (item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention",
   ).length;
   const reservedPrefix =
-    reservedConstantCount > 0 ? `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
+    reservedConstantCount > 0 ? `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
   const freeSuffix =
-    typeof remainingDynamicSlots === "number" ? ` Dynamic slot budget after constants: ${Math.max(0, remainingDynamicSlots)}.` : "";
+    typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap: ${Math.max(0, remainingDynamicSlots)}.` : "";
   if (mentionCount > 0) {
     return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(
       /^f/,
@@ -658,7 +757,20 @@ function summarizeSelection(
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
-  return entry.collapsedText.trim() || entry.content.trim();
+  const collapsed = entry.collapsedText.trim();
+  const content = entry.content.trim();
+  if (!collapsed) return content;
+  if (!content) return collapsed;
+
+  const normalizedCollapsed = normalizeSearchText(collapsed);
+  const normalizedLabel = normalizeSearchText(entry.label);
+  const collapsedTokens = tokenize(collapsed);
+  const looksLikeLabelOnly =
+    normalizedCollapsed === normalizedLabel ||
+    (collapsedTokens.length <= 6 && normalizedLabel.length > 0 && normalizedCollapsed.includes(normalizedLabel)) ||
+    collapsedTokens.length <= 4;
+
+  return looksLikeLabelOnly ? content : collapsed;
 }
 
 function getEntryBreadcrumb(entry: RuntimeBook["cache"]["entries"][number], tree: BookTreeIndex): string {
@@ -1063,7 +1175,8 @@ async function maybeSelectEntries(
     "Use only entryIds that appear in the manifests.",
     "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
-    "If none of the listed entries would help, return an empty entryIds array.",
+    "Prefer a useful set of supporting entries over an overly sparse one when several entries are plausibly relevant.",
+    "Return an empty entryIds array only when every listed entry is irrelevant to the next reply.",
     "",
     buildPromptContext(queryText),
     "",
@@ -1110,19 +1223,19 @@ async function maybeSelectEntries(
     ? parsedEntryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
 
-  if (hasExplicitEntryIds && requestedIds.length === 0) {
-    return [];
-  }
-
   const uniqueRequestedIds = uniqueStrings(requestedIds);
   const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
   const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
+  const minimumUsefulSelection = Math.min(clampedFinalEntries, rankedCandidates.length, 3);
   const selectedAllManifestEntries =
     rankedCandidates.length > clampedFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
   const invalidSelectionReasons: string[] = [];
 
   if (!hasExplicitEntryIds) {
     invalidSelectionReasons.push("Controller did not return an entryIds array.");
+  }
+  if (hasExplicitEntryIds && requestedIds.length === 0) {
+    invalidSelectionReasons.push("Controller returned an empty entryIds array despite scoped candidates being available.");
   }
   if (requestedIds.length !== uniqueRequestedIds.length) {
     invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
@@ -1133,6 +1246,11 @@ async function maybeSelectEntries(
   if (mappedIds.length > clampedFinalEntries) {
     invalidSelectionReasons.push(
       `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`,
+    );
+  }
+  if (mappedIds.length > 0 && mappedIds.length < minimumUsefulSelection) {
+    invalidSelectionReasons.push(
+      `Controller returned only ${mappedIds.length} entry ID(s), below the minimum useful set of ${minimumUsefulSelection} for this manifest.`,
     );
   }
   if (selectedAllManifestEntries) {
@@ -1649,6 +1767,113 @@ function buildTraceScopeSummary(scopes: TraversalScope[]): string {
 
 function buildFallbackReason(fallbackPath: string[]): string | null {
   return fallbackPath.length ? fallbackPath.join(" ") : null;
+}
+
+function collectAllScopedEntries(
+  scopes: TraversalScope[],
+  excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+): ScoredEntry[] {
+  const seen = new Set<string>();
+  const selected: ScoredEntry[] = [];
+  for (const scope of scopes) {
+    const entriesById = new Map(scope.book.cache.entries.map((entry) => [entry.entryId, entry]));
+    for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
+      if (seen.has(entryId)) continue;
+      if (excludedEntryIds.has(entryId)) continue;
+      const entry = entriesById.get(entryId);
+      if (!entry || entry.disabled) continue;
+      seen.add(entryId);
+      selected.push({
+        entry,
+        score: 1,
+        reasons: ["scope"],
+      });
+    }
+  }
+  return selected;
+}
+
+async function selectScopesSinglePass(
+  recentConversation: string,
+  books: RuntimeBook[],
+  controller: ControllerSession,
+  allowController: boolean,
+  excludedEntryIds: ReadonlySet<string>,
+  maxDynamicEntries: number,
+  trace: TraversalTraceStep[],
+): Promise<{
+  scopes: TraversalScope[];
+  candidates: ScoredEntry[];
+  selected: ScoredEntry[];
+  manifests: ScopedManifest[];
+  selectionReason: string;
+  fallbackPath: string[];
+}> {
+  const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const fallbackPath: string[] = [];
+  let scopes: TraversalScope[] = [];
+  let selectionReason = "Controller selected retrieval scopes.";
+
+  if (allowController) {
+    const response = await runControllerJson(
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      controller,
+      RETRIEVAL_SCOPE_SYSTEM_PROMPT,
+      "Choose scopes",
+    );
+    const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
+      ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    scopes = resolveScopeChoices(requestedNodeIds, books);
+    const controllerReason =
+      typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
+        ? response.parsed.reason.trim()
+        : selectionReason;
+    if (scopes.length) {
+      selectionReason = controllerReason;
+    } else {
+      fallbackPath.push(
+        response.error ??
+          (requestedNodeIds.length
+            ? "Scope selection returned nodeIds that did not map to visible scopes; nothing was injected."
+            : "Scope selection returned an empty nodeIds array; nothing was injected."),
+      );
+      selectionReason = fallbackPath[fallbackPath.length - 1];
+    }
+  } else {
+    fallbackPath.push("Scope selection skipped the controller; nothing was injected.");
+    selectionReason = fallbackPath[fallbackPath.length - 1];
+  }
+
+  pushTrace(
+    trace,
+    "choose_scope",
+    "Choose scopes",
+    `${selectionReason} Selected ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`,
+    {
+      bookId: scopes[0]?.book.summary.id ?? null,
+      nodeId: scopes[0]?.nodeId ?? null,
+      entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+    },
+  );
+
+  if (!scopes.length) {
+    return { scopes: [], candidates: [], selected: [], manifests: [], selectionReason, fallbackPath };
+  }
+
+  const candidates = collectAllScopedEntries(scopes, excludedEntryIds);
+  const manifests = buildScopedManifests(candidates, scopes);
+  const selected = candidates.slice(0, Math.max(0, maxDynamicEntries));
+
+  pushTrace(
+    trace,
+    "retrieve",
+    "Retrieve entries",
+    `Resolved ${candidates.length} entr${candidates.length === 1 ? "y" : "ies"} from ${scopes.length} chosen scope(s); kept ${selected.length} for injection.`,
+    { entryCount: selected.length },
+  );
+
+  return { scopes, candidates, selected, manifests, selectionReason, fallbackPath };
 }
 
 async function chooseCollapsedScopes(
@@ -2726,7 +2951,8 @@ function buildInjectionText(
 ): { text: string; included: ScoredEntry[]; estimatedTokens: number } | null {
   if (!selected.length) return null;
 
-  const maxEntries = clampInt(injectedEntryLimit, 1, 32);
+  const maxEntries = Math.max(0, Math.floor(injectedEntryLimit));
+  if (maxEntries <= 0) return null;
   const parts: string[] = [
     "[Lore Recall Retrieved Context]",
     "Use this retrieved reference only if it is relevant to the current reply. Do not mention Lore Recall or describe this block explicitly.",
@@ -2815,12 +3041,12 @@ export async function buildRetrievalPreview(
   const reservedConstants = collectReservedConstantEntries(chosenBooks);
   const reservedConstantCount = reservedConstants.length;
   const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
-  const configuredInjectCap = clampInt(config.tokenBudget, 1, 32);
-  const remainingDynamicSlots = Math.max(0, configuredInjectCap - reservedConstantCount);
+  const configuredInjectCap = clampInt(config.tokenBudget, 1, 64);
+  const remainingDynamicSlots = configuredInjectCap;
   const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
   const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
   if (reservedConstantCount) {
-    const reservedSummary = `Reserved ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} before dynamic retrieval, leaving ${remainingDynamicSlots} dynamic slot(s).`;
+    const reservedSummary = `Prepared ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} for always-on injection; dynamic retrieval still has ${remainingDynamicSlots} slot(s).`;
     steps.push(reservedSummary);
     pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
     emitProgress(reportProgress, {
@@ -2833,7 +3059,7 @@ export async function buildRetrievalPreview(
       }),
     });
   } else {
-    steps.push(`No native constant entries were reserved; ${remainingDynamicSlots} dynamic slot(s) are available.`);
+    steps.push(`No native constant entries were prepared; ${remainingDynamicSlots} dynamic slot(s) are available.`);
   }
   const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
@@ -2847,10 +3073,8 @@ export async function buildRetrievalPreview(
   let usedSearchFrontier = false;
   const fallbackPath: string[] = [];
 
-  if (remainingDynamicSlots <= 0) {
-    steps.push("Reserved constants consumed the full injection budget, so Lore Recall skipped dynamic retrieval.");
-  } else if (!deterministic.length) {
-    fallbackPath.push("Deterministic scoring found no matching entries, so Lore Recall injected nothing.");
+  if (!deterministic.length) {
+    fallbackPath.push("Deterministic scoring found no matching dynamic entries.");
     pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
     const scopeSelectionStartedAt = Date.now();
@@ -2864,6 +3088,7 @@ export async function buildRetrievalPreview(
     selectionReason = scopeSelection.selectionReason;
     fallbackPath.push(...scopeSelection.fallbackPath);
     steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+
     const initialSelectionReasons = new Map(
       selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
     );
@@ -2892,7 +3117,7 @@ export async function buildRetrievalPreview(
       config.searchMode === "traversal"
         ? await selectTraversalEntries(
             recentConversation,
-            readableBooks,
+            chosenBooks,
             selectedScopes,
             config,
             controller,
@@ -3042,19 +3267,30 @@ export async function buildRetrievalPreview(
   }
 
   const injectionStartedAt = Date.now();
-  const injection =
-    remainingDynamicSlots > 0 ? buildInjectionText(selected, booksById, remainingDynamicSlots, config.collapsedDepth) : null;
+  const selectedForInjection = [...reservedConstants, ...selected];
+  const injection = selectedForInjection.length
+    ? buildInjectionText(
+        selectedForInjection,
+        booksById,
+        reservedConstantCount + remainingDynamicSlots,
+        config.collapsedDepth,
+      )
+    : null;
   const injectionDurationMs = Date.now() - injectionStartedAt;
-  const included = injection?.included ?? selected;
+  const included = injection?.included ?? [];
   const injectedNodes = buildPreviewNodes(included, booksById);
   const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
 
   if (injection?.included.length) {
+    const constantInjectionSuffix =
+      reservedConstantCount > 0
+        ? `, including ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}`
+        : "";
     pushTrace(
       trace,
       "inject",
       "Inject entries",
-      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`,
+      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt${constantInjectionSuffix}.`,
       { entryCount: injection.included.length, durationMs: injectionDurationMs },
     );
     emitProgress(reportProgress, {
@@ -3074,20 +3310,9 @@ export async function buildRetrievalPreview(
     });
   } else {
     const skippedSummary =
-      reservedConstantCount > 0 && remainingDynamicSlots <= 0
-        ? `Reserved constants consumed the full injection budget, so Lore Recall injected no additional dynamic entries.`
-        : reservedConstantCount > 0
-          ? `No additional dynamic entries were injected after reserving ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}.`
-          : "No retrieved entries were injected for this turn.";
-    if (reservedConstantCount > 0 && remainingDynamicSlots <= 0) {
-      pushTrace(
-        trace,
-        "inject",
-        "Dynamic injection skipped",
-        skippedSummary,
-        { entryCount: 0, durationMs: injectionDurationMs },
-      );
-    }
+      reservedConstantCount > 0
+        ? `No entries were injected even though ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y was" : "ies were"} available.`
+        : "No retrieved entries were injected for this turn.";
     emitProgress(reportProgress, {
       type: "item",
       item: createFeedItem(

@@ -4097,7 +4097,7 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Last retrieval", "Most recent captured retrieval for this chat."));
     const meta = createElement("div", "lore-cluster");
-    meta.append(createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic slots left: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
+    meta.append(createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
     section.appendChild(meta);
     if (preview.fallbackReason) {
       section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
@@ -4108,7 +4108,7 @@ function setup(ctx) {
     const pulled = createElement("div", "lore-last-panel");
     pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
     const reserved = createElement("div", "lore-last-panel");
-    reserved.append(createElement("div", "lore-last-panel-title", "Reserved constants"), renderRetrievalEntries(getPreviewReservedNodes(preview), "reserved", "No reserved constants", "No native constant entries were reserved for this retrieval."));
+    reserved.append(createElement("div", "lore-last-panel-title", "Reserved constants"), renderRetrievalEntries(getPreviewReservedNodes(preview), "reserved", "No reserved constants", "No native constant entries were prepared for this retrieval."));
     const injected = createElement("div", "lore-last-panel");
     injected.append(createElement("div", "lore-last-panel-title", "Injected"), renderRetrievalEntries(getPreviewInjectedNodes(preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
     grid.append(searches, reserved, pulled, injected);
@@ -4399,7 +4399,7 @@ function setup(ctx) {
     };
   }
   function getSessionTopInjected(session) {
-    for (let i = session.items.length - 1; i >= 0; i -= 1) {
+    for (let i = session.items.length - 1;i >= 0; i -= 1) {
       const item = session.items[i];
       if (item.kind === "injected" && item.entries?.length)
         return item.entries[0];
@@ -5414,7 +5414,7 @@ function setup(ctx) {
         characterDraft[key] = Number.parseInt(String(next), 10) || 0;
       })));
     }
-    form.appendChild(createFieldNote("Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit is the maximum number of entries that can be written into the prompt."));
+    form.appendChild(createFieldNote("Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit caps dynamic entries; constant entries are injected separately."));
     const switches = createElement("div", "lore-field-span");
     const switchRow = createElement("div", "lore-cluster");
     switchRow.style.gap = "20px";
@@ -5937,14 +5937,14 @@ function setup(ctx) {
     workspaceModal.setTitle(currentState?.activeCharacterName ? `${currentState.activeCharacterName} · Tree workspace` : "Lore Recall workspace");
     const shell = createElement("div", "lore-root lore-modal");
     const toolbar = createElement("div", "lore-modal-toolbar");
+    const searchWrap = createElement("div", "lore-search-wrap");
+    searchWrap.appendChild(makeIconSpan("search", "lore-search-wrap-icon"));
     const search = createTextInput(workspaceSearch, "Filter categories and entries...", (v) => {
       workspaceSearch = v;
       renderWorkspaceModal();
     }, "workspace-search");
     search.type = "search";
     search.className = "lore-input lore-search";
-    const searchWrap = createElement("div", "lore-search-wrap");
-    searchWrap.appendChild(makeIconSpan("search", "lore-search-wrap-icon"));
     searchWrap.appendChild(search);
     const actions = createElement("div", "lore-cluster");
     const refreshBtn = createElement("button", "lore-btn lore-btn-sm lore-btn-icon-only");
@@ -6024,8 +6024,7 @@ function setup(ctx) {
       try {
         selectionStart = active.selectionStart;
         selectionEnd = active.selectionEnd;
-      } catch {
-      }
+      } catch {}
     }
     return { focusId, selectionStart, selectionEnd };
   }
@@ -6039,8 +6038,7 @@ function setup(ctx) {
     if (saved.selectionStart != null && saved.selectionEnd != null && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
       try {
         target.setSelectionRange(saved.selectionStart, saved.selectionEnd);
-      } catch {
-      }
+      } catch {}
     }
   }
   function render() {

@@ -296,7 +296,7 @@ Live sessions get a subtle pulse and an amber outer edge so you can see retrieva
 
 > **Use metadata build first.** It's instant and lets you confirm the tree pipeline works end-to-end before paying for an LLM build.
 
-> **Constants are budget-aware.** Native `constant`-flagged entries are reserved *outside* the dynamic retrieval budget. Use them for must-always-inject anchors (current location tracker, party stats, season-of-the-story flags). Don't use constants for general lore. That defeats the point of dynamic retrieval.
+> **Constants are always-on.** Native `constant`-flagged entries are injected separately from the dynamic retrieval cap. Use them for must-always-inject anchors (current location tracker, party stats, season-of-the-story flags). Don't use constants for general lore. That defeats the point of dynamic retrieval.
 
 > **Per-book descriptions matter for multi-book retrieval.** When the controller has to choose which book to consult, the description is its main signal. Write descriptions that explain what kind of content lives in each book, not just what the book is called.
 

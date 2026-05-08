@@ -1297,7 +1297,7 @@ export function setup(ctx: SpindleFrontendContext) {
       createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"),
       createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`),
       createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"),
-      createTag(`Dynamic slots left: ${preview.remainingDynamicSlots ?? 0}`, "accent"),
+      createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"),
     );
     section.appendChild(meta);
 
@@ -1330,7 +1330,7 @@ export function setup(ctx: SpindleFrontendContext) {
         getPreviewReservedNodes(preview),
         "reserved",
         "No reserved constants",
-        "No native constant entries were reserved for this retrieval.",
+        "No native constant entries were prepared for this retrieval.",
       ),
     );
 
@@ -3074,7 +3074,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit is the maximum number of entries that can be written into the prompt.",
+        "Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit caps dynamic entries; constant entries are injected separately.",
       ),
     );
 
