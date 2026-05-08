@@ -158,6 +158,87 @@ const RECENT_MESSAGE_LIMIT = 500;
 const MAX_SCOPE_CHOICES = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
 const EMPTY_ENTRY_ID_SET = new Set<string>();
+const SEARCH_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "against",
+  "all",
+  "also",
+  "always",
+  "and",
+  "any",
+  "are",
+  "around",
+  "assistant",
+  "because",
+  "been",
+  "before",
+  "being",
+  "below",
+  "between",
+  "character",
+  "could",
+  "did",
+  "does",
+  "doing",
+  "down",
+  "each",
+  "everything",
+  "for",
+  "from",
+  "had",
+  "has",
+  "have",
+  "her",
+  "here",
+  "him",
+  "his",
+  "how",
+  "into",
+  "its",
+  "just",
+  "like",
+  "more",
+  "not",
+  "now",
+  "off",
+  "only",
+  "out",
+  "over",
+  "own",
+  "reason",
+  "she",
+  "should",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "think",
+  "this",
+  "through",
+  "turn",
+  "user",
+  "was",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "why",
+  "will",
+  "with",
+  "without",
+  "would",
+  "you",
+  "your",
+]);
 
 const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
   "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
@@ -270,7 +351,7 @@ function tokenize(value: string): string[] {
     new Set(
       normalizeSearchText(value)
         .split(" ")
-        .filter((token) => token.length >= 2),
+        .filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token)),
     ),
   );
 }
@@ -281,8 +362,10 @@ function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): s
     .slice(-contextMessages)
     .map((message) => {
       const role = message.role === "user" ? "User" : "Assistant";
-      return `${role}: ${truncateText(stripSearchMarkup(message.content), RECENT_MESSAGE_LIMIT)}`;
+      const sanitized = sanitizeRetrievalMessage(message.role, message.content);
+      return sanitized ? `${role}: ${sanitized}` : "";
     })
+    .filter(Boolean)
     .join("\n");
 }
 
@@ -311,13 +394,29 @@ function findNarrativeProtocolCutIndex(value: string): number {
   return cutIndex;
 }
 
+function findUserProtocolCutIndex(value: string): number {
+  const patterns = [
+    /always\s+think\s+and\s+reason/i,
+    /##\s*weave\s+planning/i,
+    /###\s*active\s+personality\s+matrix/i,
+    /private\s+workspace/i,
+    /the\s+human\s+never\s+sees/i,
+  ];
+
+  let cutIndex = -1;
+  for (const pattern of patterns) {
+    const match = pattern.exec(value);
+    if (!match || typeof match.index !== "number") continue;
+    cutIndex = cutIndex === -1 ? match.index : Math.min(cutIndex, match.index);
+  }
+  return cutIndex;
+}
+
 function sanitizeRetrievalMessage(role: ChatLikeMessage["role"], content: string): string {
   let text = stripSearchMarkup(content).replace(/\r\n?/g, "\n");
-  if (role !== "user") {
-    const cutIndex = findNarrativeProtocolCutIndex(text);
-    if (cutIndex >= 0) {
-      text = text.slice(0, cutIndex);
-    }
+  const cutIndex = role === "user" ? findUserProtocolCutIndex(text) : findNarrativeProtocolCutIndex(text);
+  if (cutIndex >= 0) {
+    text = text.slice(0, cutIndex);
   }
 
   return truncateText(text.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim(), RECENT_MESSAGE_LIMIT);
@@ -633,8 +732,8 @@ function summarizeSelection(
 ): string {
   if (!selection.length) {
     if (reservedConstantCount > 0) {
-      const free = typeof remainingDynamicSlots === "number" ? ` ${Math.max(0, remainingDynamicSlots)} dynamic slot(s) remained free.` : "";
-      return `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
+      const free = typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap was ${Math.max(0, remainingDynamicSlots)} entr${remainingDynamicSlots === 1 ? "y" : "ies"}.` : "";
+      return `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
     }
     return "No entries selected.";
   }
@@ -642,9 +741,9 @@ function summarizeSelection(
     (item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention",
   ).length;
   const reservedPrefix =
-    reservedConstantCount > 0 ? `Reserved ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
+    reservedConstantCount > 0 ? `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
   const freeSuffix =
-    typeof remainingDynamicSlots === "number" ? ` Dynamic slot budget after constants: ${Math.max(0, remainingDynamicSlots)}.` : "";
+    typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap: ${Math.max(0, remainingDynamicSlots)}.` : "";
   if (mentionCount > 0) {
     return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(
       /^f/,
@@ -658,7 +757,20 @@ function summarizeSelection(
 }
 
 function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
-  return entry.collapsedText.trim() || entry.content.trim();
+  const collapsed = entry.collapsedText.trim();
+  const content = entry.content.trim();
+  if (!collapsed) return content;
+  if (!content) return collapsed;
+
+  const normalizedCollapsed = normalizeSearchText(collapsed);
+  const normalizedLabel = normalizeSearchText(entry.label);
+  const collapsedTokens = tokenize(collapsed);
+  const looksLikeLabelOnly =
+    normalizedCollapsed === normalizedLabel ||
+    (collapsedTokens.length <= 6 && normalizedLabel.length > 0 && normalizedCollapsed.includes(normalizedLabel)) ||
+    collapsedTokens.length <= 4;
+
+  return looksLikeLabelOnly ? content : collapsed;
 }
 
 function getEntryBreadcrumb(entry: RuntimeBook["cache"]["entries"][number], tree: BookTreeIndex): string {
@@ -1063,7 +1175,8 @@ async function maybeSelectEntries(
     "Use only entryIds that appear in the manifests.",
     "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
-    "If none of the listed entries would help, return an empty entryIds array.",
+    "Prefer a useful set of supporting entries over an overly sparse one when several entries are plausibly relevant.",
+    "Return an empty entryIds array only when every listed entry is irrelevant to the next reply.",
     "",
     buildPromptContext(queryText),
     "",
@@ -1110,19 +1223,19 @@ async function maybeSelectEntries(
     ? parsedEntryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
 
-  if (hasExplicitEntryIds && requestedIds.length === 0) {
-    return [];
-  }
-
   const uniqueRequestedIds = uniqueStrings(requestedIds);
   const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
   const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
+  const minimumUsefulSelection = Math.min(clampedFinalEntries, rankedCandidates.length, 3);
   const selectedAllManifestEntries =
     rankedCandidates.length > clampedFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
   const invalidSelectionReasons: string[] = [];
 
   if (!hasExplicitEntryIds) {
     invalidSelectionReasons.push("Controller did not return an entryIds array.");
+  }
+  if (hasExplicitEntryIds && requestedIds.length === 0) {
+    invalidSelectionReasons.push("Controller returned an empty entryIds array despite scoped candidates being available.");
   }
   if (requestedIds.length !== uniqueRequestedIds.length) {
     invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
@@ -1133,6 +1246,11 @@ async function maybeSelectEntries(
   if (mappedIds.length > clampedFinalEntries) {
     invalidSelectionReasons.push(
       `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`,
+    );
+  }
+  if (mappedIds.length > 0 && mappedIds.length < minimumUsefulSelection) {
+    invalidSelectionReasons.push(
+      `Controller returned only ${mappedIds.length} entry ID(s), below the minimum useful set of ${minimumUsefulSelection} for this manifest.`,
     );
   }
   if (selectedAllManifestEntries) {
@@ -2833,7 +2951,8 @@ function buildInjectionText(
 ): { text: string; included: ScoredEntry[]; estimatedTokens: number } | null {
   if (!selected.length) return null;
 
-  const maxEntries = clampInt(injectedEntryLimit, 1, 32);
+  const maxEntries = Math.max(0, Math.floor(injectedEntryLimit));
+  if (maxEntries <= 0) return null;
   const parts: string[] = [
     "[Lore Recall Retrieved Context]",
     "Use this retrieved reference only if it is relevant to the current reply. Do not mention Lore Recall or describe this block explicitly.",
@@ -2922,12 +3041,12 @@ export async function buildRetrievalPreview(
   const reservedConstants = collectReservedConstantEntries(chosenBooks);
   const reservedConstantCount = reservedConstants.length;
   const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
-  const configuredInjectCap = clampInt(config.tokenBudget, 1, 32);
-  const remainingDynamicSlots = Math.max(0, configuredInjectCap - reservedConstantCount);
+  const configuredInjectCap = clampInt(config.tokenBudget, 1, 64);
+  const remainingDynamicSlots = configuredInjectCap;
   const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
   const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
   if (reservedConstantCount) {
-    const reservedSummary = `Reserved ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} before dynamic retrieval, leaving ${remainingDynamicSlots} dynamic slot(s).`;
+    const reservedSummary = `Prepared ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} for always-on injection; dynamic retrieval still has ${remainingDynamicSlots} slot(s).`;
     steps.push(reservedSummary);
     pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
     emitProgress(reportProgress, {
@@ -2940,66 +3059,133 @@ export async function buildRetrievalPreview(
       }),
     });
   } else {
-    steps.push(`No native constant entries were reserved; ${remainingDynamicSlots} dynamic slot(s) are available.`);
+    steps.push(`No native constant entries were prepared; ${remainingDynamicSlots} dynamic slot(s) are available.`);
   }
+  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
+  const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes: TraversalScope[] = [];
   let pulledCandidates: ScoredEntry[] = [];
   let selected: ScoredEntry[] = [];
   let manifests: ScopedManifest[] = [];
-  const searchEvents: RetrievalSearchEvent[] = [];
+  let searchEvents: RetrievalSearchEvent[] = [];
   let selectionReason = "";
   let entrySelectionDurationMs: number | null = null;
-  const usedSearchFrontier = false;
+  let usedSearchFrontier = false;
   const fallbackPath: string[] = [];
 
-  if (remainingDynamicSlots <= 0) {
-    steps.push("Reserved constants consumed the full injection budget, so Lore Recall skipped dynamic retrieval.");
+  if (!deterministic.length) {
+    fallbackPath.push("Deterministic scoring found no matching dynamic entries.");
+    pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
   } else {
     const scopeSelectionStartedAt = Date.now();
-    const passResult = await selectScopesSinglePass(
-      recentConversation,
-      chosenBooks,
-      controller,
-      allowController,
-      reservedEntryIds,
-      maxDynamicEntries,
-      trace,
-    );
-    entrySelectionDurationMs = Date.now() - scopeSelectionStartedAt;
-    selectedScopes = passResult.scopes;
-    pulledCandidates = passResult.candidates;
-    selected = passResult.selected;
-    manifests = passResult.manifests;
-    selectionReason = passResult.selectionReason;
-    fallbackPath.push(...passResult.fallbackPath);
-    steps.push(`Single-pass retrieval selected ${selectedScopes.length} scope(s).`);
+    const scopeSelection =
+      config.searchMode === "traversal"
+        ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace)
+        : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
+    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
+    const initiallySelectedScopes = scopeSelection.scopes;
+    selectedScopes = scopeSelection.scopes;
+    selectionReason = scopeSelection.selectionReason;
+    fallbackPath.push(...scopeSelection.fallbackPath);
+    steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
 
-    const selectionReasons = new Map(
+    const initialSelectionReasons = new Map(
       selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
     );
-    const scopePreviews = buildPreviewScopes(selectedScopes, new Map(), selectionReasons);
-    if (scopePreviews.length) {
+    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map(), initialSelectionReasons);
+    if (initialScopePreviews.length) {
       emitProgress(reportProgress, {
         type: "item",
         item: createFeedItem(
           "scope",
           "Selected scopes",
-          `Working from ${scopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`,
+          `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`,
           {
             phase: "choose_scope",
-            count: scopePreviews.length,
-            scopes: scopePreviews,
+            count: initialScopePreviews.length,
+            scopes: initialScopePreviews,
             details: selectionReason ? [selectionReason] : undefined,
             tone: "info",
-            durationMs: entrySelectionDurationMs,
+            durationMs: scopeSelectionDurationMs,
           },
         ),
       });
     }
+
+    const entrySelectionStartedAt = Date.now();
+    const entrySelection =
+      config.searchMode === "traversal"
+        ? await selectTraversalEntries(
+            recentConversation,
+            chosenBooks,
+            selectedScopes,
+            config,
+            controller,
+            allowController,
+            deterministicById,
+            trace,
+            maxDynamicEntries,
+            reservedEntryIds,
+          )
+        : await selectEntriesForScopes(
+            recentConversation,
+            selectedScopes,
+            config,
+            controller,
+            allowController,
+            deterministicById,
+            trace,
+            maxDynamicEntries,
+            reservedEntryIds,
+          );
+    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
+    selectedScopes = entrySelection.scopes;
+    pulledCandidates = entrySelection.candidates;
+    selected = entrySelection.selected;
+    manifests = entrySelection.manifests;
+    if ("fallbackPath" in entrySelection && Array.isArray((entrySelection as EntrySelectionResult).fallbackPath)) {
+      fallbackPath.push(...(entrySelection as EntrySelectionResult).fallbackPath);
+    }
+    if ("fallbackReason" in entrySelection && entrySelection.fallbackReason) {
+      fallbackPath.push(entrySelection.fallbackReason);
+    }
+    if (Array.isArray(entrySelection.searchEvents) && entrySelection.searchEvents.length) {
+      searchEvents = entrySelection.searchEvents;
+    }
+    if (entrySelection.usedSearchFrontier) {
+      usedSearchFrontier = true;
+    }
+    if (entrySelection.selectionReason) {
+      selectionReason = entrySelection.selectionReason;
+    }
     steps.push(
-      `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`,
+      usedSearchFrontier
+        ? `Resolved ${pulledCandidates.length} pulled entry candidate(s) from the global search frontier.`
+        : `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`,
     );
     steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
+    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
+      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
+      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map(), refinedReasons);
+      if (refinedScopePreviews.length) {
+        emitProgress(reportProgress, {
+          type: "item",
+          item: createFeedItem(
+            "scope",
+            "Refined scopes",
+            `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`,
+            {
+              phase: "refine_scope",
+              count: refinedScopePreviews.length,
+              scopes: refinedScopePreviews,
+              details: selectionReason ? [selectionReason] : undefined,
+              tone: "info",
+              durationMs: scopeSelectionDurationMs,
+            },
+          ),
+        });
+      }
+    }
   }
 
   const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
@@ -3081,19 +3267,30 @@ export async function buildRetrievalPreview(
   }
 
   const injectionStartedAt = Date.now();
-  const injection =
-    remainingDynamicSlots > 0 ? buildInjectionText(selected, booksById, remainingDynamicSlots, config.collapsedDepth) : null;
+  const selectedForInjection = [...reservedConstants, ...selected];
+  const injection = selectedForInjection.length
+    ? buildInjectionText(
+        selectedForInjection,
+        booksById,
+        reservedConstantCount + remainingDynamicSlots,
+        config.collapsedDepth,
+      )
+    : null;
   const injectionDurationMs = Date.now() - injectionStartedAt;
-  const included = injection?.included ?? selected;
+  const included = injection?.included ?? [];
   const injectedNodes = buildPreviewNodes(included, booksById);
   const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
 
   if (injection?.included.length) {
+    const constantInjectionSuffix =
+      reservedConstantCount > 0
+        ? `, including ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}`
+        : "";
     pushTrace(
       trace,
       "inject",
       "Inject entries",
-      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt.`,
+      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt${constantInjectionSuffix}.`,
       { entryCount: injection.included.length, durationMs: injectionDurationMs },
     );
     emitProgress(reportProgress, {
@@ -3113,20 +3310,9 @@ export async function buildRetrievalPreview(
     });
   } else {
     const skippedSummary =
-      reservedConstantCount > 0 && remainingDynamicSlots <= 0
-        ? `Reserved constants consumed the full injection budget, so Lore Recall injected no additional dynamic entries.`
-        : reservedConstantCount > 0
-          ? `No additional dynamic entries were injected after reserving ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}.`
-          : "No retrieved entries were injected for this turn.";
-    if (reservedConstantCount > 0 && remainingDynamicSlots <= 0) {
-      pushTrace(
-        trace,
-        "inject",
-        "Dynamic injection skipped",
-        skippedSummary,
-        { entryCount: 0, durationMs: injectionDurationMs },
-      );
-    }
+      reservedConstantCount > 0
+        ? `No entries were injected even though ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y was" : "ies were"} available.`
+        : "No retrieved entries were injected for this turn.";
     emitProgress(reportProgress, {
       type: "item",
       item: createFeedItem(
