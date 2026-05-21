@@ -1484,30 +1484,125 @@ function parseEntryChoiceId(choiceId: string): string | null {
   return match?.[1] ?? null;
 }
 
+function stripChoiceIdDecoration(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  const choiceIdMatch = /choiceId\s*=\s*([^;\s,)]+)/i.exec(trimmed);
+  if (choiceIdMatch?.[1]) return stripChoiceIdDecoration(choiceIdMatch[1]);
+
+  const leadingBracketMatch = /^\[([^\]]+)\]/.exec(trimmed);
+  if (leadingBracketMatch?.[1]) return stripChoiceIdDecoration(leadingBracketMatch[1]);
+
+  return trimmed
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^[\[(]+/g, "")
+    .replace(/[\]),.;]+$/g, "")
+    .trim();
+}
+
+function expandChoiceIdVariants(choiceId: string): string[] {
+  const variants: string[] = [];
+  const pushVariant = (value: string): void => {
+    const stripped = stripChoiceIdDecoration(value);
+    if (stripped && !variants.includes(stripped)) variants.push(stripped);
+  };
+
+  pushVariant(choiceId);
+  for (const match of choiceId.matchAll(/\[([^\]]+)\]/g)) {
+    if (match[1]) pushVariant(match[1]);
+  }
+  for (const match of choiceId.matchAll(/choiceId\s*=\s*([^;\s,)]+)/gi)) {
+    if (match[1]) pushVariant(match[1]);
+  }
+
+  return variants;
+}
+
+function formatChoiceIdList(choiceIds: string[], limit = 5): string {
+  if (!choiceIds.length) return "none";
+  const shown = choiceIds.slice(0, limit).map((choiceId) => `"${truncateText(choiceId, 80)}"`);
+  return choiceIds.length > limit ? `${shown.join(", ")} (+${choiceIds.length - limit} more)` : shown.join(", ");
+}
+
 function resolveTraversalChoiceScopes(
   choiceIds: string[],
   booksById: Map<string, RuntimeBook>,
 ): TraversalScope[] {
   const scopes = new Map<string, TraversalScope>();
-  for (const choiceId of choiceIds) {
-    const categoryChoice = parseCategoryChoiceId(choiceId);
-    if (categoryChoice) {
-      const book = booksById.get(categoryChoice.bookId);
-      if (book && book.tree.nodes[categoryChoice.nodeId]) {
-        scopes.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
-      }
-      continue;
-    }
-    const documentBookId = parseDocumentChoiceId(choiceId);
-    if (documentBookId) {
-      const book = booksById.get(documentBookId);
-      if (!book) continue;
-      scopes.set(`${book.summary.id}:${book.tree.rootId}`, { book, nodeId: book.tree.rootId });
-      continue;
-    }
+
+  const addScope = (book: RuntimeBook, nodeId: string): void => {
+    if (!book.tree.nodes[nodeId]) return;
+    scopes.set(`${book.summary.id}:${nodeId}`, { book, nodeId });
+  };
+
+  const addNodeIdAcrossBooks = (nodeId: string): boolean => {
+    let resolved = false;
     for (const book of booksById.values()) {
-      if (!book.tree.nodes[choiceId]) continue;
-      scopes.set(`${book.summary.id}:${choiceId}`, { book, nodeId: choiceId });
+      if (!book.tree.nodes[nodeId]) continue;
+      addScope(book, nodeId);
+      resolved = true;
+    }
+    return resolved;
+  };
+
+  const labelIndex = new Map<string, TraversalScope[]>();
+  const addLabelIndex = (label: string, book: RuntimeBook, nodeId: string): void => {
+    const key = normalizeSearchText(label);
+    if (!key) return;
+    const existing = labelIndex.get(key) ?? [];
+    if (!existing.some((scope) => scope.book.summary.id === book.summary.id && scope.nodeId === nodeId)) {
+      existing.push({ book, nodeId });
+    }
+    labelIndex.set(key, existing);
+  };
+
+  for (const book of booksById.values()) {
+    for (const node of Object.values(book.tree.nodes)) {
+      const breadcrumb = getScopeBreadcrumb(book, node.id);
+      addLabelIndex(node.id, book, node.id);
+      addLabelIndex(node.label, book, node.id);
+      addLabelIndex(breadcrumb, book, node.id);
+      addLabelIndex(`${book.summary.name} :: ${node.label}`, book, node.id);
+      addLabelIndex(`${book.summary.name} :: ${breadcrumb}`, book, node.id);
+      addLabelIndex(`${book.summary.id}:${node.id}`, book, node.id);
+      if (node.id === book.tree.rootId) {
+        addLabelIndex(book.summary.name, book, node.id);
+        addLabelIndex("root", book, node.id);
+      }
+    }
+  }
+
+  for (const choiceId of choiceIds) {
+    for (const variant of expandChoiceIdVariants(choiceId)) {
+      const categoryChoice = parseCategoryChoiceId(variant);
+      if (categoryChoice) {
+        const book = booksById.get(categoryChoice.bookId);
+        if (book && book.tree.nodes[categoryChoice.nodeId]) {
+          addScope(book, categoryChoice.nodeId);
+        } else {
+          addNodeIdAcrossBooks(categoryChoice.nodeId);
+        }
+        continue;
+      }
+
+      const categoryNodeOnly = /^category:(.+)$/i.exec(variant);
+      if (categoryNodeOnly?.[1] && addNodeIdAcrossBooks(categoryNodeOnly[1])) continue;
+
+      const documentBookId = parseDocumentChoiceId(variant);
+      if (documentBookId) {
+        const book = booksById.get(documentBookId);
+        if (book) addScope(book, book.tree.rootId);
+        continue;
+      }
+
+      if (addNodeIdAcrossBooks(variant)) continue;
+
+      const twoPartChoice = /^([^:]+):(.+)$/.exec(variant);
+      if (twoPartChoice?.[2] && addNodeIdAcrossBooks(twoPartChoice[2])) continue;
+
+      const labelScopes = labelIndex.get(normalizeSearchText(variant)) ?? [];
+      for (const scope of labelScopes) addScope(scope.book, scope.nodeId);
     }
   }
   return Array.from(scopes.values());
@@ -2480,7 +2575,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
 
     const indent = "  ".repeat(depth);
     const type = node.childIds.length ? "branch" : "leaf";
-    lines.push(`${indent}[${makeCategoryChoiceId(book.summary.id, node.id)}] ${node.label || "Unnamed"} [${type}] (${getScopedEntryIds(book, node.id, true).length} entries)`);
+    lines.push(
+      `${indent}- choiceId=${makeCategoryChoiceId(book.summary.id, node.id)}; label=${node.label || "Unnamed"}; type=${type}; descendantEntries=${getScopedEntryIds(book, node.id, true).length}`,
+    );
     if (node.summary?.trim()) {
       lines.push(`${indent}  ${truncateText(node.summary.trim(), 180)}`);
     }
@@ -2500,7 +2597,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
 
     if (scope.nodeId === scope.book.tree.rootId) {
       if (multiBook) {
-        lines.push(`[${makeDocumentChoiceId(scope.book.summary.id)}] ${scope.book.summary.name} (${scope.book.cache.entries.length} entries total)`);
+        lines.push(
+          `- choiceId=${makeDocumentChoiceId(scope.book.summary.id)}; label=${scope.book.summary.name}; type=document; descendantEntries=${scope.book.cache.entries.length}`,
+        );
       } else {
         lines.push(`Lorebook: ${scope.book.summary.name}`);
       }
@@ -2512,7 +2611,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
         lines.push(`  ${rootSummary}`);
       }
       if (scope.book.tree.unassignedEntryIds.length) {
-        lines.push(`  [${makeCategoryChoiceId(scope.book.summary.id, scope.book.tree.rootId)}] ROOT [leaf] (${scope.book.tree.unassignedEntryIds.length} entries)`);
+        lines.push(
+          `  - choiceId=${makeCategoryChoiceId(scope.book.summary.id, scope.book.tree.rootId)}; label=ROOT; type=leaf; descendantEntries=${scope.book.tree.unassignedEntryIds.length}`,
+        );
       }
       for (const childId of scopeNode.childIds) {
         pushNode(scope.book, childId, 0);
@@ -2658,6 +2759,7 @@ function buildTraversalPrompt(
       "- Choose from the global search results below to resolve the best lore entries for the next response.",
       "Rules:",
       "- Use only choiceIds exactly as shown below.",
+      "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
       "- Use action retrieve to add one or more shown entry results to the traversal candidate pool, then continue exploring.",
       '- Use action search to replace the current search frontier with a new global keyword search across all readable managed lorebooks. Include a short "query" string when you do this.',
       "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
@@ -2694,6 +2796,7 @@ function buildTraversalPrompt(
     "- Pick the most relevant traversal choices from the tree to retrieve for the next response.",
     "Rules:",
     "- Pick 1-5 choiceIds maximum and prefer specific branches over broad branches.",
+    "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
     hasFullTreeOverview
       ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index."
       : "- Choose choiceIds only from the category list shown below.",
@@ -2813,6 +2916,7 @@ async function selectTraversalEntries(
     for (const [entryId, candidate] of candidatePoolById) byId.set(entryId, candidate);
     const entryIds = uniqueStrings(
       choiceIds
+        .flatMap(expandChoiceIdVariants)
         .map((choiceId) => parseEntryChoiceId(choiceId) ?? choiceId)
         .filter((entryId) => byId.has(entryId)),
     );
@@ -3169,9 +3273,13 @@ async function selectTraversalEntries(
 
       if (!nextScopes.length) {
         if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection("Controller picked no valid traversal branches after accumulating candidates.", "Finish traversal", response.durationMs);
+          return finalizeAccumulatedSelection(
+            `Controller picked no valid traversal branches after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`,
+            "Finish traversal",
+            response.durationMs,
+          );
         }
-        pushTrace(trace, "fallback", "Invalid navigate", "Controller picked no valid traversal branches.");
+        pushTrace(trace, "fallback", "Invalid navigate", `Controller picked no valid traversal branches. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`);
         return {
           scopes,
           selected: getCollapsedFallbackSelection(),
@@ -3275,7 +3383,12 @@ async function selectTraversalEntries(
     if (action === "retrieve" || action === "finish") {
       if (frontier.mode === "search") {
         const frontierById = new Map(searchFrontier?.results.map((item) => [item.entry.entryId, item]) ?? []);
-        const requestedEntryIds = uniqueStrings(choiceIds.map(parseEntryChoiceId).filter((value): value is string => !!value));
+        const requestedEntryIds = uniqueStrings(
+          choiceIds
+            .flatMap(expandChoiceIdVariants)
+            .map(parseEntryChoiceId)
+            .filter((value): value is string => !!value),
+        );
         const selectedCandidates = requestedEntryIds.length
           ? collectEntriesByIds(requestedEntryIds, frontierById)
           : searchFrontier?.results ?? [];
@@ -3342,12 +3455,17 @@ async function selectTraversalEntries(
         }
         if (getCandidatePool().length) {
           return finalizeAccumulatedSelection(
-            `${reason} Tree choiceIds did not resolve after accumulating candidates.`,
+            `${reason} Tree choiceIds did not resolve after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`,
             "Finish traversal",
             response.durationMs,
           );
         }
-        pushTrace(trace, "fallback", "Retrieve resolved no choices", "Traversal controller chose tree choiceIds that did not resolve to any category.");
+        pushTrace(
+          trace,
+          "fallback",
+          "Retrieve resolved no choices",
+          `Traversal controller chose tree choiceIds that did not resolve to any category: ${formatChoiceIdList(choiceIds)}.`,
+        );
         return {
           scopes,
           selected: getCollapsedFallbackSelection(),
