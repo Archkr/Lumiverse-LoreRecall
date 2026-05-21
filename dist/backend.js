@@ -1170,12 +1170,14 @@ function pushTrace(trace, phase, label, summary, extra = {}) {
     nodeId: extra.nodeId ?? null,
     entryCount: extra.entryCount ?? null
   });
-  emitTraceFeedItem(trace, label, summary, {
-    phase,
-    count: typeof extra.entryCount === "number" ? extra.entryCount : null,
-    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info",
-    durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null
-  });
+  if (phase === "fallback") {
+    emitTraceFeedItem(trace, label, summary, {
+      phase,
+      count: typeof extra.entryCount === "number" ? extra.entryCount : null,
+      tone: "warn",
+      durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null
+    });
+  }
 }
 function stripSearchMarkup(value) {
   return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -1575,13 +1577,6 @@ async function runControllerJson2(prompt, controller, systemPrompt, requestLabel
   }
   controller.callCount += 1;
   const requestStartedAt = Date.now();
-  emitProgress(controller.reportProgress, {
-    type: "item",
-    item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
-      phase: "controller",
-      tone: "info"
-    })
-  });
   const abortController = new AbortController;
   const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
   let timer = null;
@@ -1605,14 +1600,6 @@ async function runControllerJson2(prompt, controller, systemPrompt, requestLabel
             })
           });
         }
-        emitProgress(controller.reportProgress, {
-          type: "item",
-          item: createFeedItem("trace", `Controller finished: ${requestLabel}`, `Parsed JSON from ${result.parsedFrom === "reasoning" ? "reasoning" : "content"} response.`, {
-            phase: "controller",
-            tone: "info",
-            durationMs
-          })
-        });
         return { parsed: result.parsed, error: null, durationMs };
       }
       spindle.log.warn("Lore Recall controller call returned invalid JSON.");

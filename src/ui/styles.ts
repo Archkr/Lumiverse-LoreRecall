@@ -1404,132 +1404,6 @@ export const LORE_RECALL_CSS = `
   flex-shrink: 0;
 }
 
-/* Body of the session card - the new "more stuff" area */
-.lore-feed-session-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0 14px 14px 18px;
-  border-bottom: 1px solid var(--lr-line);
-}
-
-.lore-feed-session.collapsed .lore-feed-session-body { display: none; }
-
-/* Compact one-line flow summary: scope → manifest → pulled → injected */
-.lore-flow-line {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 7px 10px;
-  margin-top: 2px;
-  border-radius: var(--lr-r-sm);
-  background: var(--lr-bg-page);
-  border: 1px solid var(--lr-line);
-}
-
-.lore-flow-line-cell {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  min-width: 0;
-}
-
-.lore-flow-line-num {
-  font-family: var(--lr-font-display);
-  font-size: 14px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-  color: var(--lr-text);
-  line-height: 1;
-}
-
-.lore-flow-line-cell.empty .lore-flow-line-num { color: var(--lr-dim); }
-.lore-flow-line-cell.injected .lore-flow-line-num {
-  color: color-mix(in srgb, var(--lr-good) 90%, var(--lr-text));
-}
-
-.lore-flow-line-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--lr-dim);
-  line-height: 1;
-}
-
-.lore-flow-line-arrow {
-  font-size: 11px;
-  color: var(--lr-dim);
-  line-height: 1;
-}
-
-.lore-feed-session-top-injected {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 10px;
-  border-radius: var(--lr-r-sm);
-  background: color-mix(in srgb, var(--lr-good) 7%, var(--lr-bg-page));
-  border-left: 2px solid color-mix(in srgb, var(--lr-good) 60%, var(--lr-line));
-}
-
-.lore-feed-session-top-injected-kicker {
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--lr-good) 70%, var(--lr-text));
-}
-
-.lore-feed-session-top-injected-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--lr-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.lore-feed-session-top-injected-meta {
-  font-size: 10.5px;
-  color: var(--lr-dim);
-  font-family: var(--lr-font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.lore-feed-session-toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--lr-muted);
-  cursor: pointer;
-  padding: 8px 0 0;
-  user-select: none;
-}
-
-.lore-feed-session-toggle-label:hover { color: var(--lr-text); }
-
-.lore-feed-session-toggle-label .caret {
-  width: 10px;
-  height: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform var(--lr-t-slow);
-}
-
-.lore-feed-session-toggle[aria-expanded="true"] + .lore-feed-session-body .lore-feed-session-toggle-label .caret,
-.lore-feed-session.expanded .lore-feed-session-toggle-label .caret {
-  transform: rotate(90deg);
-}
 
 .lore-feed-session-items {
   display: flex;
@@ -1541,22 +1415,6 @@ export const LORE_RECALL_CSS = `
 
 .lore-feed-session-items[hidden] { display: none; }
 
-/* Connector rail down the left of an expanded session */
-.lore-feed-session-items::before {
-  content: "";
-  position: absolute;
-  left: 26px;
-  top: 14px;
-  bottom: 14px;
-  width: 1px;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    var(--lr-line-2) 8%,
-    var(--lr-line-2) 92%,
-    transparent 100%
-  );
-}
 
 .lore-feed-item {
   display: grid;
@@ -1778,6 +1636,130 @@ export const LORE_RECALL_CSS = `
   font-size: 11px;
   color: var(--lr-muted);
   line-height: 1.5;
+}
+
+/* Compact feed pass: keep the live surface close to TunnelVision's activity stream. */
+.lore-feed {
+  gap: 6px;
+}
+
+.lore-feed-session {
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-bg-panel) 78%, transparent);
+  box-shadow: none;
+}
+
+.lore-feed-session::before,
+.lore-feed-session-items::before {
+  display: none;
+}
+
+.lore-feed-session.live {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-lore) 18%, transparent);
+}
+
+.lore-feed-session-head {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.lore-feed-session-title {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lore-feed-session-mode {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant: normal;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.lore-feed-session-stamps {
+  font-size: 10.5px;
+  font-family: var(--lr-font-mono);
+  gap: 0;
+}
+
+.lore-feed-session-elapsed {
+  font-size: 10.5px;
+}
+
+.lore-feed-session-items {
+  border-top: 1px solid var(--lr-line);
+  padding-left: 0;
+}
+
+.lore-feed-item {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px 10px;
+  align-items: start;
+}
+
+.lore-feed-item-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: transparent;
+  margin-top: 0;
+}
+
+.lore-feed-item-icon svg {
+  width: 11px;
+  height: 11px;
+}
+
+.lore-feed-item-body {
+  gap: 4px;
+}
+
+.lore-feed-item-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lore-feed-item-verb {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--lr-text);
+  line-height: 1.3;
+}
+
+.lore-feed-item-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.lore-feed-item-time {
+  padding-top: 1px;
+  font-size: 10px;
+}
+
+.lore-feed-chip-row .lore-tag {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lore-feed-details {
+  margin-top: 2px;
 }
 
 /* ---------- Forms ---------------------------------------- */

@@ -1720,132 +1720,6 @@ var LORE_RECALL_CSS = `
   flex-shrink: 0;
 }
 
-/* Body of the session card - the new "more stuff" area */
-.lore-feed-session-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 0 14px 14px 18px;
-  border-bottom: 1px solid var(--lr-line);
-}
-
-.lore-feed-session.collapsed .lore-feed-session-body { display: none; }
-
-/* Compact one-line flow summary: scope → manifest → pulled → injected */
-.lore-flow-line {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 7px 10px;
-  margin-top: 2px;
-  border-radius: var(--lr-r-sm);
-  background: var(--lr-bg-page);
-  border: 1px solid var(--lr-line);
-}
-
-.lore-flow-line-cell {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  min-width: 0;
-}
-
-.lore-flow-line-num {
-  font-family: var(--lr-font-display);
-  font-size: 14px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-  color: var(--lr-text);
-  line-height: 1;
-}
-
-.lore-flow-line-cell.empty .lore-flow-line-num { color: var(--lr-dim); }
-.lore-flow-line-cell.injected .lore-flow-line-num {
-  color: color-mix(in srgb, var(--lr-good) 90%, var(--lr-text));
-}
-
-.lore-flow-line-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--lr-dim);
-  line-height: 1;
-}
-
-.lore-flow-line-arrow {
-  font-size: 11px;
-  color: var(--lr-dim);
-  line-height: 1;
-}
-
-.lore-feed-session-top-injected {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 10px;
-  border-radius: var(--lr-r-sm);
-  background: color-mix(in srgb, var(--lr-good) 7%, var(--lr-bg-page));
-  border-left: 2px solid color-mix(in srgb, var(--lr-good) 60%, var(--lr-line));
-}
-
-.lore-feed-session-top-injected-kicker {
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--lr-good) 70%, var(--lr-text));
-}
-
-.lore-feed-session-top-injected-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--lr-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.lore-feed-session-top-injected-meta {
-  font-size: 10.5px;
-  color: var(--lr-dim);
-  font-family: var(--lr-font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.lore-feed-session-toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--lr-muted);
-  cursor: pointer;
-  padding: 8px 0 0;
-  user-select: none;
-}
-
-.lore-feed-session-toggle-label:hover { color: var(--lr-text); }
-
-.lore-feed-session-toggle-label .caret {
-  width: 10px;
-  height: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform var(--lr-t-slow);
-}
-
-.lore-feed-session-toggle[aria-expanded="true"] + .lore-feed-session-body .lore-feed-session-toggle-label .caret,
-.lore-feed-session.expanded .lore-feed-session-toggle-label .caret {
-  transform: rotate(90deg);
-}
 
 .lore-feed-session-items {
   display: flex;
@@ -1857,22 +1731,6 @@ var LORE_RECALL_CSS = `
 
 .lore-feed-session-items[hidden] { display: none; }
 
-/* Connector rail down the left of an expanded session */
-.lore-feed-session-items::before {
-  content: "";
-  position: absolute;
-  left: 26px;
-  top: 14px;
-  bottom: 14px;
-  width: 1px;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    var(--lr-line-2) 8%,
-    var(--lr-line-2) 92%,
-    transparent 100%
-  );
-}
 
 .lore-feed-item {
   display: grid;
@@ -2094,6 +1952,130 @@ var LORE_RECALL_CSS = `
   font-size: 11px;
   color: var(--lr-muted);
   line-height: 1.5;
+}
+
+/* Compact feed pass: keep the live surface close to TunnelVision's activity stream. */
+.lore-feed {
+  gap: 6px;
+}
+
+.lore-feed-session {
+  border-radius: var(--lr-r-sm);
+  background: color-mix(in srgb, var(--lr-bg-panel) 78%, transparent);
+  box-shadow: none;
+}
+
+.lore-feed-session::before,
+.lore-feed-session-items::before {
+  display: none;
+}
+
+.lore-feed-session.live {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-lore) 18%, transparent);
+}
+
+.lore-feed-session-head {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.lore-feed-session-title {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lore-feed-session-mode {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant: normal;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.lore-feed-session-stamps {
+  font-size: 10.5px;
+  font-family: var(--lr-font-mono);
+  gap: 0;
+}
+
+.lore-feed-session-elapsed {
+  font-size: 10.5px;
+}
+
+.lore-feed-session-items {
+  border-top: 1px solid var(--lr-line);
+  padding-left: 0;
+}
+
+.lore-feed-item {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px 10px;
+  align-items: start;
+}
+
+.lore-feed-item-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: transparent;
+  margin-top: 0;
+}
+
+.lore-feed-item-icon svg {
+  width: 11px;
+  height: 11px;
+}
+
+.lore-feed-item-body {
+  gap: 4px;
+}
+
+.lore-feed-item-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lore-feed-item-verb {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--lr-text);
+  line-height: 1.3;
+}
+
+.lore-feed-item-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.lore-feed-item-time {
+  padding-top: 1px;
+  font-size: 10px;
+}
+
+.lore-feed-chip-row .lore-tag {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lore-feed-details {
+  margin-top: 2px;
 }
 
 /* ---------- Forms ---------------------------------------- */
@@ -4116,9 +4098,13 @@ function setup(ctx) {
     return section;
   }
   function itemMatchesFeedFilter(item, filter) {
-    if (filter === "all")
-      return true;
-    return item.kind === filter;
+    if (filter === "issue")
+      return item.kind === "issue" || item.tone === "warn" || item.tone === "error";
+    if (filter === "entries")
+      return item.kind === "pulled" || item.kind === "manifest" || item.kind === "injected";
+    if (filter === "steps")
+      return item.kind === "scope" || item.kind === "search" || item.kind === "reserved" || item.kind === "trace";
+    return item.kind !== "trace" && item.kind !== "reserved";
   }
   function getFeedItemGlyph(item) {
     switch (item.kind) {
@@ -4140,18 +4126,25 @@ function setup(ctx) {
         return iconHtml("feedSearch");
     }
   }
-  function getFeedMetaBits(item) {
-    const bits = [];
-    if (item.kind === "search" && item.searchQuery) {
-      bits.push(item.searchGlobal ? "global search" : "search");
-      bits.push(`query "${item.searchQuery}"`);
-    } else if (item.phase && item.phase !== "session") {
-      bits.push(item.phase.replace(/_/g, " "));
+  function getFeedItemVerb(item) {
+    switch (item.kind) {
+      case "scope":
+        return "Scope";
+      case "search":
+        return "Search";
+      case "manifest":
+        return "Manifest";
+      case "reserved":
+        return "Constants";
+      case "pulled":
+        return "Pulled";
+      case "injected":
+        return "Injected";
+      case "issue":
+        return "Issue";
+      default:
+        return item.phase === "controller" ? "Controller" : "Step";
     }
-    if (typeof item.count === "number") {
-      bits.push(item.kind === "search" ? `${item.count} match${item.count === 1 ? "" : "es"}` : `${item.count}`);
-    }
-    return bits;
   }
   function getFeedItemTone(item) {
     switch (item.tone) {
@@ -4262,6 +4255,28 @@ function setup(ctx) {
     }
     return wrap;
   }
+  function createFeedItemChips(item) {
+    const chips = createElement("div", "lore-feed-chip-row");
+    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
+      chips.appendChild(createTag(formatDurationShort(item.durationMs)));
+    }
+    if (item.kind === "search" && item.searchQuery) {
+      chips.appendChild(createTag(`q: ${clipText(item.searchQuery, 24)}`, "accent"));
+    } else if (item.phase && item.phase !== "session") {
+      chips.appendChild(createTag(item.phase.replace(/_/g, " ")));
+    }
+    const names = item.entries?.length ? item.entries.map((entry) => entry.label) : item.scopes?.map((scope) => scope.label) ?? [];
+    const shown = names.slice(0, 5);
+    for (const name of shown) {
+      chips.appendChild(createTag(clipText(name, 28), item.kind === "injected" ? "good" : "neutral"));
+    }
+    if (names.length > shown.length) {
+      chips.appendChild(createTag(`+${names.length - shown.length} more`));
+    } else if (!names.length && typeof item.count === "number") {
+      chips.appendChild(createTag(`${item.count}`));
+    }
+    return chips.childElementCount ? chips : null;
+  }
   function renderFeedScopeCards(scopes) {
     const list = createElement("div", "lore-feed-scope-list");
     for (const scope of scopes) {
@@ -4311,6 +4326,8 @@ function setup(ctx) {
     const hasScopes = !!item.scopes?.length;
     const hasEntries = !!item.entries?.length;
     const hasDetails = !!item.details?.length;
+    if (item.kind !== "issue" && item.tone !== "warn" && item.tone !== "error")
+      return null;
     if (!hasScopes && !hasEntries && !hasDetails)
       return null;
     const details = createElement("details", "lore-feed-details");
@@ -4362,82 +4379,25 @@ function setup(ctx) {
     const icon = createElement("div", "lore-feed-item-icon");
     icon.innerHTML = getFeedItemGlyph(item);
     const body = createElement("div", "lore-feed-item-body");
-    const top = createElement("div", "lore-feed-item-top");
-    const stamps = createElement("div", "lore-feed-item-stamps");
-    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
-      stamps.appendChild(createTag(formatDurationShort(item.durationMs)));
-    }
-    stamps.appendChild(createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
-    top.append(createElement("div", "lore-feed-item-label", item.label), stamps);
-    body.append(top, createElement("div", "lore-feed-item-summary", item.summary));
-    const metaBits = getFeedMetaBits(item);
-    if (metaBits.length) {
-      const meta = createElement("div", "lore-feed-item-meta", metaBits.join(" • "));
-      body.appendChild(meta);
-    }
+    const text = createElement("div", "lore-feed-item-row");
+    text.append(createElement("span", "lore-feed-item-verb", getFeedItemVerb(item)), createElement("span", "lore-feed-item-summary", clipText(item.summary || item.label, 150)));
+    body.appendChild(text);
+    const chips = createFeedItemChips(item);
+    if (chips)
+      body.appendChild(chips);
     const details = renderFeedItemDetails(item);
     if (details)
       body.appendChild(details);
-    row.append(icon, body);
+    row.append(icon, body, createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
     return row;
   }
-  function getSessionFlowCounts(session) {
-    const last = {};
-    const occurrences = {};
-    for (const item of session.items) {
-      occurrences[item.kind] = (occurrences[item.kind] ?? 0) + 1;
-      if (typeof item.count === "number" && Number.isFinite(item.count)) {
-        last[item.kind] = item.count;
-      }
-    }
-    const pick = (kind) => last[kind] ?? occurrences[kind] ?? 0;
-    return {
-      scopes: pick("scope"),
-      manifest: pick("manifest"),
-      pulled: pick("pulled"),
-      injected: pick("injected")
-    };
-  }
-  function getSessionTopInjected(session) {
-    for (let i = session.items.length - 1;i >= 0; i -= 1) {
-      const item = session.items[i];
-      if (item.kind === "injected" && item.entries?.length)
-        return item.entries[0];
-    }
-    for (const item of session.items) {
-      if (item.kind === "injected" && item.entries?.length)
-        return item.entries[0];
-    }
-    return null;
-  }
-  function renderFlowLine(session) {
-    const counts = getSessionFlowCounts(session);
-    const wrap = createElement("div", "lore-flow-line");
-    const steps = [
-      ["scope", "scope", counts.scopes],
-      ["manifest", "manifest", counts.manifest],
-      ["pulled", "pulled", counts.pulled],
-      ["injected", "injected", counts.injected]
-    ];
-    steps.forEach(([kind, label, value], i) => {
-      if (i > 0)
-        wrap.appendChild(createElement("span", "lore-flow-line-arrow", "→"));
-      const cell = createElement("span", `lore-flow-line-cell ${kind}${value === 0 ? " empty" : ""}`);
-      cell.append(createElement("span", "lore-flow-line-num", String(value)), createElement("span", "lore-flow-line-label", label));
-      wrap.appendChild(cell);
-    });
-    return wrap;
-  }
-  function renderFeedSession(session, index) {
+  function renderCompactFeedSession(session, index) {
     const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
-    if (drawerFeedFilter !== "all" && !visibleItems.length)
+    if (!visibleItems.length && !(drawerFeedFilter === "all" && session.status === "running"))
       return null;
     const expanded = isSessionExpanded(session, index);
-    const elapsedMs = getSessionElapsedMs(session);
     const isRunning = session.status === "running";
-    const counts = getSessionFlowCounts(session);
-    const hasFlow = counts.scopes + counts.manifest + counts.pulled + counts.injected > 0;
-    const topInjected = getSessionTopInjected(session);
+    const elapsedMs = getSessionElapsedMs(session);
     const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}${isRunning ? " live" : ""}${expanded ? " expanded" : " collapsed"}`);
     const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle");
     head.type = "button";
@@ -4447,50 +4407,24 @@ function setup(ctx) {
       drawerSessionExpansion.set(session.id, !expanded);
       render();
     });
-    const topRow = createElement("div", "lore-feed-session-row top");
-    topRow.appendChild(createElement("div", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    const body = createElement("div", "lore-feed-session-title");
+    body.appendChild(createElement("div", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    const meta = [
+      getSessionStatusLabel(session),
+      formatTimeOnly(session.startedAt),
+      session.controllerUsed ? "controller" : "deterministic",
+      `${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`
+    ];
+    if (session.fallbackReason)
+      meta.push("fallback");
+    body.appendChild(createElement("div", "lore-feed-session-stamps", meta.join(" / ")));
     const trailing = createElement("div", "lore-feed-session-trailing");
     if (typeof elapsedMs === "number") {
       trailing.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
     }
     trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
-    topRow.appendChild(trailing);
-    head.appendChild(topRow);
-    const midRow = createElement("div", "lore-feed-session-row");
-    const status = createStatus(getSessionStatusLabel(session), isRunning ? "accent" : session.status === "completed" ? "on" : "warn");
-    if (isRunning)
-      status.classList.add("live");
-    midRow.appendChild(status);
-    const stampBits = [formatCapturedAt(session.startedAt)];
-    stampBits.push(session.controllerUsed ? "controller" : "deterministic");
-    if (session.fallbackReason && session.status !== "failed")
-      stampBits.push("fallback");
-    midRow.appendChild(createElement("div", "lore-feed-session-stamps", stampBits.join(" · ")));
-    head.appendChild(midRow);
-    if (hasFlow)
-      head.appendChild(renderFlowLine(session));
+    head.append(body, trailing);
     wrap.appendChild(head);
-    const body = createElement("div", "lore-feed-session-body");
-    if (topInjected) {
-      const top = createElement("div", "lore-feed-session-top-injected");
-      top.append(createElement("div", "lore-feed-session-top-injected-kicker", "Top injected"), createElement("div", "lore-feed-session-top-injected-label", topInjected.label || "Untitled entry"), createElement("div", "lore-feed-session-top-injected-meta", [topInjected.worldBookName, topInjected.breadcrumb || "Root"].filter(Boolean).join(" · ")));
-      body.appendChild(top);
-    }
-    if (session.fallbackReason) {
-      body.appendChild(createBanner(session.status === "failed" ? "error" : "warn", session.status === "failed" ? "Retrieval failed" : "Fallback path active", session.fallbackReason));
-    }
-    const toggleLabel = createElement("div", "lore-feed-session-toggle-label");
-    toggleLabel.appendChild(makeIconSpan("caret", "caret"));
-    toggleLabel.appendChild(createElement("span", "", expanded ? `Hide ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}` : `Show ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`));
-    toggleLabel.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      drawerSessionExpansion.set(session.id, !expanded);
-      render();
-    });
-    body.appendChild(toggleLabel);
-    if (body.childElementCount)
-      wrap.appendChild(body);
     const items = createElement("div", "lore-feed-session-items");
     items.hidden = !expanded;
     for (const item of visibleItems) {
@@ -4499,25 +4433,8 @@ function setup(ctx) {
     wrap.appendChild(items);
     return wrap;
   }
-  function renderFeedTimeline(session) {
-    const rail = createElement("div", "lore-feed-session-timeline");
-    rail.setAttribute("aria-hidden", "true");
-    const items = session.items;
-    if (!items.length)
-      return rail;
-    const start = session.startedAt && Number.isFinite(session.startedAt) ? session.startedAt : items[0].timestamp;
-    const endRaw = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : items[items.length - 1].timestamp ?? Date.now();
-    const span = Math.max(endRaw - start, 1);
-    for (const item of items) {
-      const t = typeof item.timestamp === "number" && Number.isFinite(item.timestamp) ? item.timestamp : start;
-      const offset = Math.max(0, Math.min(1, (t - start) / span));
-      const marker = createElement("span", `lore-feed-session-timeline-marker ${getFeedItemTone(item)}`);
-      marker.style.left = `calc(${(offset * 100).toFixed(2)}% - 1.5px)`;
-      const label = item.label || item.kind;
-      marker.title = `${label} · ${formatTimeOnly(t)}`;
-      rail.appendChild(marker);
-    }
-    return rail;
+  function renderFeedSession(session, index) {
+    return renderCompactFeedSession(session, index);
   }
   function renderHealthStrip(state) {
     const diagnostics = state.diagnosticsResults ?? [];
@@ -4554,12 +4471,8 @@ function setup(ctx) {
     const filters = createElement("div", "lore-cluster lore-feed-filters");
     const filterDefs = [
       ["all", "All", null],
-      ["scope", "Scopes", "scope"],
-      ["search", "Search", "feedSearch"],
-      ["manifest", "Manifest", "manifest"],
-      ["reserved", "Reserved", "reserved"],
-      ["pulled", "Pulled", "pulled"],
-      ["injected", "Injected", "injected"],
+      ["entries", "Entries", "injected"],
+      ["steps", "Steps", "manifest"],
       ["issue", "Issues", "issue"]
     ];
     for (const [value, label, iconName] of filterDefs) {
@@ -4578,7 +4491,7 @@ function setup(ctx) {
     const feed = createElement("div", "lore-feed");
     const sessions = state.retrievalFeed?.sessions ?? [];
     if (!sessions.length) {
-      feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch Lore Recall stream scope choice, global search, manifest selection, pulled entries, injection, and fallback events here.", null, "feed"));
+      feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch a compact stream of retrieval activity for this chat.", null, "feed"));
       section.appendChild(feed);
       return section;
     }
