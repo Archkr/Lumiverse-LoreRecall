@@ -5414,7 +5414,7 @@ function setup(ctx) {
         characterDraft[key] = Number.parseInt(String(next), 10) || 0;
       })));
     }
-    form.appendChild(createFieldNote("Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit caps dynamic entries; constant entries are injected separately."));
+    form.appendChild(createFieldNote("Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately."));
     const switches = createElement("div", "lore-field-span");
     const switchRow = createElement("div", "lore-cluster");
     switchRow.style.gap = "20px";
@@ -5424,7 +5424,7 @@ function setup(ctx) {
       characterDraft.selectiveRetrieval = next;
     }));
     switches.appendChild(switchRow);
-    switches.appendChild(createFieldNote("Selective retrieval off injects from the chosen scopes and lets injection-time caps trim the result. Selective retrieval on makes the controller choose the final injected entry IDs from the chosen-scope manifests."));
+    switches.appendChild(createFieldNote("Selective retrieval off injects from the retrieved candidate pool and lets caps trim the result. Selective retrieval on makes the controller choose the exact final entry IDs, including sparse or empty dynamic sets."));
     form.appendChild(switches);
     section.appendChild(form);
     const actions = createElement("div", "lore-actions");
