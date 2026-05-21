@@ -2441,6 +2441,7 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
     hasFullTreeOverview ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index." : "- Choose choiceIds only from the category list shown below.",
     "- Use action navigate when a shown category or document root still needs to be opened before retrieval.",
     "- Use action retrieve to add one or more shown categories to the traversal candidate pool, then continue exploring.",
+    "- Do not use retrieve with empty choiceIds from a broad or root tree frontier; navigate to specific shown categories or search first.",
     '- Use action search to run a global keyword search across all readable managed lorebooks when the shown tree choices do not clearly expose the needed concept. Include a short "query" string when you do this.',
     "- Use action finish when the candidate pool is ready for final manifest selection. Include choiceIds if unretrieved shown categories should be added before finishing.",
     "- Do not pick entries directly from this tree frontier. Exact entry selection happens later after scope retrieval or search.",
@@ -2511,6 +2512,28 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
   const addSearchCandidatesToPool = (candidates) => {
     const candidateScopes = candidates.map((candidate) => getEntryPrimaryScope(candidate.entry)).filter((scope) => !!scope);
     addCandidatesToPool(candidates, candidateScopes);
+  };
+  const isBroadScopeSet = (targetScopes) => targetScopes.some((scope) => {
+    const node = scope.book.tree.nodes[scope.nodeId];
+    if (!node)
+      return false;
+    const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
+    return node.childIds.length > 0 || descendantCount > Math.max(maxDynamicEntries, config.maxResults, 8);
+  });
+  const navigateBroadImplicitRetrieve = (reason, durationMs) => {
+    const nextScopes = chooseDeterministicScopes(scopes, deterministicById, config);
+    if (!nextScopes.length || areSameScopes(scopes, nextScopes))
+      return false;
+    scopes = nextScopes;
+    searchFrontier = null;
+    selectionReason = reason;
+    pushTrace(trace, "navigate", "Avoid broad retrieve", `${reason} The controller requested the current broad scope without choiceIds, so Lore Recall opened ${nextScopes.length} narrower branch(es) instead of pooling the entire scope.`, {
+      bookId: nextScopes[0]?.book.summary.id ?? null,
+      nodeId: nextScopes[0]?.nodeId ?? null,
+      durationMs
+    });
+    steps.push(`Traversal avoided broad current-scope retrieval and opened ${nextScopes.length} narrower branch(es).`);
+    return true;
   };
   const buildFinalCandidateSet = () => {
     const pooled = getCandidatePool();
@@ -2805,6 +2828,51 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
         continue;
       }
       const requestedScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
+      if (choiceIds.length > 0 && !requestedScopes.length) {
+        if (action === "finish" && getCandidatePool().length) {
+          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        }
+        pushTrace(trace, "fallback", "Retrieve resolved no choices", "Traversal controller chose tree choiceIds that did not resolve to any category.");
+        return {
+          scopes,
+          selected: deterministic.slice(0, maxDynamicEntries),
+          candidates: [],
+          manifests: [],
+          retrievedScopes: [],
+          fallbackReason: "Traversal controller chose unknown tree choiceIds, so collapsed retrieval was used instead.",
+          selectionReason,
+          usedSearchFrontier,
+          searchEvents,
+          steps: [...steps, "Collapsed fallback used because traversal tree choiceIds did not resolve."],
+          trace
+        };
+      }
+      const implicitCurrentScopeRetrieve = !requestedScopes.length && choiceIds.length === 0;
+      if (implicitCurrentScopeRetrieve && isBroadScopeSet(scopes)) {
+        if (action === "finish" && getCandidatePool().length) {
+          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        }
+        if (navigateBroadImplicitRetrieve(reason, response.durationMs)) {
+          continue;
+        }
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        }
+        pushTrace(trace, "fallback", "Avoid broad retrieve", "Traversal controller requested the current broad scope without choiceIds, and no narrower branch was available.");
+        return {
+          scopes,
+          selected: deterministic.slice(0, maxDynamicEntries),
+          candidates: [],
+          manifests: [],
+          retrievedScopes: [],
+          fallbackReason: "Traversal controller requested an implicit broad retrieve, so collapsed retrieval was used instead.",
+          selectionReason,
+          usedSearchFrontier,
+          searchEvents,
+          steps: [...steps, "Collapsed fallback used because traversal requested an implicit broad retrieve."],
+          trace
+        };
+      }
       const scopesToRetrieve = requestedScopes.length ? requestedScopes : action === "finish" && getCandidatePool().length ? [] : scopes;
       const selectedCandidates = scopesToRetrieve.length ? collectCandidatesForScopes(queryText, scopesToRetrieve, [], deterministicById, false, excludedEntryIds) : [];
       if (!selectedCandidates.length) {
