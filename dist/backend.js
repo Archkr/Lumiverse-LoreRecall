@@ -1025,6 +1025,8 @@ var RECENT_MESSAGE_LIMIT = 500;
 var MAX_SCOPE_CHOICES = 5;
 var DOCUMENT_CHOICE_PREFIX = "doc:";
 var EMPTY_ENTRY_ID_SET = new Set;
+var DIRECT_MENTION_SEED_LIMIT = 8;
+var SELECTIVE_FALLBACK_LIMIT = 8;
 var SEARCH_STOPWORDS = new Set([
   "about",
   "after",
@@ -1105,6 +1107,35 @@ var SEARCH_STOPWORDS = new Set([
   "would",
   "you",
   "your"
+]);
+var DIRECT_MENTION_STOPWORDS = new Set([
+  ...SEARCH_STOPWORDS,
+  "ability",
+  "abilities",
+  "anomaly",
+  "body",
+  "character",
+  "characters",
+  "classification",
+  "context",
+  "entry",
+  "entries",
+  "event",
+  "events",
+  "lore",
+  "mechanic",
+  "mechanics",
+  "power",
+  "powers",
+  "rule",
+  "rules",
+  "scene",
+  "spirit",
+  "spirits",
+  "system",
+  "systems",
+  "thing",
+  "things"
 ]);
 var RETRIEVAL_SCOPE_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 var RETRIEVAL_BOOK_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only lore book IDs from the provided list. Return only the requested JSON with no commentary or markdown.";
@@ -1363,6 +1394,33 @@ function buildDeterministicSelection(rankedCandidates, maxResults) {
   if (!rankedCandidates.length || maxResults <= 0)
     return [];
   return rankedCandidates.slice(0, maxResults).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+}
+function containsToken(normalizedText, token) {
+  return ` ${normalizedText} `.includes(` ${token} `);
+}
+function entryHasDirectMentionSignal(entry, signals) {
+  const exactPhraseMention = [entry.label, ...entry.aliases].map((value) => normalizeSearchText(value)).filter((value) => value.length >= 3).some((phrase) => countPhraseOccurrences(signals.normalizedConversation, phrase) > 0);
+  if (exactPhraseMention)
+    return true;
+  const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter((token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token));
+  const matchingTokens = mentionTokens.filter((token) => containsToken(signals.normalizedConversation, token));
+  if (!matchingTokens.length)
+    return false;
+  const rawLabel = entry.label.toLowerCase();
+  if (rawLabel.includes("'s") || rawLabel.includes("&"))
+    return false;
+  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token));
+  return matchingTokens.length >= 2 || labelTokens.length <= 3;
+}
+function buildDirectMentionCandidates(recentConversation, candidates, scopes, limit = DIRECT_MENTION_SEED_LIMIT) {
+  if (!candidates.length || limit <= 0)
+    return [];
+  const signals = buildSceneSelectionSignals(recentConversation);
+  return rankSelectionCandidates(recentConversation, candidates, scopes).filter((item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention" || entryHasDirectMentionSignal(item.candidate.entry, signals)).slice(0, limit).map((item) => ({
+    ...item.candidate,
+    reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
+    selectionRole: item.selectionRole === "score_fallback" ? "context_mention" : item.selectionRole
+  }));
 }
 function getDynamicEntryLimit(config, remainingDynamicSlots) {
   if (remainingDynamicSlots <= 0)
@@ -1713,7 +1771,8 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   const clampedFinalEntries = Math.min(candidates.length, Math.max(0, maxFinalEntries));
   if (!clampedFinalEntries)
     return [];
-  const buildScopedFallbackSelection = () => buildDeterministicSelection(rankedCandidates, clampedFinalEntries);
+  const fallbackLimit = config.selectiveRetrieval ? Math.min(clampedFinalEntries, SELECTIVE_FALLBACK_LIMIT) : clampedFinalEntries;
+  const buildScopedFallbackSelection = (limit = fallbackLimit) => buildDeterministicSelection(rankedCandidates, limit);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
   if (!config.selectiveRetrieval || !rankedCandidates.length) {
@@ -1726,11 +1785,13 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
     `Choose up to ${clampedFinalEntries} entryIds from the manifests below.`,
+    "Default to a compact final set: usually 1-6 entries, rarely more than 8. The cap is a maximum, not a target.",
     "Use only entryIds that appear in the manifests.",
     "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
     "It is valid to choose fewer entries than the cap when only a sparse set is useful.",
     "Return an empty entryIds array when none of the listed entries should be injected.",
+    "Do not select every entry in a broad manifest just because the scope is relevant; reject background entries that will not affect the next reply.",
     "",
     buildPromptContext(queryText),
     "",
@@ -1745,31 +1806,57 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   ].join(`
 `);
   const byId = new Map(rankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
+  const parseManifestSelection = (parsedValue) => {
+    const parsedEntryIds = parsedValue?.entryIds;
+    const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
+    const requestedIds = hasExplicitEntryIds ? parsedEntryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
+    const uniqueRequestedIds = uniqueStrings(requestedIds);
+    const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
+    const mappedIds2 = uniqueRequestedIds.filter((id) => byId.has(id));
+    const invalidSelectionReasons2 = [];
+    if (!hasExplicitEntryIds) {
+      invalidSelectionReasons2.push("Controller did not return an entryIds array.");
+    }
+    if (requestedIds.length !== uniqueRequestedIds.length) {
+      invalidSelectionReasons2.push("Controller returned duplicate entry IDs.");
+    }
+    if (unmappedIds.length) {
+      invalidSelectionReasons2.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
+    }
+    if (mappedIds2.length > clampedFinalEntries) {
+      invalidSelectionReasons2.push(`Controller returned ${mappedIds2.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`);
+    }
+    return { mappedIds: mappedIds2, invalidSelectionReasons: invalidSelectionReasons2 };
+  };
   const { parsed } = await runControllerJson2(prompt, controller, RETRIEVAL_MANIFEST_SYSTEM_PROMPT, "Select manifest entries");
-  const parsedEntryIds = parsed?.entryIds;
-  const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
-  const requestedIds = hasExplicitEntryIds ? parsedEntryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-  const uniqueRequestedIds = uniqueStrings(requestedIds);
-  const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
-  const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
-  const invalidSelectionReasons = [];
-  if (!hasExplicitEntryIds) {
-    invalidSelectionReasons.push("Controller did not return an entryIds array.");
-  }
-  if (requestedIds.length !== uniqueRequestedIds.length) {
-    invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
-  }
-  if (unmappedIds.length) {
-    invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
-  }
-  if (mappedIds.length > clampedFinalEntries) {
-    invalidSelectionReasons.push(`Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`);
+  let { mappedIds, invalidSelectionReasons } = parseManifestSelection(parsed);
+  const selectedWholeManifest = !invalidSelectionReasons.length && mappedIds.length >= Math.min(rankedCandidates.length, clampedFinalEntries) && mappedIds.length > Math.min(SELECTIVE_FALLBACK_LIMIT, clampedFinalEntries);
+  if (selectedWholeManifest) {
+    const retryPrompt = [
+      prompt,
+      "",
+      "The previous selection included every available manifest candidate. That is too broad for automatic prompt injection.",
+      'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
+      "Choose a sparse final set only. Usually 1-6 entries is enough; choose 0 if no dynamic entry is truly needed.",
+      "Prioritize direct named entities, currently active characters, and mechanics that directly change the next reply.",
+      "Drop general background, duplicate parent/child coverage, and entries that are only loosely related."
+    ].join(`
+`);
+    const retry = await runControllerJson2(retryPrompt, controller, RETRIEVAL_MANIFEST_SYSTEM_PROMPT, "Retry sparse manifest selection");
+    const retrySelection = parseManifestSelection(retry.parsed);
+    if (!retrySelection.invalidSelectionReasons.length && retrySelection.mappedIds.length < mappedIds.length) {
+      mappedIds = retrySelection.mappedIds;
+      invalidSelectionReasons = [];
+    } else {
+      invalidSelectionReasons.push("Controller selected every manifest entry from a broad candidate pool.");
+      invalidSelectionReasons.push(...retrySelection.invalidSelectionReasons);
+    }
   }
   if (invalidSelectionReasons.length) {
     spindle.log.warn(`Lore Recall manifest selection fell back to deterministic final ranking: ${invalidSelectionReasons.join(" ")}`);
     emitProgress(controller.reportProgress, {
       type: "item",
-      item: createFeedItem("issue", "Manifest selection fell back", `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${clampedFinalEntries}.`, {
+      item: createFeedItem("issue", "Manifest selection fell back", `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${fallbackLimit}.`, {
         phase: "manifest_select",
         tone: "warn",
         details: invalidSelectionReasons
@@ -2404,7 +2491,17 @@ function buildSearchTraversalFrontier(queryText, results, booksById) {
     totalResults: results.length
   };
 }
-function buildTraversalPrompt(queryText, frontier, step, config) {
+function buildCandidatePoolPromptSummary(candidatePool) {
+  if (!candidatePool.length)
+    return ["Accumulated candidate pool: 0 dynamic candidates."];
+  const topCandidates = [...candidatePool].sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, 8);
+  return [
+    `Accumulated candidate pool: ${candidatePool.length} dynamic candidate${candidatePool.length === 1 ? "" : "s"}.`,
+    "Top pooled candidates:",
+    ...topCandidates.map((item) => `- ${item.entry.label} (${item.entry.worldBookName}); score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary || getEntryBody(item.entry), 120)}`)
+  ];
+}
+function buildTraversalPrompt(queryText, frontier, step, config, candidatePool = []) {
   if (frontier.mode === "search") {
     return [
       "You are a retrieval assistant for a global lore search frontier.",
@@ -2416,6 +2513,7 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
       "- Use action retrieve to add one or more shown entry results to the traversal candidate pool, then continue exploring.",
       '- Use action search to replace the current search frontier with a new global keyword search across all readable managed lorebooks. Include a short "query" string when you do this.',
       "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
+      "- The candidate pool is additive. Retrieve only missing context; finish once the pool contains enough candidates for final entry selection.",
       "- Pick 1-5 choiceIds maximum when using retrieve.",
       "- Do not invent new choiceIds or entry IDs.",
       `- Stay within ${config.traversalStepLimit} total steps.`,
@@ -2424,6 +2522,8 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
       `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
       `Current frontier: global search${frontier.searchQuery ? ` for "${frontier.searchQuery}"` : ""}`,
       `Global matches available: ${frontier.totalResults ?? frontier.searchResults.length}`,
+      "",
+      ...buildCandidatePoolPromptSummary(candidatePool),
       "",
       "Search result choices:",
       ...frontier.searchResults.length ? frontier.searchResults.map((result) => `- choiceId=${result.choiceId}; label=${result.entry.entry.label}; book=${result.entry.entry.worldBookName}; breadcrumb=${result.breadcrumb}; score=${result.entry.score.toFixed(2)}; reasons=${result.entry.reasons.join(", ")}; summary=${result.summary}; preview=${result.preview}`) : ["- none"]
@@ -2442,6 +2542,8 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
     "- Use action navigate when a shown category or document root still needs to be opened before retrieval.",
     "- Use action retrieve to add one or more shown categories to the traversal candidate pool, then continue exploring.",
     "- Do not use retrieve with empty choiceIds from a broad or root tree frontier; navigate to specific shown categories or search first.",
+    "- Use retrieve on broad parent categories only when you truly need a manifest from the whole branch; otherwise navigate to specific child categories.",
+    "- The candidate pool is additive. Avoid retrieving child scopes that are already covered by a retrieved parent unless they add missing specificity.",
     '- Use action search to run a global keyword search across all readable managed lorebooks when the shown tree choices do not clearly expose the needed concept. Include a short "query" string when you do this.',
     "- Use action finish when the candidate pool is ready for final manifest selection. Include choiceIds if unretrieved shown categories should be added before finishing.",
     "- Do not pick entries directly from this tree frontier. Exact entry selection happens later after scope retrieval or search.",
@@ -2453,6 +2555,8 @@ function buildTraversalPrompt(queryText, frontier, step, config) {
     buildPromptContext(queryText),
     `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
+    "",
+    ...buildCandidatePoolPromptSummary(candidatePool),
     "",
     hasFullTreeOverview ? "Full tree index:" : "Category choices:",
     ...hasFullTreeOverview ? [frontier.fullTreeOverview] : frontier.categories.length ? frontier.categories.map((category) => `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"]
@@ -2601,6 +2705,12 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
       trace
     };
   }
+  const directMentionCandidates = buildDirectMentionCandidates(queryText, deterministic, scopes, Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries));
+  if (allowController && directMentionCandidates.length) {
+    addSearchCandidatesToPool(directMentionCandidates);
+    pushTrace(trace, "retrieve", "Seed direct mentions", `Seeded ${directMentionCandidates.length} direct mention candidate(s) into the traversal pool for final model selection.`, { entryCount: directMentionCandidates.length });
+    steps.push(`Traversal seeded ${directMentionCandidates.length} direct mention candidate(s) as selectable manifest options.`);
+  }
   if (!allowController) {
     const fallbackSelection = await selectEntriesForScopes(queryText, scopes, config, controller, false, deterministicById, trace, maxDynamicEntries, excludedEntryIds);
     pushTrace(trace, "fallback", "Traversal controller skipped", "Fast preview mode skipped traversal controller selection and used deterministic fallback results.", { entryCount: fallbackSelection.selected.length });
@@ -2665,7 +2775,7 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
         trace
       };
     }
-    const response = await runControllerJson2(buildTraversalPrompt(activeSelectionQuery, frontier, step, config), controller, RETRIEVAL_TRAVERSAL_SYSTEM_PROMPT, "Traverse retrieval tree");
+    const response = await runControllerJson2(buildTraversalPrompt(activeSelectionQuery, frontier, step, config, getCandidatePool()), controller, RETRIEVAL_TRAVERSAL_SYSTEM_PROMPT, "Traverse retrieval tree");
     const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
     if (!response.parsed) {
       if (getCandidatePool().length) {
