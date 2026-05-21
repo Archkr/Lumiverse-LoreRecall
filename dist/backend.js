@@ -1390,7 +1390,7 @@ function buildDirectMentionCandidates(recentConversation, candidates, scopes, li
   return rankSelectionCandidates(recentConversation, candidates, scopes).filter((item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention" || entryHasDirectMentionSignal(item.candidate.entry, signals)).slice(0, limit).map((item) => ({
     ...item.candidate,
     reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
-    selectionRole: item.selectionRole === "score_fallback" ? "context_mention" : item.selectionRole
+    selectionRole: item.selectionRole === "recent_mention" ? "recent_mention" : "context_mention"
   }));
 }
 function getDynamicEntryLimit(config, remainingDynamicSlots) {
@@ -1430,7 +1430,7 @@ function summarizeSelection(selection, reservedConstantCount = 0, remainingDynam
   if (mentionCount > 0) {
     return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
   }
-  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
+  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from final manifest selection.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
 }
 function getEntryBody(entry) {
   const collapsed = entry.collapsedText.trim();
@@ -2662,7 +2662,7 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
     }
     const selected = config.selectiveRetrieval ? await maybeSelectEntries(queryText, manifestCandidates, config, controller, allowController, finalScopes, maxDynamicEntries) : manifestCandidates;
     pushTrace(trace, "finish", label, `${reason} Exploration accumulated ${pooledCandidates.length} dynamic candidate(s) across ${Math.max(finalScopes.length, 1)} retrieved scope(s).`, { entryCount: pooledCandidates.length, durationMs });
-    pushTrace(trace, "manifest_select", "Select accumulated entries", `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled candidate(s).`, { entryCount: selected.length });
+    pushTrace(trace, "manifest_select", "Select accumulated entries", `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled or hinted candidate(s).`, { entryCount: selected.length });
     return {
       scopes: finalScopes.length ? finalScopes : scopes,
       selected,
@@ -3276,7 +3276,7 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   if (config.selectiveRetrieval || manifests.length) {
     emitProgress(reportProgress, {
       type: "item",
-      item: createFeedItem("manifest", "Manifest selection", usedSearchFrontier ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} pooled candidate${pulledNodes.length === 1 ? "" : "s"}, including search contribution(s).` : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} scoped manifest entr${pulledNodes.length === 1 ? "y" : "ies"}.`, {
+      item: createFeedItem("manifest", "Manifest selection", usedSearchFrontier ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal and search manifest selection.` : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal manifest selection.`, {
         phase: "manifest_select",
         count: manifestSelectedEntries.length,
         scopes: selectedScopePreviews,

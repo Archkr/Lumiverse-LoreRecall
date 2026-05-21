@@ -743,7 +743,7 @@ function buildDirectMentionCandidates(
     .map((item) => ({
       ...item.candidate,
       reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
-      selectionRole: item.selectionRole === "score_fallback" ? "context_mention" : item.selectionRole,
+      selectionRole: item.selectionRole === "recent_mention" ? "recent_mention" : "context_mention",
     }));
 }
 
@@ -801,7 +801,7 @@ function summarizeSelection(
       (match) => match.toUpperCase(),
     );
   }
-  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(
+  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from final manifest selection.${freeSuffix}`.replace(
     /^f/,
     (match) => match.toUpperCase(),
   );
@@ -2798,7 +2798,7 @@ async function selectTraversalEntries(
       trace,
       "manifest_select",
       "Select accumulated entries",
-      `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled candidate(s).`,
+      `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled or hinted candidate(s).`,
       { entryCount: selected.length },
     );
 
@@ -3620,8 +3620,8 @@ export async function buildRetrievalPreview(
         "manifest",
         "Manifest selection",
         usedSearchFrontier
-          ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} pooled candidate${pulledNodes.length === 1 ? "" : "s"}, including search contribution(s).`
-          : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} scoped manifest entr${pulledNodes.length === 1 ? "y" : "ies"}.`,
+          ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal and search manifest selection.`
+          : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal manifest selection.`,
         {
           phase: "manifest_select",
           count: manifestSelectedEntries.length,
