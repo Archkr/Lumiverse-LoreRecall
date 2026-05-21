@@ -1242,12 +1242,12 @@ async function maybeSelectEntries(
   }
 
   const prompt = [
-    "Select the exact lore entries that should be injected as the final set from the retrieved manifests and candidate hints.",
+    "Select the exact lore entries that should be injected as the final set from the retrieved manifests and accumulated candidate pool.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
     `Choose up to ${clampedFinalEntries} entryIds from the candidates below.`,
     "Default to a compact final set: usually 1-6 entries, rarely more than 8. The cap is a maximum, not a target.",
     "Use only entryIds that appear below.",
-    "The retrieved scopes are already the traversal decision. Additional candidates are direct mention hints, not forced injections.",
+    "The retrieved scopes are already the traversal decision. Additional candidates are pooled entries not represented in a scope manifest, not forced injections.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
     "It is valid to choose fewer entries than the cap when only a sparse set is useful.",
     "Return an empty entryIds array when none of the listed entries should be injected.",
@@ -2732,19 +2732,14 @@ async function selectTraversalEntries(
   const buildFinalCandidateSet = (): ScoredEntry[] => {
     const pooled = getCandidatePool();
     if (!pooled.length) return [];
-    const combinedById = new Map(pooled.map((item) => [item.entry.entryId, item]));
     const directMentionCandidates = buildDirectMentionCandidates(
       queryText,
-      deterministic,
-      [],
+      pooled,
+      retrievedScopes,
       Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries),
     );
-    for (const candidate of directMentionCandidates) {
-      if (!combinedById.has(candidate.entry.entryId)) {
-        combinedById.set(candidate.entry.entryId, candidate);
-      }
-    }
-    const combined = Array.from(combinedById.values());
+    const directMentionById = new Map(directMentionCandidates.map((item) => [item.entry.entryId, item]));
+    const combined = pooled.map((item) => directMentionById.get(item.entry.entryId) ?? item);
     const ranked = rankSelectionCandidates(queryText, combined, retrievedScopes);
     const limit = Math.min(maxDynamicEntries, combined.length);
     return buildDeterministicSelection(ranked, limit);
@@ -2798,7 +2793,7 @@ async function selectTraversalEntries(
       trace,
       "manifest_select",
       "Select accumulated entries",
-      `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled or hinted candidate(s).`,
+      `Final manifest selection kept ${selected.length} dynamic entry candidate(s) from ${manifestCandidates.length} pooled candidate(s).`,
       { entryCount: selected.length },
     );
 
