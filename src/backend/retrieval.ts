@@ -155,7 +155,7 @@ const TRAVERSAL_CATEGORY_LIMIT = 24;
 const TRAVERSAL_SEARCH_LIMIT = 18;
 const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
 const RECENT_MESSAGE_LIMIT = 700;
-const RECENT_SCENE_MESSAGE_LIMIT = 2500;
+const RECENT_SCENE_MESSAGE_LIMIT = 6000;
 const SCENE_MESSAGE_LOOKBACK = 4;
 const MAX_SCOPE_CHOICES = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
@@ -408,6 +408,17 @@ function findUserProtocolCutIndex(value: string): number {
     /###\s*active\s+personality\s+matrix/i,
     /private\s+workspace/i,
     /the\s+human\s+never\s+sees/i,
+    /\[narrative/i,
+    /\[emotional/i,
+    /\[strict/i,
+    /treat\s+.+?\s+as a black box/i,
+    /^you represent\b/im,
+    /^the moment\b/im,
+    /^you are forbidden\b/im,
+    /^characters will not\b/im,
+    /^no character may\b/im,
+    /^emotional shifts require\b/im,
+    /^unreciprocated attraction\b/im,
   ];
 
   let cutIndex = -1;
@@ -550,7 +561,7 @@ function buildSceneSelectionSignals(recentConversation: string): SceneSelectionS
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const latestExchange = normalizeSearchText(lines.slice(-2).join(" "));
+  const latestExchange = normalizeSearchText(lines.slice(-SCENE_MESSAGE_LOOKBACK).join(" "));
   const normalizedConversation = normalizeSearchText(lines.join(" "));
   return {
     normalizedConversation,
@@ -2374,8 +2385,11 @@ async function selectEntriesForScopes(
     const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
     const supportCandidates = candidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
     const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length);
+    const supportSelectionLimit = config.selectiveRetrieval
+      ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
+      : remainingSupportSlots;
     const supportSelected =
-      remainingSupportSlots > 0
+      supportSelectionLimit > 0
         ? await maybeSelectEntries(
             recentConversation,
             supportCandidates,
@@ -2383,7 +2397,7 @@ async function selectEntriesForScopes(
             controller,
             allowController,
             activeScopes,
-            remainingSupportSlots,
+            supportSelectionLimit,
           )
         : [];
     selected = [...rankedSceneAnchors, ...supportSelected].slice(0, maxDynamicEntries);
@@ -2750,6 +2764,13 @@ async function selectTraversalEntries(
   let retrievedScopes: TraversalScope[] = [];
 
   const getCandidatePool = (): ScoredEntry[] => Array.from(candidatePoolById.values());
+  const getCollapsedFallbackSelection = (): ScoredEntry[] => {
+    const limit = config.selectiveRetrieval ? Math.min(maxDynamicEntries, SELECTIVE_FALLBACK_LIMIT) : maxDynamicEntries;
+    return buildDeterministicSelection(
+      rankSelectionCandidates(queryText, deterministic, retrievedScopes.length ? retrievedScopes : scopes),
+      limit,
+    );
+  };
 
   const mergeCandidate = (candidate: ScoredEntry): void => {
     const existing = candidatePoolById.get(candidate.entry.entryId);
@@ -2785,6 +2806,17 @@ async function selectTraversalEntries(
       .map((candidate) => getEntryPrimaryScope(candidate.entry))
       .filter((scope): scope is TraversalScope => !!scope);
     addCandidatesToPool(candidates, candidateScopes);
+  };
+
+  const resolveDirectEntryChoices = (choiceIds: string[]): ScoredEntry[] => {
+    const byId = new Map(deterministicById);
+    for (const [entryId, candidate] of candidatePoolById) byId.set(entryId, candidate);
+    const entryIds = uniqueStrings(
+      choiceIds
+        .map((choiceId) => parseEntryChoiceId(choiceId) ?? choiceId)
+        .filter((entryId) => byId.has(entryId)),
+    );
+    return collectEntriesByIds(entryIds, byId);
   };
 
   const seedSceneAnchors = (): void => {
@@ -2902,8 +2934,11 @@ async function selectTraversalEntries(
     }
 
     const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length);
+    const supportSelectionLimit = config.selectiveRetrieval
+      ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
+      : remainingSupportSlots;
     const selectedSupport =
-      config.selectiveRetrieval && remainingSupportSlots > 0
+      config.selectiveRetrieval && supportSelectionLimit > 0
         ? await maybeSelectEntries(
             queryText,
             supportManifestCandidates,
@@ -2911,11 +2946,11 @@ async function selectTraversalEntries(
             controller,
             allowController,
             finalScopes,
-            remainingSupportSlots,
+            supportSelectionLimit,
           )
         : config.selectiveRetrieval
           ? []
-          : supportManifestCandidates.slice(0, remainingSupportSlots);
+          : supportManifestCandidates.slice(0, supportSelectionLimit);
     const selected = [...rankedSceneAnchors, ...selectedSupport].slice(0, maxDynamicEntries);
     const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
     const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} scene anchor(s)` : "";
@@ -3028,7 +3063,7 @@ async function selectTraversalEntries(
         pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3059,7 +3094,7 @@ async function selectTraversalEntries(
       pushTrace(trace, "fallback", "Empty search frontier", "Global search did not expose any frontier choices, so collapsed retrieval was used.");
       return {
         scopes,
-        selected: deterministic.slice(0, maxDynamicEntries),
+        selected: getCollapsedFallbackSelection(),
         candidates: [],
         manifests: [],
         retrievedScopes: [],
@@ -3086,7 +3121,7 @@ async function selectTraversalEntries(
       pushTrace(trace, "fallback", "Controller failed", fallbackReason);
       return {
         scopes,
-        selected: deterministic.slice(0, maxDynamicEntries),
+        selected: getCollapsedFallbackSelection(),
         candidates: [],
         manifests: [],
         retrievedScopes: [],
@@ -3118,7 +3153,7 @@ async function selectTraversalEntries(
         pushTrace(trace, "fallback", "Invalid navigate", "Controller tried to navigate from a search-result frontier.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3139,7 +3174,7 @@ async function selectTraversalEntries(
         pushTrace(trace, "fallback", "Invalid navigate", "Controller picked no valid traversal branches.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3182,7 +3217,7 @@ async function selectTraversalEntries(
         pushTrace(trace, "fallback", "Search found nothing", `Search "${searchQuery}" found no global traversal matches.`);
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3245,13 +3280,17 @@ async function selectTraversalEntries(
           ? collectEntriesByIds(requestedEntryIds, frontierById)
           : searchFrontier?.results ?? [];
         if (!selectedCandidates.length) {
-          if (action === "finish" && getCandidatePool().length) {
-            return finalizeAccumulatedSelection(reason, "Finish global search", response.durationMs);
+          if (getCandidatePool().length) {
+            return finalizeAccumulatedSelection(
+              `${reason} Search-result choices did not resolve after accumulating candidates.`,
+              "Finish global search",
+              response.durationMs,
+            );
           }
           pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal search frontier did not resolve any entry results.");
           return {
             scopes,
-            selected: deterministic.slice(0, maxDynamicEntries),
+            selected: getCollapsedFallbackSelection(),
             candidates: [],
             manifests: [],
             retrievedScopes: [],
@@ -3285,13 +3324,33 @@ async function selectTraversalEntries(
 
       const requestedScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
       if (choiceIds.length > 0 && !requestedScopes.length) {
-        if (action === "finish" && getCandidatePool().length) {
-          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
+        if (directChoiceCandidates.length) {
+          addSearchCandidatesToPool(directChoiceCandidates);
+          pushTrace(
+            trace,
+            "retrieve",
+            "Recover direct entry choices",
+            `${reason} The controller returned entry IDs while on a tree frontier, so Lore Recall recovered ${directChoiceCandidates.length} matching entry candidate(s) instead of falling back.`,
+            { entryCount: directChoiceCandidates.length, durationMs: response.durationMs },
+          );
+          steps.push(`Traversal recovered ${directChoiceCandidates.length} direct entry candidate(s) from tree-frontier choiceIds.`);
+          if (action === "finish") {
+            return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+          }
+          continue;
+        }
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(
+            `${reason} Tree choiceIds did not resolve after accumulating candidates.`,
+            "Finish traversal",
+            response.durationMs,
+          );
         }
         pushTrace(trace, "fallback", "Retrieve resolved no choices", "Traversal controller chose tree choiceIds that did not resolve to any category.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3317,7 +3376,7 @@ async function selectTraversalEntries(
         pushTrace(trace, "fallback", "Avoid broad retrieve", "Traversal controller requested the current broad scope without choiceIds, and no narrower branch was available.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3340,13 +3399,17 @@ async function selectTraversalEntries(
         : [];
 
       if (!selectedCandidates.length) {
-        if (action === "finish" && getCandidatePool().length) {
-          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(
+            `${reason} Selected tree choices resolved no new entries after accumulating candidates.`,
+            "Finish traversal",
+            response.durationMs,
+          );
         }
         pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal did not resolve any entries from the selected choices.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -3384,7 +3447,7 @@ async function selectTraversalEntries(
     pushTrace(trace, "fallback", "Unknown action", `Traversal controller returned unsupported action "${action || "empty"}".`);
     return {
       scopes,
-      selected: deterministic.slice(0, maxDynamicEntries),
+      selected: getCollapsedFallbackSelection(),
       candidates: [],
       manifests: [],
       retrievedScopes: [],
@@ -3408,7 +3471,7 @@ async function selectTraversalEntries(
   pushTrace(trace, "fallback", "Step limit reached", `Traversal hit the ${config.traversalStepLimit}-step limit and fell back to collapsed retrieval.`);
   return {
     scopes,
-    selected: deterministic.slice(0, maxDynamicEntries),
+    selected: getCollapsedFallbackSelection(),
     candidates: [],
     manifests: [],
     retrievedScopes: [],
