@@ -1746,6 +1746,8 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
   const buildScopedFallbackSelection = (limit = fallbackLimit) => buildDeterministicSelection(rankedCandidates, limit);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
+  const manifestedIds = new Set(manifests.flatMap((manifest) => manifest.candidates.map((item) => item.entry.entryId)));
+  const additionalCandidates = rankedCandidates.filter((item) => !manifestedIds.has(item.candidate.entry.entryId));
   if (!config.selectiveRetrieval || !rankedCandidates.length) {
     return buildScopedFallbackSelection();
   }
@@ -1753,12 +1755,12 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     return buildScopedFallbackSelection();
   }
   const prompt = [
-    "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
+    "Select the exact lore entries that should be injected as the final set from the retrieved manifests and candidate hints.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${clampedFinalEntries} entryIds from the manifests below.`,
+    `Choose up to ${clampedFinalEntries} entryIds from the candidates below.`,
     "Default to a compact final set: usually 1-6 entries, rarely more than 8. The cap is a maximum, not a target.",
-    "Use only entryIds that appear in the manifests.",
-    "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
+    "Use only entryIds that appear below.",
+    "The retrieved scopes are already the traversal decision. Additional candidates are direct mention hints, not forced injections.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
     "It is valid to choose fewer entries than the cap when only a sparse set is useful.",
     "Return an empty entryIds array when none of the listed entries should be injected.",
@@ -1773,7 +1775,12 @@ async function maybeSelectEntries(queryText, candidates, config, controller, all
     ...manifests.length ? manifests.flatMap((manifest) => [
       `Scope: ${manifest.scope.book.summary.name} :: ${getScopeBreadcrumb(manifest.scope.book, manifest.scope.nodeId)} (${manifest.candidates.length} entries)`,
       ...manifest.candidates.map((item) => `- entryId=${item.entry.entryId}; signal=${item.selectionRole ?? "score_fallback"}; label=${item.entry.label}; score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
-    ]) : rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
+    ]) : [],
+    ...additionalCandidates.length ? [
+      "",
+      "Additional candidate entries:",
+      ...additionalCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
+    ] : !manifests.length ? rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`) : []
   ].join(`
 `);
   const byId = new Map(rankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
@@ -1890,19 +1897,25 @@ function resolveTraversalChoiceScopes(choiceIds, booksById) {
   for (const choiceId of choiceIds) {
     const categoryChoice = parseCategoryChoiceId(choiceId);
     if (categoryChoice) {
-      const book2 = booksById.get(categoryChoice.bookId);
-      if (book2 && book2.tree.nodes[categoryChoice.nodeId]) {
-        scopes.set(`${book2.summary.id}:${categoryChoice.nodeId}`, { book: book2, nodeId: categoryChoice.nodeId });
+      const book = booksById.get(categoryChoice.bookId);
+      if (book && book.tree.nodes[categoryChoice.nodeId]) {
+        scopes.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
       }
       continue;
     }
     const documentBookId = parseDocumentChoiceId(choiceId);
-    if (!documentBookId)
+    if (documentBookId) {
+      const book = booksById.get(documentBookId);
+      if (!book)
+        continue;
+      scopes.set(`${book.summary.id}:${book.tree.rootId}`, { book, nodeId: book.tree.rootId });
       continue;
-    const book = booksById.get(documentBookId);
-    if (!book)
-      continue;
-    scopes.set(`${book.summary.id}:${book.tree.rootId}`, { book, nodeId: book.tree.rootId });
+    }
+    for (const book of booksById.values()) {
+      if (!book.tree.nodes[choiceId])
+        continue;
+      scopes.set(`${book.summary.id}:${choiceId}`, { book, nodeId: choiceId });
+    }
   }
   return Array.from(scopes.values());
 }
@@ -2614,8 +2627,16 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
     const pooled = getCandidatePool();
     if (!pooled.length)
       return [];
-    const ranked = rankSelectionCandidates(queryText, pooled, retrievedScopes);
-    const limit = Math.min(maxDynamicEntries, pooled.length);
+    const combinedById = new Map(pooled.map((item) => [item.entry.entryId, item]));
+    const directMentionCandidates = buildDirectMentionCandidates(queryText, deterministic, [], Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries));
+    for (const candidate of directMentionCandidates) {
+      if (!combinedById.has(candidate.entry.entryId)) {
+        combinedById.set(candidate.entry.entryId, candidate);
+      }
+    }
+    const combined = Array.from(combinedById.values());
+    const ranked = rankSelectionCandidates(queryText, combined, retrievedScopes);
+    const limit = Math.min(maxDynamicEntries, combined.length);
     return buildDeterministicSelection(ranked, limit);
   };
   const finalizeAccumulatedSelection = async (reason, label, durationMs) => {
@@ -2675,12 +2696,6 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
       steps: ["No traversal candidates scored above zero."],
       trace
     };
-  }
-  const directMentionCandidates = buildDirectMentionCandidates(queryText, deterministic, scopes, Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries));
-  if (allowController && directMentionCandidates.length) {
-    addSearchCandidatesToPool(directMentionCandidates);
-    pushTrace(trace, "retrieve", "Seed direct mentions", `Seeded ${directMentionCandidates.length} direct mention candidate(s) into the traversal pool for final model selection.`, { entryCount: directMentionCandidates.length });
-    steps.push(`Traversal seeded ${directMentionCandidates.length} direct mention candidate(s) as selectable manifest options.`);
   }
   if (!allowController) {
     const fallbackSelection = await selectEntriesForScopes(queryText, scopes, config, controller, false, deterministicById, trace, maxDynamicEntries, excludedEntryIds);
