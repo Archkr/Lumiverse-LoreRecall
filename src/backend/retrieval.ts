@@ -241,36 +241,6 @@ const SEARCH_STOPWORDS = new Set([
   "you",
   "your",
 ]);
-const DIRECT_MENTION_STOPWORDS = new Set([
-  ...SEARCH_STOPWORDS,
-  "ability",
-  "abilities",
-  "anomaly",
-  "body",
-  "character",
-  "characters",
-  "classification",
-  "context",
-  "entry",
-  "entries",
-  "event",
-  "events",
-  "lore",
-  "mechanic",
-  "mechanics",
-  "power",
-  "powers",
-  "rule",
-  "rules",
-  "scene",
-  "spirit",
-  "spirits",
-  "system",
-  "systems",
-  "thing",
-  "things",
-]);
-
 const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
   "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 const RETRIEVAL_BOOK_SYSTEM_PROMPT =
@@ -742,7 +712,7 @@ function entryHasDirectMentionSignal(
   if (exactPhraseMention) return true;
 
   const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter(
-    (token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token),
+    (token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token),
   );
   const matchingTokens = mentionTokens.filter((token) => containsToken(signals.normalizedConversation, token));
   if (!matchingTokens.length) return false;
@@ -750,7 +720,7 @@ function entryHasDirectMentionSignal(
   const rawLabel = entry.label.toLowerCase();
   if (rawLabel.includes("'s") || rawLabel.includes("&")) return false;
 
-  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token));
+  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
   return matchingTokens.length >= 2 || labelTokens.length <= 3;
 }
 

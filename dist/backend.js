@@ -1108,35 +1108,6 @@ var SEARCH_STOPWORDS = new Set([
   "you",
   "your"
 ]);
-var DIRECT_MENTION_STOPWORDS = new Set([
-  ...SEARCH_STOPWORDS,
-  "ability",
-  "abilities",
-  "anomaly",
-  "body",
-  "character",
-  "characters",
-  "classification",
-  "context",
-  "entry",
-  "entries",
-  "event",
-  "events",
-  "lore",
-  "mechanic",
-  "mechanics",
-  "power",
-  "powers",
-  "rule",
-  "rules",
-  "scene",
-  "spirit",
-  "spirits",
-  "system",
-  "systems",
-  "thing",
-  "things"
-]);
 var RETRIEVAL_SCOPE_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 var RETRIEVAL_BOOK_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only lore book IDs from the provided list. Return only the requested JSON with no commentary or markdown.";
 var RETRIEVAL_MANIFEST_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only entry IDs from the provided scoped manifests. Return only the requested JSON with no commentary or markdown.";
@@ -1402,14 +1373,14 @@ function entryHasDirectMentionSignal(entry, signals) {
   const exactPhraseMention = [entry.label, ...entry.aliases].map((value) => normalizeSearchText(value)).filter((value) => value.length >= 3).some((phrase) => countPhraseOccurrences(signals.normalizedConversation, phrase) > 0);
   if (exactPhraseMention)
     return true;
-  const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter((token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token));
+  const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
   const matchingTokens = mentionTokens.filter((token) => containsToken(signals.normalizedConversation, token));
   if (!matchingTokens.length)
     return false;
   const rawLabel = entry.label.toLowerCase();
   if (rawLabel.includes("'s") || rawLabel.includes("&"))
     return false;
-  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !DIRECT_MENTION_STOPWORDS.has(token));
+  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
   return matchingTokens.length >= 2 || labelTokens.length <= 3;
 }
 function buildDirectMentionCandidates(recentConversation, candidates, scopes, limit = DIRECT_MENTION_SEED_LIMIT) {
