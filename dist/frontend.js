@@ -1959,6 +1959,13 @@ var LORE_RECALL_CSS = `
   gap: 0;
   padding: 0;
   overflow: hidden;
+  border-color: color-mix(in srgb, var(--lr-lore) 18%, var(--lr-line));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lr-lore) 5%, transparent), transparent 110px),
+    var(--lr-bg-panel);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 .lore-feed-panel-header {
@@ -1966,9 +1973,11 @@ var LORE_RECALL_CSS = `
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 11px 14px 10px;
   border-bottom: 1px solid var(--lr-line);
-  background: color-mix(in srgb, var(--lr-bg-page) 32%, transparent);
+  background:
+    radial-gradient(circle at 16px 0, color-mix(in srgb, var(--lr-lore) 16%, transparent), transparent 90px),
+    color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
 }
 
 .lore-feed-panel-title {
@@ -2037,7 +2046,7 @@ var LORE_RECALL_CSS = `
   gap: 2px;
   padding: 6px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--lr-line) 70%, transparent);
-  background: color-mix(in srgb, var(--lr-bg-page) 22%, transparent);
+  background: color-mix(in srgb, var(--lr-bg-page) 30%, transparent);
 }
 
 .lore-feed-tab {
@@ -2060,8 +2069,9 @@ var LORE_RECALL_CSS = `
 
 .lore-feed-tab.active {
   color: var(--lr-lore);
-  background: color-mix(in srgb, var(--lr-lore) 14%, transparent);
+  background: color-mix(in srgb, var(--lr-lore) 13%, transparent);
   font-weight: 700;
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--lr-lore) 55%, transparent);
 }
 
 .lore-feed {
@@ -2071,7 +2081,9 @@ var LORE_RECALL_CSS = `
 .lore-feed-stream {
   max-height: 390px;
   overflow-y: auto;
-  background: color-mix(in srgb, var(--lr-bg-panel) 82%, var(--lr-bg-page));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--lr-lore) 4%, transparent), transparent 90px),
+    color-mix(in srgb, var(--lr-bg-panel) 82%, var(--lr-bg-page));
 }
 
 .lore-feed-session-marker {
@@ -2124,10 +2136,10 @@ var LORE_RECALL_CSS = `
 
 .lore-feed-item {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: flex-start;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: 10px;
+  padding: 8px 11px 9px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--lr-line) 58%, transparent);
   border-left: 2px solid transparent;
   box-shadow: none;
@@ -2176,7 +2188,9 @@ var LORE_RECALL_CSS = `
 .lore-feed-item.success .lore-feed-item-icon { color: var(--lr-good); }
 
 .lore-feed-item-body {
-  gap: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -2201,26 +2215,133 @@ var LORE_RECALL_CSS = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--lr-muted);
-  font-size: 11.5px;
+  color: color-mix(in srgb, var(--lr-text) 78%, var(--lr-muted));
+  font-size: 12px;
   line-height: 1.35;
 }
 
-.lore-feed-item-time {
-  padding-top: 2px;
+.lore-feed-item-meta {
   color: var(--lr-dim);
-  font-size: 9.5px;
-  opacity: 0.85;
-}
-
-.lore-feed-chip-row {
-  flex-wrap: nowrap;
-  gap: 3px;
+  font-family: var(--lr-font-mono);
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.lore-feed-chip-row .lore-tag {
-  max-width: 118px;
+.lore-feed-item-details {
+  min-width: 0;
+}
+
+.lore-feed-item-details-summary {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 12px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  cursor: pointer;
+  color: var(--lr-lore);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.lore-feed-item-details-summary::-webkit-details-marker {
+  display: none;
+}
+
+.lore-feed-item-details-caret {
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--lr-lore) 78%, var(--lr-muted));
+  transition: transform var(--lr-t);
+}
+
+.lore-feed-item-details-caret svg {
+  width: 11px;
+  height: 11px;
+}
+
+.lore-feed-item-details[open] .lore-feed-item-details-caret {
+  transform: rotate(90deg);
+}
+
+.lore-feed-item-details-label {
+  white-space: nowrap;
+}
+
+.lore-feed-item-details-meta {
+  justify-self: end;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.lore-feed-item-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 245px;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--lr-lore) 18%, var(--lr-line));
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lr-bg-page) 46%, transparent), transparent),
+    color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
+}
+
+.lore-feed-detail-item,
+.lore-feed-detail-note {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lr-bg-panel) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lr-line) 72%, transparent);
+}
+
+.lore-feed-detail-item-title {
+  color: var(--lr-text);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.lore-feed-detail-item-meta {
+  color: var(--lr-dim);
+  font-family: var(--lr-font-mono);
+  font-size: 9.75px;
+  line-height: 1.35;
+}
+
+.lore-feed-detail-item-preview,
+.lore-feed-detail-note {
+  color: var(--lr-muted);
+  font-size: 10.75px;
+  line-height: 1.4;
+}
+
+.lore-feed-detail-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.lore-feed-detail-reasons .lore-tag {
+  max-width: 145px;
   padding: 1px 5px;
   border-radius: 4px;
   overflow: hidden;
@@ -4368,25 +4489,92 @@ function setup(ctx) {
     const end = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : Date.now();
     return Math.max(0, end - session.startedAt);
   }
-  function createFeedItemChips(item) {
-    const chips = createElement("div", "lore-feed-chip-row");
-    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
-      chips.appendChild(createTag(formatDurationShort(item.durationMs)));
+  function formatSelectionRoleLabel(role) {
+    if (!role)
+      return "entry";
+    const labels = {
+      recent_mention: "recent mention",
+      context_mention: "context mention",
+      label_match: "label match",
+      alias_match: "alias match",
+      keyword_match: "keyword match",
+      branch_match: "branch match",
+      content_match: "content match",
+      score_fallback: "score fallback"
+    };
+    return labels[role] ?? role.replace(/_/g, " ");
+  }
+  function getFeedItemMetaText(item) {
+    const parts = [];
+    const duration = formatDurationShort(item.durationMs);
+    if (duration)
+      parts.push(duration);
+    if (item.kind === "search" && item.searchQuery)
+      parts.push(`q: ${clipText(item.searchQuery, 32)}`);
+    parts.push(formatTimeOnly(item.timestamp));
+    return parts.join(" / ");
+  }
+  function getFeedDetailLabel(item) {
+    const entryCount = item.entries?.length ?? 0;
+    if (entryCount)
+      return `View ${entryCount} entr${entryCount === 1 ? "y" : "ies"}`;
+    const scopeCount = item.scopes?.length ?? 0;
+    if (scopeCount)
+      return `View ${scopeCount} scope${scopeCount === 1 ? "" : "s"}`;
+    const noteCount = item.details?.length ?? 0;
+    if (noteCount)
+      return `View ${noteCount} note${noteCount === 1 ? "" : "s"}`;
+    return null;
+  }
+  function renderFeedEntryDetail(entry) {
+    const row = createElement("div", "lore-feed-detail-item");
+    const title = createElement("div", "lore-feed-detail-item-title", entry.label);
+    const meta = [
+      entry.worldBookName,
+      entry.breadcrumb || "Root",
+      formatSelectionRoleLabel(entry.selectionRole)
+    ].filter(Boolean);
+    row.append(title, createElement("div", "lore-feed-detail-item-meta", meta.join(" / ")));
+    if (entry.previewText?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(entry.previewText, 180)));
     }
-    if (item.kind === "search" && item.searchQuery) {
-      chips.appendChild(createTag(`q: ${clipText(item.searchQuery, 24)}`, "accent"));
+    if (entry.reasons?.length) {
+      const reasons = createElement("div", "lore-feed-detail-reasons");
+      for (const reason of entry.reasons.slice(0, 4))
+        reasons.appendChild(createTag(reason));
+      if (entry.reasons.length > 4)
+        reasons.appendChild(createTag(`+${entry.reasons.length - 4} more`));
+      row.appendChild(reasons);
     }
-    const names = item.entries?.length ? item.entries.map((entry) => entry.label) : item.scopes?.map((scope) => scope.label) ?? [];
-    const shown = names.slice(0, 4);
-    for (const name of shown) {
-      chips.appendChild(createTag(clipText(name, 28), item.kind === "injected" ? "good" : "neutral"));
+    return row;
+  }
+  function renderFeedScopeDetail(scope) {
+    const row = createElement("div", "lore-feed-detail-item");
+    row.append(createElement("div", "lore-feed-detail-item-title", scope.label), createElement("div", "lore-feed-detail-item-meta", `${scope.worldBookName} / ${scope.breadcrumb || "Root"} / ${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`));
+    if (scope.selectionReason?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.selectionReason, 180)));
+    } else if (scope.summary?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.summary, 180)));
     }
-    if (names.length > shown.length) {
-      chips.appendChild(createTag(`+${names.length - shown.length} more`));
-    } else if (!names.length && typeof item.count === "number") {
-      chips.appendChild(createTag(`${item.count}`));
+    return row;
+  }
+  function renderFeedItemDetails(item) {
+    const label = getFeedDetailLabel(item);
+    if (!label)
+      return null;
+    const details = createElement("details", "lore-feed-item-details");
+    const summary = createElement("summary", "lore-feed-item-details-summary");
+    summary.append(makeIconSpan("caret", "lore-feed-item-details-caret"), createElement("span", "lore-feed-item-details-label", label), createElement("span", "lore-feed-item-details-meta", getFeedItemMetaText(item)));
+    const body = createElement("div", "lore-feed-item-details-body");
+    for (const scope of item.scopes ?? [])
+      body.appendChild(renderFeedScopeDetail(scope));
+    for (const entry of item.entries ?? [])
+      body.appendChild(renderFeedEntryDetail(entry));
+    for (const note of item.details ?? []) {
+      body.appendChild(createElement("div", "lore-feed-detail-note", note));
     }
-    return chips.childElementCount ? chips : null;
+    details.append(summary, body);
+    return details;
   }
   function renderFeedItem(item) {
     const row = createElement("div", `lore-feed-item lore-feed-item-${item.kind} ${getFeedItemTone(item)}`);
@@ -4396,10 +4584,13 @@ function setup(ctx) {
     const text = createElement("div", "lore-feed-item-row");
     text.append(createElement("span", "lore-feed-item-verb", getFeedItemVerb(item)), createElement("span", "lore-feed-item-summary", clipText(item.summary || item.label, 150)));
     body.appendChild(text);
-    const chips = createFeedItemChips(item);
-    if (chips)
-      body.appendChild(chips);
-    row.append(icon, body, createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
+    const details = renderFeedItemDetails(item);
+    if (details) {
+      body.appendChild(details);
+    } else {
+      body.appendChild(createElement("div", "lore-feed-item-meta", getFeedItemMetaText(item)));
+    }
+    row.append(icon, body);
     return row;
   }
   function renderFeedSessionMarker(session, visibleItemCount) {

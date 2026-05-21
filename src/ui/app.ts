@@ -1462,28 +1462,100 @@ export function setup(ctx: SpindleFrontendContext) {
     return Math.max(0, end - session.startedAt);
   }
 
-  function createFeedItemChips(item: RetrievalFeedItem): HTMLElement | null {
-    const chips = createElement("div", "lore-feed-chip-row");
-    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
-      chips.appendChild(createTag(formatDurationShort(item.durationMs)));
+  function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
+    if (!role) return "entry";
+    const labels: Record<NonNullable<PreviewNode["selectionRole"]>, string> = {
+      recent_mention: "recent mention",
+      context_mention: "context mention",
+      label_match: "label match",
+      alias_match: "alias match",
+      keyword_match: "keyword match",
+      branch_match: "branch match",
+      content_match: "content match",
+      score_fallback: "score fallback",
+    };
+    return labels[role] ?? role.replace(/_/g, " ");
+  }
+
+  function getFeedItemMetaText(item: RetrievalFeedItem): string {
+    const parts: string[] = [];
+    const duration = formatDurationShort(item.durationMs);
+    if (duration) parts.push(duration);
+    if (item.kind === "search" && item.searchQuery) parts.push(`q: ${clipText(item.searchQuery, 32)}`);
+    parts.push(formatTimeOnly(item.timestamp));
+    return parts.join(" / ");
+  }
+
+  function getFeedDetailLabel(item: RetrievalFeedItem): string | null {
+    const entryCount = item.entries?.length ?? 0;
+    if (entryCount) return `View ${entryCount} entr${entryCount === 1 ? "y" : "ies"}`;
+    const scopeCount = item.scopes?.length ?? 0;
+    if (scopeCount) return `View ${scopeCount} scope${scopeCount === 1 ? "" : "s"}`;
+    const noteCount = item.details?.length ?? 0;
+    if (noteCount) return `View ${noteCount} note${noteCount === 1 ? "" : "s"}`;
+    return null;
+  }
+
+  function renderFeedEntryDetail(entry: PreviewNode): HTMLElement {
+    const row = createElement("div", "lore-feed-detail-item");
+    const title = createElement("div", "lore-feed-detail-item-title", entry.label);
+    const meta = [
+      entry.worldBookName,
+      entry.breadcrumb || "Root",
+      formatSelectionRoleLabel(entry.selectionRole),
+    ].filter(Boolean);
+    row.append(title, createElement("div", "lore-feed-detail-item-meta", meta.join(" / ")));
+    if (entry.previewText?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(entry.previewText, 180)));
     }
-    if (item.kind === "search" && item.searchQuery) {
-      chips.appendChild(createTag(`q: ${clipText(item.searchQuery, 24)}`, "accent"));
+    if (entry.reasons?.length) {
+      const reasons = createElement("div", "lore-feed-detail-reasons");
+      for (const reason of entry.reasons.slice(0, 4)) reasons.appendChild(createTag(reason));
+      if (entry.reasons.length > 4) reasons.appendChild(createTag(`+${entry.reasons.length - 4} more`));
+      row.appendChild(reasons);
+    }
+    return row;
+  }
+
+  function renderFeedScopeDetail(scope: PreviewScope): HTMLElement {
+    const row = createElement("div", "lore-feed-detail-item");
+    row.append(
+      createElement("div", "lore-feed-detail-item-title", scope.label),
+      createElement(
+        "div",
+        "lore-feed-detail-item-meta",
+        `${scope.worldBookName} / ${scope.breadcrumb || "Root"} / ${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`,
+      ),
+    );
+    if (scope.selectionReason?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.selectionReason, 180)));
+    } else if (scope.summary?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.summary, 180)));
+    }
+    return row;
+  }
+
+  function renderFeedItemDetails(item: RetrievalFeedItem): HTMLElement | null {
+    const label = getFeedDetailLabel(item);
+    if (!label) return null;
+
+    const details = createElement("details", "lore-feed-item-details") as HTMLDetailsElement;
+    const summary = createElement("summary", "lore-feed-item-details-summary");
+    summary.append(
+      makeIconSpan("caret", "lore-feed-item-details-caret"),
+      createElement("span", "lore-feed-item-details-label", label),
+      createElement("span", "lore-feed-item-details-meta", getFeedItemMetaText(item)),
+    );
+
+    const body = createElement("div", "lore-feed-item-details-body");
+    for (const scope of item.scopes ?? []) body.appendChild(renderFeedScopeDetail(scope));
+    for (const entry of item.entries ?? []) body.appendChild(renderFeedEntryDetail(entry));
+    for (const note of item.details ?? []) {
+      body.appendChild(createElement("div", "lore-feed-detail-note", note));
     }
 
-    const names = item.entries?.length
-      ? item.entries.map((entry) => entry.label)
-      : item.scopes?.map((scope) => scope.label) ?? [];
-    const shown = names.slice(0, 4);
-    for (const name of shown) {
-      chips.appendChild(createTag(clipText(name, 28), item.kind === "injected" ? "good" : "neutral"));
-    }
-    if (names.length > shown.length) {
-      chips.appendChild(createTag(`+${names.length - shown.length} more`));
-    } else if (!names.length && typeof item.count === "number") {
-      chips.appendChild(createTag(`${item.count}`));
-    }
-    return chips.childElementCount ? chips : null;
+    details.append(summary, body);
+    return details;
   }
 
   function renderFeedItem(item: RetrievalFeedItem): HTMLElement {
@@ -1497,9 +1569,13 @@ export function setup(ctx: SpindleFrontendContext) {
       createElement("span", "lore-feed-item-summary", clipText(item.summary || item.label, 150)),
     );
     body.appendChild(text);
-    const chips = createFeedItemChips(item);
-    if (chips) body.appendChild(chips);
-    row.append(icon, body, createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
+    const details = renderFeedItemDetails(item);
+    if (details) {
+      body.appendChild(details);
+    } else {
+      body.appendChild(createElement("div", "lore-feed-item-meta", getFeedItemMetaText(item)));
+    }
+    row.append(icon, body);
     return row;
   }
 
