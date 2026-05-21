@@ -856,6 +856,11 @@ function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
   return looksLikeLabelOnly ? content : collapsed;
 }
 
+function getEntryInjectionBody(entry: RuntimeBook["cache"]["entries"][number]): string {
+  const content = entry.content.trim();
+  return content || getEntryBody(entry);
+}
+
 function getEntryBreadcrumb(entry: RuntimeBook["cache"]["entries"][number], tree: BookTreeIndex): string {
   const path = getEntryCategoryPath(tree, entry.entryId)
     .map((node) => node.label)
@@ -3595,7 +3600,7 @@ function buildPreviewNodes(selected: ScoredEntry[], booksById: Map<string, Runti
       breadcrumb: book ? getEntryBreadcrumb(item.entry, book.tree) : item.entry.label,
       score: Number(item.score.toFixed(2)),
       reasons: item.reasons,
-      previewText: truncateText(getEntryBody(item.entry), 240),
+      previewText: truncateText(getEntryInjectionBody(item.entry), 240),
       selectionRole: item.selectionRole,
     };
   });
@@ -3638,8 +3643,9 @@ function buildInjectionText(
       `${included.length + 1}. ${[...pathLabels, item.entry.label].join(" > ")}`,
       `Book: ${item.entry.worldBookName}`,
       item.entry.aliases.length ? `Aliases: ${item.entry.aliases.join(", ")}` : "",
-      branchSummary ? `Branch summary: ${branchSummary}` : "",
-      getEntryBody(item.entry),
+      branchSummary ? `Category summary: ${branchSummary}` : "",
+      "Entry content:",
+      getEntryInjectionBody(item.entry),
     ]
       .filter(Boolean)
       .join("\n");

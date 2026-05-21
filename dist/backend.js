@@ -1476,6 +1476,10 @@ function getEntryBody(entry) {
   const looksLikeLabelOnly = normalizedCollapsed === normalizedLabel || collapsedTokens.length <= 6 && normalizedLabel.length > 0 && normalizedCollapsed.includes(normalizedLabel) || collapsedTokens.length <= 4;
   return looksLikeLabelOnly ? content : collapsed;
 }
+function getEntryInjectionBody(entry) {
+  const content = entry.content.trim();
+  return content || getEntryBody(entry);
+}
 function getEntryBreadcrumb(entry, tree) {
   const path = getEntryCategoryPath(tree, entry.entryId).map((node) => node.label).filter((label) => label && label !== "Root");
   return [...path, entry.label].join(" > ");
@@ -3236,7 +3240,7 @@ function buildPreviewNodes(selected, booksById) {
       breadcrumb: book ? getEntryBreadcrumb(item.entry, book.tree) : item.entry.label,
       score: Number(item.score.toFixed(2)),
       reasons: item.reasons,
-      previewText: truncateText(getEntryBody(item.entry), 240),
+      previewText: truncateText(getEntryInjectionBody(item.entry), 240),
       selectionRole: item.selectionRole
     };
   });
@@ -3269,8 +3273,9 @@ function buildInjectionText(selected, booksById, injectedEntryLimit, collapsedDe
       `${included.length + 1}. ${[...pathLabels, item.entry.label].join(" > ")}`,
       `Book: ${item.entry.worldBookName}`,
       item.entry.aliases.length ? `Aliases: ${item.entry.aliases.join(", ")}` : "",
-      branchSummary ? `Branch summary: ${branchSummary}` : "",
-      getEntryBody(item.entry)
+      branchSummary ? `Category summary: ${branchSummary}` : "",
+      "Entry content:",
+      getEntryInjectionBody(item.entry)
     ].filter(Boolean).join(`
 `);
     parts.push(section);
