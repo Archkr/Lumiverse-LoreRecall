@@ -1954,128 +1954,287 @@ var LORE_RECALL_CSS = `
   line-height: 1.5;
 }
 
-/* Compact feed pass: keep the live surface close to TunnelVision's activity stream. */
-.lore-feed {
-  gap: 6px;
+/* TunnelVision-style feed: flat activity stream, not nested traversal cards. */
+.lore-feed-section {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
-.lore-feed-session {
-  border-radius: var(--lr-r-sm);
-  background: color-mix(in srgb, var(--lr-bg-panel) 78%, transparent);
-  box-shadow: none;
-}
-
-.lore-feed-session::before,
-.lore-feed-session-items::before {
-  display: none;
-}
-
-.lore-feed-session.live {
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-lore) 18%, transparent);
-}
-
-.lore-feed-session-head {
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-}
-
-.lore-feed-session-title {
+.lore-feed-panel-header {
   display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--lr-line);
+  background: color-mix(in srgb, var(--lr-bg-page) 32%, transparent);
 }
 
-.lore-feed-session-mode {
-  font-family: inherit;
+.lore-feed-panel-title {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  color: var(--lr-text);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.lore-feed-panel-title svg {
+  width: 13px;
+  height: 13px;
+  color: var(--lr-lore);
+}
+
+.lore-feed-panel-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lr-lore) 16%, transparent);
+  color: var(--lr-lore);
+  font-size: 10px;
+  font-family: var(--lr-font-mono);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.lore-feed-panel-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lr-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: color var(--lr-t), background var(--lr-t);
+}
+
+.lore-feed-panel-btn:hover {
+  color: var(--lr-text);
+  background: color-mix(in srgb, var(--lr-text) 7%, transparent);
+}
+
+.lore-feed-panel-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.lore-feed-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--lr-line) 70%, transparent);
+  background: color-mix(in srgb, var(--lr-bg-page) 22%, transparent);
+}
+
+.lore-feed-tab {
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--lr-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.2;
+  transition: color var(--lr-t), background var(--lr-t);
+}
+
+.lore-feed-tab:hover {
+  color: var(--lr-text);
+  background: color-mix(in srgb, var(--lr-text) 6%, transparent);
+}
+
+.lore-feed-tab.active {
+  color: var(--lr-lore);
+  background: color-mix(in srgb, var(--lr-lore) 14%, transparent);
+  font-weight: 700;
+}
+
+.lore-feed {
+  gap: 0;
+}
+
+.lore-feed-stream {
+  max-height: 390px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--lr-bg-panel) 82%, var(--lr-bg-page));
+}
+
+.lore-feed-session-marker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 4px 10px 4px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--lr-line) 62%, transparent);
+  border-left: 2px solid var(--lr-line-2);
+  background: color-mix(in srgb, var(--lr-bg-page) 25%, transparent);
+}
+
+.lore-feed-session-marker.live {
+  border-left-color: var(--lr-lore);
+}
+
+.lore-feed-session-marker.success { border-left-color: color-mix(in srgb, var(--lr-good) 72%, var(--lr-line)); }
+.lore-feed-session-marker.warn { border-left-color: color-mix(in srgb, var(--lr-warn) 72%, var(--lr-line)); }
+.lore-feed-session-marker.error { border-left-color: color-mix(in srgb, var(--lr-danger) 72%, var(--lr-line)); }
+
+.lore-feed-session-marker .lore-feed-session-mode {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--lr-text);
   font-variant: normal;
   letter-spacing: 0;
   line-height: 1.2;
 }
 
-.lore-feed-session-stamps {
-  font-size: 10.5px;
+.lore-feed-session-marker .lore-feed-session-stamps {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lr-dim);
   font-family: var(--lr-font-mono);
-  gap: 0;
+  font-size: 10px;
 }
 
-.lore-feed-session-elapsed {
-  font-size: 10.5px;
-}
-
-.lore-feed-session-items {
-  border-top: 1px solid var(--lr-line);
-  padding-left: 0;
+.lore-feed-session-marker .lore-feed-session-elapsed {
+  color: var(--lr-text);
+  font-family: var(--lr-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .lore-feed-item {
+  display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: flex-start;
   gap: 8px;
   padding: 7px 10px;
-  align-items: start;
+  border-bottom: 1px solid color-mix(in srgb, var(--lr-line) 58%, transparent);
+  border-left: 2px solid transparent;
+  box-shadow: none;
+  position: relative;
+  transition: background var(--lr-t);
+}
+
+.lore-feed-item:hover {
+  background: color-mix(in srgb, var(--lr-text) 4%, transparent);
+}
+
+.lore-feed-item:last-child {
+  border-bottom: 0;
+}
+
+.lore-feed-item-pulled,
+.lore-feed-item-manifest {
+  border-left-color: color-mix(in srgb, var(--lr-acc) 36%, transparent);
+}
+
+.lore-feed-item-injected {
+  border-left-color: color-mix(in srgb, var(--lr-good) 52%, transparent);
+}
+
+.lore-feed-item-issue {
+  border-left-color: color-mix(in srgb, var(--lr-danger) 62%, transparent);
 }
 
 .lore-feed-item-icon {
   width: 18px;
   height: 18px;
-  border-radius: 3px;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
   margin-top: 0;
 }
 
 .lore-feed-item-icon svg {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
 }
 
+.lore-feed-item.info .lore-feed-item-icon { color: var(--lr-muted); }
+.lore-feed-item.warn .lore-feed-item-icon { color: var(--lr-warn); }
+.lore-feed-item.error .lore-feed-item-icon { color: var(--lr-danger); }
+.lore-feed-item.success .lore-feed-item-icon { color: var(--lr-good); }
+
 .lore-feed-item-body {
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .lore-feed-item-row {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
+  line-height: 1.35;
 }
 
 .lore-feed-item-verb {
   flex: 0 0 auto;
+  color: var(--lr-text);
   font-size: 11px;
   font-weight: 700;
-  color: var(--lr-text);
-  line-height: 1.3;
 }
 
 .lore-feed-item-summary {
-  min-width: 0;
   flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--lr-muted);
   font-size: 11.5px;
-  line-height: 1.3;
+  line-height: 1.35;
 }
 
 .lore-feed-item-time {
-  padding-top: 1px;
-  font-size: 10px;
+  padding-top: 2px;
+  color: var(--lr-dim);
+  font-size: 9.5px;
+  opacity: 0.85;
+}
+
+.lore-feed-chip-row {
+  flex-wrap: nowrap;
+  gap: 3px;
+  overflow: hidden;
 }
 
 .lore-feed-chip-row .lore-tag {
-  max-width: 150px;
+  max-width: 118px;
+  padding: 1px 5px;
+  border-radius: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 9.5px;
+  line-height: 1.35;
 }
 
-.lore-feed-details {
-  margin-top: 2px;
+.lore-feed-stream .lore-empty {
+  border: 0;
+  border-radius: 0;
+  padding: 24px 18px;
+  background: transparent;
 }
 
 /* ---------- Forms ---------------------------------------- */
@@ -3059,7 +3218,6 @@ function setup(ctx) {
   let refreshTimer = null;
   let pendingChatId = null;
   let drawerFeedFilter = "all";
-  const drawerSessionExpansion = new Map;
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection = "sources";
@@ -4210,51 +4368,6 @@ function setup(ctx) {
     const end = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : Date.now();
     return Math.max(0, end - session.startedAt);
   }
-  function isSessionExpanded(session, index) {
-    const saved = drawerSessionExpansion.get(session.id);
-    if (typeof saved === "boolean")
-      return saved;
-    return session.status === "running" || index === 0;
-  }
-  function formatSelectionRoleLabel(role) {
-    if (!role)
-      return "entry";
-    const labels = {
-      recent_mention: "recent mention",
-      context_mention: "context mention",
-      label_match: "label match",
-      alias_match: "alias match",
-      keyword_match: "keyword match",
-      branch_match: "branch match",
-      content_match: "content match",
-      score_fallback: "score fallback"
-    };
-    return labels[role] ?? role.replace(/_/g, " ");
-  }
-  function getSelectionRoleTone(role) {
-    switch (role) {
-      case "recent_mention":
-      case "context_mention":
-      case "label_match":
-      case "alias_match":
-        return "good";
-      default:
-        return "neutral";
-    }
-  }
-  function createFeedChipRow(labels, limit = 3) {
-    if (!labels.length)
-      return null;
-    const wrap = createElement("div", "lore-feed-chip-row");
-    const shown = labels.slice(0, limit);
-    for (const label of shown) {
-      wrap.appendChild(createTag(clipText(label, 30), "accent"));
-    }
-    if (labels.length > shown.length) {
-      wrap.appendChild(createTag(`+${labels.length - shown.length} more`));
-    }
-    return wrap;
-  }
   function createFeedItemChips(item) {
     const chips = createElement("div", "lore-feed-chip-row");
     if (typeof item.durationMs === "number" && item.durationMs >= 0) {
@@ -4262,11 +4375,9 @@ function setup(ctx) {
     }
     if (item.kind === "search" && item.searchQuery) {
       chips.appendChild(createTag(`q: ${clipText(item.searchQuery, 24)}`, "accent"));
-    } else if (item.phase && item.phase !== "session") {
-      chips.appendChild(createTag(item.phase.replace(/_/g, " ")));
     }
     const names = item.entries?.length ? item.entries.map((entry) => entry.label) : item.scopes?.map((scope) => scope.label) ?? [];
-    const shown = names.slice(0, 5);
+    const shown = names.slice(0, 4);
     for (const name of shown) {
       chips.appendChild(createTag(clipText(name, 28), item.kind === "injected" ? "good" : "neutral"));
     }
@@ -4277,105 +4388,8 @@ function setup(ctx) {
     }
     return chips.childElementCount ? chips : null;
   }
-  function renderFeedScopeCards(scopes) {
-    const list = createElement("div", "lore-feed-scope-list");
-    for (const scope of scopes) {
-      const card = createElement("div", "lore-feed-detail-row");
-      const body = createElement("div", "lore-feed-detail-main");
-      const head = createElement("div", "lore-feed-detail-head");
-      head.append(createElement("div", "lore-feed-card-title", scope.label), createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"));
-      body.append(head, createElement("div", "lore-feed-card-meta", `${scope.worldBookName} · ${scope.breadcrumb || "Root"}`));
-      if (scope.summary?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 180)));
-      }
-      if (scope.selectionReason?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 180)}`));
-      }
-      card.appendChild(body);
-      list.appendChild(card);
-    }
-    return list;
-  }
-  function renderFeedEntryRows(entries) {
-    const list = createElement("div", "lore-feed-entry-list");
-    for (const entry of entries) {
-      const row = createElement("div", "lore-feed-detail-row");
-      const body = createElement("div", "lore-feed-detail-main");
-      const head = createElement("div", "lore-feed-detail-head");
-      head.append(createElement("div", "lore-feed-card-title", entry.label), createTag(formatSelectionRoleLabel(entry.selectionRole), getSelectionRoleTone(entry.selectionRole)));
-      body.append(head, createElement("div", "lore-feed-card-meta", `${entry.worldBookName} · ${entry.breadcrumb || "Root"}`));
-      if (entry.previewText?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 180)));
-      }
-      if (entry.reasons?.length) {
-        const reasons = createElement("div", "lore-feed-chip-row");
-        for (const reason of entry.reasons.slice(0, 3)) {
-          reasons.appendChild(createTag(reason));
-        }
-        if (entry.reasons.length > 3) {
-          reasons.appendChild(createTag(`+${entry.reasons.length - 3} more`));
-        }
-        body.appendChild(reasons);
-      }
-      row.appendChild(body);
-      list.appendChild(row);
-    }
-    return list;
-  }
-  function renderFeedItemDetails(item) {
-    const hasScopes = !!item.scopes?.length;
-    const hasEntries = !!item.entries?.length;
-    const hasDetails = !!item.details?.length;
-    if (item.kind !== "issue" && item.tone !== "warn" && item.tone !== "error")
-      return null;
-    if (!hasScopes && !hasEntries && !hasDetails)
-      return null;
-    const details = createElement("details", "lore-feed-details");
-    const summary = createElement("summary", "lore-feed-details-summary");
-    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Details"));
-    const chips = createElement("div", "lore-feed-chip-row");
-    if (hasScopes) {
-      const row = createFeedChipRow(item.scopes.map((scope) => scope.label));
-      if (row)
-        chips.appendChild(row);
-    }
-    if (hasEntries) {
-      const row = createFeedChipRow(item.entries.map((entry) => entry.label));
-      if (row)
-        chips.appendChild(row);
-    }
-    if (hasDetails) {
-      chips.appendChild(createTag(`${item.details.length} note${item.details.length === 1 ? "" : "s"}`));
-    }
-    if (chips.childElementCount)
-      summary.appendChild(chips);
-    const body = createElement("div", "lore-feed-details-body");
-    if (hasScopes) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.append(createElement("div", "lore-feed-detail-title", `Scopes (${item.scopes.length})`), renderFeedScopeCards(item.scopes));
-      body.appendChild(group);
-    }
-    if (hasEntries) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.append(createElement("div", "lore-feed-detail-title", `${item.kind === "search" ? "Matches" : "Entries"} (${item.entries.length})`), renderFeedEntryRows(item.entries));
-      body.appendChild(group);
-    }
-    if (hasDetails) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.appendChild(createElement("div", "lore-feed-detail-title", "Notes"));
-      const notes = createElement("div", "lore-stack");
-      notes.style.gap = "6px";
-      for (const detail of item.details) {
-        notes.appendChild(createElement("div", "lore-feed-note", detail));
-      }
-      group.appendChild(notes);
-      body.appendChild(group);
-    }
-    details.append(summary, body);
-    return details;
-  }
   function renderFeedItem(item) {
-    const row = createElement("div", `lore-feed-item ${getFeedItemTone(item)}`);
+    const row = createElement("div", `lore-feed-item lore-feed-item-${item.kind} ${getFeedItemTone(item)}`);
     const icon = createElement("div", "lore-feed-item-icon");
     icon.innerHTML = getFeedItemGlyph(item);
     const body = createElement("div", "lore-feed-item-body");
@@ -4385,56 +4399,27 @@ function setup(ctx) {
     const chips = createFeedItemChips(item);
     if (chips)
       body.appendChild(chips);
-    const details = renderFeedItemDetails(item);
-    if (details)
-      body.appendChild(details);
     row.append(icon, body, createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
     return row;
   }
-  function renderCompactFeedSession(session, index) {
-    const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
-    if (!visibleItems.length && !(drawerFeedFilter === "all" && session.status === "running"))
-      return null;
-    const expanded = isSessionExpanded(session, index);
+  function renderFeedSessionMarker(session, visibleItemCount) {
     const isRunning = session.status === "running";
     const elapsedMs = getSessionElapsedMs(session);
-    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}${isRunning ? " live" : ""}${expanded ? " expanded" : " collapsed"}`);
-    const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle");
-    head.type = "button";
-    head.setAttribute("aria-expanded", expanded ? "true" : "false");
-    head.setAttribute("aria-label", `${getSessionStatusLabel(session)} ${session.mode} retrieval session`);
-    head.addEventListener("click", () => {
-      drawerSessionExpansion.set(session.id, !expanded);
-      render();
-    });
-    const body = createElement("div", "lore-feed-session-title");
-    body.appendChild(createElement("div", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    const marker = createElement("div", `lore-feed-session-marker ${getSessionTone(session)}${isRunning ? " live" : ""}`);
+    marker.appendChild(createElement("span", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
     const meta = [
       getSessionStatusLabel(session),
       formatTimeOnly(session.startedAt),
       session.controllerUsed ? "controller" : "deterministic",
-      `${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`
+      `${visibleItemCount} event${visibleItemCount === 1 ? "" : "s"}`
     ];
     if (session.fallbackReason)
       meta.push("fallback");
-    body.appendChild(createElement("div", "lore-feed-session-stamps", meta.join(" / ")));
-    const trailing = createElement("div", "lore-feed-session-trailing");
+    marker.appendChild(createElement("span", "lore-feed-session-stamps", meta.join(" / ")));
     if (typeof elapsedMs === "number") {
-      trailing.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
+      marker.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
     }
-    trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
-    head.append(body, trailing);
-    wrap.appendChild(head);
-    const items = createElement("div", "lore-feed-session-items");
-    items.hidden = !expanded;
-    for (const item of visibleItems) {
-      items.appendChild(renderFeedItem(item));
-    }
-    wrap.appendChild(items);
-    return wrap;
-  }
-  function renderFeedSession(session, index) {
-    return renderCompactFeedSession(session, index);
+    return marker;
   }
   function renderHealthStrip(state) {
     const diagnostics = state.diagnosticsResults ?? [];
@@ -4462,47 +4447,60 @@ function setup(ctx) {
     return strip;
   }
   function renderRetrievalFeedSection(state) {
-    const section = createElement("section", "lore-section");
+    const section = createElement("section", "lore-section lore-feed-section");
+    const sessions = state.retrievalFeed?.sessions ?? [];
+    const visibleEventCount = sessions.reduce((total, session) => total + session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter)).length, 0);
+    const head = createElement("div", "lore-feed-panel-header");
+    const title = createElement("div", "lore-feed-panel-title");
+    title.append(makeIconSpan("feed"), createElement("span", "", "Retrieval feed"));
+    if (visibleEventCount > 0) {
+      title.appendChild(createElement("span", "lore-feed-panel-count", String(visibleEventCount)));
+    }
+    head.appendChild(title);
     const actions = createElement("div", "lore-cluster");
     if (state.preview) {
-      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview)));
+      const copyButton = createButton("Copy", "lore-feed-panel-btn", () => copyPreviewDebugReport(state.preview));
+      copyButton.title = "Copy retrieval report";
+      copyButton.prepend(makeIconSpan("copy"));
+      actions.appendChild(copyButton);
     }
-    section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
-    const filters = createElement("div", "lore-cluster lore-feed-filters");
+    head.appendChild(actions);
+    section.appendChild(head);
+    const filters = createElement("div", "lore-feed-tabs");
     const filterDefs = [
-      ["all", "All", null],
-      ["entries", "Entries", "injected"],
-      ["steps", "Steps", "manifest"],
-      ["issue", "Issues", "issue"]
+      ["all", "All"],
+      ["entries", "Entries"],
+      ["steps", "Steps"],
+      ["issue", "Issues"]
     ];
-    for (const [value, label, iconName] of filterDefs) {
-      const chip = createElement("button", `lore-chip${drawerFeedFilter === value ? " active" : ""}`);
-      chip.type = "button";
-      if (iconName)
-        chip.appendChild(makeIconSpan(iconName));
-      chip.appendChild(createElement("span", "", label));
-      chip.addEventListener("click", () => {
+    for (const [value, label] of filterDefs) {
+      const tab = createElement("button", `lore-feed-tab${drawerFeedFilter === value ? " active" : ""}`, label);
+      tab.type = "button";
+      tab.addEventListener("click", () => {
         drawerFeedFilter = value;
         render();
       });
-      filters.appendChild(chip);
+      filters.appendChild(tab);
     }
     section.appendChild(filters);
-    const feed = createElement("div", "lore-feed");
-    const sessions = state.retrievalFeed?.sessions ?? [];
+    const feed = createElement("div", "lore-feed lore-feed-stream");
     if (!sessions.length) {
       feed.appendChild(createEmpty("No retrieval activity yet", "Send a message to watch a compact stream of retrieval activity for this chat.", null, "feed"));
       section.appendChild(feed);
       return section;
     }
     let rendered = 0;
-    sessions.forEach((session, index) => {
-      const sessionNode = renderFeedSession(session, index);
-      if (!sessionNode)
-        return;
-      feed.appendChild(sessionNode);
+    for (const session of sessions) {
+      const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
+      if (!visibleItems.length && !(drawerFeedFilter === "all" && session.status === "running"))
+        continue;
+      feed.appendChild(renderFeedSessionMarker(session, visibleItems.length));
       rendered += 1;
-    });
+      for (const item of visibleItems) {
+        feed.appendChild(renderFeedItem(item));
+        rendered += 1;
+      }
+    }
     if (!rendered) {
       feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
     }
