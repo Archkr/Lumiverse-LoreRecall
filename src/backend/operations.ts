@@ -43,6 +43,7 @@ import {
   applyTreeAssignments,
   enforceLeafEntryLimit,
   enforceTopLevelCategoryCap,
+  enforceTopLevelCategoryMinimum,
   normalizeTreeAssignmentsForGranularity,
 } from "./granularity";
 import {
@@ -1328,6 +1329,13 @@ export async function buildTreeWithLlm(
         addGranularityIssue(
           `Moved ${movedTopLevelCategories} top-level categor${movedTopLevelCategories === 1 ? "y" : "ies"} under existing categories to enforce the ${granularity.targetTopLevelMax} category cap.`,
           "build_tree_with_llm.granularity_cap",
+        );
+      }
+      const promotedTopLevelCategories = enforceTopLevelCategoryMinimum(tree, granularity);
+      if (promotedTopLevelCategories > 0) {
+        addGranularityIssue(
+          `Promoted ${promotedTopLevelCategories} subcategor${promotedTopLevelCategories === 1 ? "y" : "ies"} to the top level to enforce the ${granularity.targetCategories} category target.`,
+          "build_tree_with_llm.granularity_minimum",
         );
       }
       const splitLeafCategories = enforceLeafEntryLimit(tree, granularity, "system");
