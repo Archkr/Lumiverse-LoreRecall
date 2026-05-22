@@ -886,6 +886,54 @@ export function setup(ctx: SpindleFrontendContext) {
     );
   }
 
+  function buildOperationReport(operation: OperationUpdate): string {
+    return JSON.stringify(
+      {
+        capturedAt: Date.now(),
+        activeChatId: currentState?.activeChatId ?? null,
+        activeCharacterId: currentState?.activeCharacterId ?? null,
+        activeCharacterName: currentState?.activeCharacterName ?? null,
+        operation: {
+          id: operation.id,
+          kind: operation.kind,
+          status: operation.status,
+          title: operation.title,
+          message: operation.message,
+          percent: operation.percent,
+          current: operation.current,
+          total: operation.total,
+          phase: operation.phase ?? null,
+          bookId: operation.bookId ?? null,
+          bookName: operation.bookName ?? null,
+          chunkCurrent: operation.chunkCurrent ?? null,
+          chunkTotal: operation.chunkTotal ?? null,
+          retryable: operation.retryable,
+          finishedAt: operation.finishedAt ?? null,
+          scope: operation.scope ?? null,
+        },
+        issues: (operation.issues ?? []).map((issue, index) => ({
+          index: index + 1,
+          severity: issue.severity,
+          message: issue.message,
+          phase: issue.phase ?? null,
+          bookId: issue.bookId ?? null,
+          bookName: issue.bookName ?? null,
+          debugPayload: issue.debugPayload ?? null,
+        })),
+      },
+      null,
+      2,
+    );
+  }
+
+  function copyOperationReport(operation: OperationUpdate): void {
+    void copyTextToClipboard(
+      buildOperationReport(operation),
+      "Operation report copied",
+      "Send that report back here and we can inspect the operation directly.",
+    );
+  }
+
   function copyOperationDebugPayload(operation: OperationUpdate): void {
     const payload = getOperationDebugPayload(operation);
     if (!payload) {
@@ -1062,11 +1110,14 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     const debugPayload = getOperationDebugPayload(operation);
-    if (debugPayload && !compact) {
+    if (!compact) {
       const actions = createElement("div", "lore-cluster");
-      actions.appendChild(
-        createButton("Copy debug payload", "lore-btn-link", () => copyOperationDebugPayload(operation)),
-      );
+      actions.appendChild(createButton("Copy report", "lore-btn-link", () => copyOperationReport(operation)));
+      if (debugPayload) {
+        actions.appendChild(
+          createButton("Copy debug payload", "lore-btn-link", () => copyOperationDebugPayload(operation)),
+        );
+      }
       wrap.appendChild(actions);
     }
     return wrap;
@@ -1757,6 +1808,7 @@ export function setup(ctx: SpindleFrontendContext) {
         continue;
       }
       const actions = createElement("div", "lore-cluster");
+      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyOperationReport(operation)));
       if (getOperationDebugPayload(operation)) {
         actions.appendChild(
           createButton("Copy debug", "lore-btn lore-btn-sm", () => copyOperationDebugPayload(operation)),
