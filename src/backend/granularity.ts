@@ -276,53 +276,6 @@ export function enforceTopLevelCategoryCap(
   return excessIds.length;
 }
 
-export function enforceTopLevelCategoryMinimum(
-  tree: BookTreeIndex,
-  granularity: EffectiveTreeGranularity,
-): number {
-  const root = getRoot(tree);
-  if (!root || root.childIds.length >= granularity.targetTopLevelMin) return 0;
-
-  let promotedCount = 0;
-  const promotedByParent = new Map<string, number>();
-  const candidates = root.childIds
-    .map((parentId, parentIndex) => ({ parentId, parentIndex }))
-    .flatMap(({ parentId, parentIndex }) => {
-      const parent = tree.nodes[parentId];
-      if (!parent) return [];
-      return parent.childIds
-        .map((childId, childIndex) => ({ childId, childIndex, parentId, parentIndex }))
-        .filter(({ childId }) => !!tree.nodes[childId]);
-    })
-    .sort(
-      (left, right) =>
-        left.parentIndex - right.parentIndex ||
-        left.childIndex - right.childIndex ||
-        (tree.nodes[left.childId]?.label ?? "").localeCompare(tree.nodes[right.childId]?.label ?? ""),
-    );
-
-  for (const candidate of candidates) {
-    if (root.childIds.length >= granularity.targetTopLevelMin) break;
-    if (root.childIds.length >= granularity.targetTopLevelMax) break;
-
-    const parent = tree.nodes[candidate.parentId];
-    const child = tree.nodes[candidate.childId];
-    if (!parent || !child) continue;
-
-    parent.childIds = parent.childIds.filter((childId) => childId !== candidate.childId);
-    child.parentId = tree.rootId;
-
-    const parentRootIndex = root.childIds.indexOf(candidate.parentId);
-    const parentPromotedCount = promotedByParent.get(candidate.parentId) ?? 0;
-    const insertIndex = parentRootIndex >= 0 ? parentRootIndex + 1 + parentPromotedCount : root.childIds.length;
-    root.childIds.splice(Math.min(insertIndex, root.childIds.length), 0, candidate.childId);
-    promotedByParent.set(candidate.parentId, parentPromotedCount + 1);
-    promotedCount += 1;
-  }
-
-  return promotedCount;
-}
-
 export function enforceLeafEntryLimit(
   tree: BookTreeIndex,
   granularity: EffectiveTreeGranularity,

@@ -3791,38 +3791,6 @@ function enforceTopLevelCategoryCap(tree, granularity) {
   }
   return excessIds.length;
 }
-function enforceTopLevelCategoryMinimum(tree, granularity) {
-  const root = getRoot(tree);
-  if (!root || root.childIds.length >= granularity.targetTopLevelMin)
-    return 0;
-  let promotedCount = 0;
-  const promotedByParent = new Map;
-  const candidates = root.childIds.map((parentId, parentIndex) => ({ parentId, parentIndex })).flatMap(({ parentId, parentIndex }) => {
-    const parent = tree.nodes[parentId];
-    if (!parent)
-      return [];
-    return parent.childIds.map((childId, childIndex) => ({ childId, childIndex, parentId, parentIndex })).filter(({ childId }) => !!tree.nodes[childId]);
-  }).sort((left, right) => left.parentIndex - right.parentIndex || left.childIndex - right.childIndex || (tree.nodes[left.childId]?.label ?? "").localeCompare(tree.nodes[right.childId]?.label ?? ""));
-  for (const candidate of candidates) {
-    if (root.childIds.length >= granularity.targetTopLevelMin)
-      break;
-    if (root.childIds.length >= granularity.targetTopLevelMax)
-      break;
-    const parent = tree.nodes[candidate.parentId];
-    const child = tree.nodes[candidate.childId];
-    if (!parent || !child)
-      continue;
-    parent.childIds = parent.childIds.filter((childId) => childId !== candidate.childId);
-    child.parentId = tree.rootId;
-    const parentRootIndex = root.childIds.indexOf(candidate.parentId);
-    const parentPromotedCount = promotedByParent.get(candidate.parentId) ?? 0;
-    const insertIndex = parentRootIndex >= 0 ? parentRootIndex + 1 + parentPromotedCount : root.childIds.length;
-    root.childIds.splice(Math.min(insertIndex, root.childIds.length), 0, candidate.childId);
-    promotedByParent.set(candidate.parentId, parentPromotedCount + 1);
-    promotedCount += 1;
-  }
-  return promotedCount;
-}
 function enforceLeafEntryLimit(tree, granularity, createdBy) {
   const oversizedLeaves = Object.values(tree.nodes).filter((node) => node.id !== tree.rootId && node.childIds.length === 0 && node.entryIds.length > granularity.maxEntries);
   let splitCount = 0;
@@ -3896,7 +3864,8 @@ function buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount) {
   })).sort((left, right) => right.entryCount - left.entryCount || left.path.localeCompare(right.path)).slice(0, 48);
   const guidance = [
     `This is chunk ${chunkIndex + 1} of ${chunkCount} for one shared final tree. Keep category choices consistent with earlier chunks.`,
-    `Final top-level category target for the whole book: ${granularity.targetCategories}. Hard cap: ${granularity.targetTopLevelMax} top-level categories total.`
+    `Final top-level category target for the whole book: ${granularity.targetCategories}. Hard cap: ${granularity.targetTopLevelMax} top-level categories total.`,
+    "Do not create or promote one-off character/name labels only to satisfy the numeric target. Root categories must be broad reusable domains."
   ];
   if (topLevelLabels.length > 0) {
     guidance.push(`Existing top-level categories (${topLevelLabels.length}/${granularity.targetTopLevelMax}): ${topLevelLabels.join(" | ")}.`);
@@ -4657,7 +4626,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
           `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
           "Hard granularity constraints:",
-          `- Final top-level categories must stay within ${granularity.targetCategories}, with an absolute cap of ${granularity.targetTopLevelMax}.`,
+          `- Aim for ${granularity.targetCategories} broad reusable top-level categories for the whole book; never create individual entry/name roots just to hit this number.`,
+          `- The absolute top-level cap is ${granularity.targetTopLevelMax}.`,
           `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
           "- Reuse existing top-level categories before creating new ones.",
           "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
@@ -4737,10 +4707,6 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
       const movedTopLevelCategories = enforceTopLevelCategoryCap(tree, granularity);
       if (movedTopLevelCategories > 0) {
         addGranularityIssue(`Moved ${movedTopLevelCategories} top-level categor${movedTopLevelCategories === 1 ? "y" : "ies"} under existing categories to enforce the ${granularity.targetTopLevelMax} category cap.`, "build_tree_with_llm.granularity_cap");
-      }
-      const promotedTopLevelCategories = enforceTopLevelCategoryMinimum(tree, granularity);
-      if (promotedTopLevelCategories > 0) {
-        addGranularityIssue(`Promoted ${promotedTopLevelCategories} subcategor${promotedTopLevelCategories === 1 ? "y" : "ies"} to the top level to enforce the ${granularity.targetCategories} category target.`, "build_tree_with_llm.granularity_minimum");
       }
       const splitLeafCategories = enforceLeafEntryLimit(tree, granularity, "system");
       if (splitLeafCategories > 0) {

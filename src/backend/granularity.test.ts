@@ -5,7 +5,6 @@ import {
   applyTreeAssignments,
   enforceLeafEntryLimit,
   enforceTopLevelCategoryCap,
-  enforceTopLevelCategoryMinimum,
   normalizeTreeAssignmentsForGranularity,
 } from "./granularity";
 import type { BookTreeIndex } from "../types";
@@ -135,25 +134,21 @@ describe("tree granularity enforcement", () => {
     expect(leafEntryCounts(tree).every((count) => count <= GRANULARITY.maxEntries)).toBe(true);
   });
 
-  test("promotes subcategories when top-level categories undershoot the target", () => {
+  test("does not promote subcategories only to satisfy top-level minimum", () => {
     const tree = createEmptyTreeIndex("book");
     ensureCategoryPath(tree, ["Characters", "Shido"], "llm");
     ensureCategoryPath(tree, ["Spirits & Angels", "Angels"], "llm");
     ensureCategoryPath(tree, ["Spirits & Angels", "Sephira Crystals"], "llm");
     ensureCategoryPath(tree, ["Factions", "Ratatoskr"], "llm");
 
-    const promoted = enforceTopLevelCategoryMinimum(
-      tree,
-      {
-        ...GRANULARITY,
-        targetTopLevelMin: 5,
-        targetTopLevelMax: 8,
-        targetCategories: "5-8",
-      },
-    );
+    enforceTopLevelCategoryCap(tree, {
+      ...GRANULARITY,
+      targetTopLevelMin: 5,
+      targetTopLevelMax: 8,
+      targetCategories: "5-8",
+    });
 
-    expect(promoted).toBe(2);
-    expect(rootLabels(tree)).toEqual(["Characters", "Shido", "Spirits & Angels", "Angels", "Factions"]);
-    expect(tree.nodes[tree.nodes[tree.rootId].childIds[1]].parentId).toBe(tree.rootId);
+    expect(rootLabels(tree)).toEqual(["Characters", "Spirits & Angels", "Factions"]);
+    expect(allLabels(tree)).toEqual(expect.arrayContaining(["Shido", "Angels", "Sephira Crystals", "Ratatoskr"]));
   });
 });

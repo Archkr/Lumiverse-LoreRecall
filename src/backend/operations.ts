@@ -43,7 +43,6 @@ import {
   applyTreeAssignments,
   enforceLeafEntryLimit,
   enforceTopLevelCategoryCap,
-  enforceTopLevelCategoryMinimum,
   normalizeTreeAssignmentsForGranularity,
 } from "./granularity";
 import {
@@ -172,6 +171,7 @@ function buildExistingTreeGuidance(
   const guidance = [
     `This is chunk ${chunkIndex + 1} of ${chunkCount} for one shared final tree. Keep category choices consistent with earlier chunks.`,
     `Final top-level category target for the whole book: ${granularity.targetCategories}. Hard cap: ${granularity.targetTopLevelMax} top-level categories total.`,
+    "Do not create or promote one-off character/name labels only to satisfy the numeric target. Root categories must be broad reusable domains.",
   ];
 
   if (topLevelLabels.length > 0) {
@@ -1218,7 +1218,8 @@ export async function buildTreeWithLlm(
             `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
             `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
             "Hard granularity constraints:",
-            `- Final top-level categories must stay within ${granularity.targetCategories}, with an absolute cap of ${granularity.targetTopLevelMax}.`,
+            `- Aim for ${granularity.targetCategories} broad reusable top-level categories for the whole book; never create individual entry/name roots just to hit this number.`,
+            `- The absolute top-level cap is ${granularity.targetTopLevelMax}.`,
             `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
             "- Reuse existing top-level categories before creating new ones.",
             "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
@@ -1329,13 +1330,6 @@ export async function buildTreeWithLlm(
         addGranularityIssue(
           `Moved ${movedTopLevelCategories} top-level categor${movedTopLevelCategories === 1 ? "y" : "ies"} under existing categories to enforce the ${granularity.targetTopLevelMax} category cap.`,
           "build_tree_with_llm.granularity_cap",
-        );
-      }
-      const promotedTopLevelCategories = enforceTopLevelCategoryMinimum(tree, granularity);
-      if (promotedTopLevelCategories > 0) {
-        addGranularityIssue(
-          `Promoted ${promotedTopLevelCategories} subcategor${promotedTopLevelCategories === 1 ? "y" : "ies"} to the top level to enforce the ${granularity.targetCategories} category target.`,
-          "build_tree_with_llm.granularity_minimum",
         );
       }
       const splitLeafCategories = enforceLeafEntryLimit(tree, granularity, "system");
