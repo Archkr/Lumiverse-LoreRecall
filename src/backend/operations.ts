@@ -40,6 +40,12 @@ import {
   type ControllerJsonResult,
 } from "./controller-json";
 import {
+  applyTreeAssignments,
+  enforceLeafEntryLimit,
+  enforceTopLevelCategoryCap,
+  normalizeTreeAssignmentsForGranularity,
+} from "./granularity";
+import {
   BOOK_CONFIG_DIR,
   CHARACTER_CONFIG_DIR,
   GLOBAL_SETTINGS_PATH,
@@ -323,11 +329,12 @@ async function subdivideLargeLeafNodes(
         "Split this oversized lore category into smaller sibling subcategories.",
         'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Subcategory"]}]}',
         `Current category: ${getCategoryLabelPath(tree, nodeId).join(" > ") || node.label}`,
-        `Target: keep subcategories around ${granularity.maxEntries} entries or fewer when practical.`,
+        `Mandatory leaf limit: no returned subcategory should contain more than ${granularity.maxEntries} entries when a split is possible.`,
         "Rules:",
         "- Use short reusable subcategory labels.",
         "- The path should be relative to the current category, not the full tree.",
         "- Create at least 2 useful subcategories when a split is possible.",
+        `- If more than ${granularity.maxEntries} entries share a theme, split that theme into narrower numbered or named subgroups.`,
         "- Leave path [] only if an entry truly belongs directly on the current category.",
         "",
         "Entries:",
@@ -1177,6 +1184,17 @@ export async function buildTreeWithLlm(
         { length: Math.ceil(cache.entries.length / entrySummaryBatchSize) },
         (_, index) => cache.entries.slice(index * entrySummaryBatchSize, (index + 1) * entrySummaryBatchSize),
       ).filter((batch) => batch.length > 0);
+      const addGranularityIssue = (message: string, phase: string) => {
+        const issue: OperationIssue = {
+          severity: "warn",
+          message,
+          bookId,
+          bookName,
+          phase,
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+      };
 
       for (const [chunkIndex, chunk] of chunks.entries()) {
         operation?.progress({
@@ -1191,92 +1209,134 @@ export async function buildTreeWithLlm(
           chunkTotal: chunkCount,
         });
 
-        const prompt = [
-          "Organize these lore entries into a compact retrieval tree.",
-          'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
-          `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
-          `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. Aim for ${granularity.targetCategories} top-level categories and no more than ${granularity.maxEntries} entries per leaf category.`,
-          ...buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount),
-          ...(chunkIndex === 0 && allEntryManifest
-            ? [
-                `This book has ${cache.entries.length} total entries across ${chunkCount} chunks. Design the category structure to accommodate the whole book, not just this chunk.`,
-                "All entry names in the book:",
-                `- ${allEntryManifest}`,
-              ]
-            : []),
-          "Use empty path [] when an entry should stay unassigned.",
-          "",
-          "Entries:",
-          ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail))),
-        ].join("\n");
+        const validEntryIds = new Set(chunk.map((entry) => entry.entryId));
+        const buildPrompt = (violations: string[]) =>
+          [
+            "Organize these lore entries into a compact retrieval tree.",
+            'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
+            `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
+            `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
+            "Hard granularity constraints:",
+            `- Final top-level categories must stay within ${granularity.targetCategories}, with an absolute cap of ${granularity.targetTopLevelMax}.`,
+            `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
+            "- Reuse existing top-level categories before creating new ones.",
+            "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
+            ...buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount),
+            ...(violations.length
+              ? [
+                  "The previous output violated these non-optional granularity constraints. Correct them in the new JSON:",
+                  ...violations.map((violation) => `- ${violation}`),
+                ]
+              : []),
+            ...(chunkIndex === 0 && allEntryManifest
+              ? [
+                  `This book has ${cache.entries.length} total entries across ${chunkCount} chunks. Design the category structure to accommodate the whole book, not just this chunk.`,
+                  "All entry names in the book:",
+                  `- ${allEntryManifest}`,
+                ]
+              : []),
+            "Use empty path [] when an entry should stay unassigned.",
+            "",
+            "Entries:",
+            ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail))),
+          ].join("\n");
 
-        const controllerResult = await runControllerJson(
-          prompt,
-          settings,
-          userId,
-          "assignments",
-          "lore_recall_tree_assignments",
-          ASSIGNMENTS_SCHEMA,
-          {
-            systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-            maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200),
-          },
-        );
-        const parsed =
-          controllerResult.parsed ??
-          normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
-        if (!parsed || !Array.isArray(parsed.assignments)) {
-          throw new ControllerJsonError(
-            `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
-            buildControllerDebugPayload({
-              phase: "build_tree_with_llm.assignments",
-              expectedKey: "assignments",
-              error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
-              bookId,
-              bookName,
-              chunkIndex: chunkIndex + 1,
-              chunkTotal: chunkCount,
-              provider: controllerResult.provider,
-              model: controllerResult.model,
-              connectionId: controllerResult.connectionId,
-              finishReason: controllerResult.finishReason,
-              toolCallsCount: controllerResult.toolCallsCount,
-              usage: controllerResult.usage,
-              parsedFrom: controllerResult.parsedFrom,
-              reasoningLength: controllerResult.rawReasoning.length,
-              settings,
-              prompt,
-              rawContent: controllerResult.rawContent,
-              rawReasoning: controllerResult.rawReasoning,
-              entrySample: chunk.slice(0, 12).map((entry) => ({
-                entryId: entry.entryId,
-                label: entry.label,
-              })),
-            }),
+        let assignmentValues: unknown = [];
+        let retryViolations: string[] = [];
+        let retriedForGranularity = false;
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const prompt = buildPrompt(retryViolations);
+          const controllerResult = await runControllerJson(
+            prompt,
+            settings,
+            userId,
+            "assignments",
+            "lore_recall_tree_assignments",
+            ASSIGNMENTS_SCHEMA,
+            {
+              systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
+              maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200),
+            },
+          );
+          const parsed =
+            controllerResult.parsed ??
+            normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
+          if (!parsed || !Array.isArray(parsed.assignments)) {
+            throw new ControllerJsonError(
+              `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+              buildControllerDebugPayload({
+                phase: "build_tree_with_llm.assignments",
+                expectedKey: "assignments",
+                error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+                bookId,
+                bookName,
+                chunkIndex: chunkIndex + 1,
+                chunkTotal: chunkCount,
+                provider: controllerResult.provider,
+                model: controllerResult.model,
+                connectionId: controllerResult.connectionId,
+                finishReason: controllerResult.finishReason,
+                toolCallsCount: controllerResult.toolCallsCount,
+                usage: controllerResult.usage,
+                parsedFrom: controllerResult.parsedFrom,
+                reasoningLength: controllerResult.rawReasoning.length,
+                settings,
+                prompt,
+                rawContent: controllerResult.rawContent,
+                rawReasoning: controllerResult.rawReasoning,
+                entrySample: chunk.slice(0, 12).map((entry) => ({
+                  entryId: entry.entryId,
+                  label: entry.label,
+                })),
+              }),
+            );
+          }
+
+          assignmentValues = parsed.assignments;
+          const check = normalizeTreeAssignmentsForGranularity(tree, assignmentValues, validEntryIds, granularity);
+          if (attempt === 0 && check.violations.length) {
+            retryViolations = check.violations;
+            retriedForGranularity = true;
+            continue;
+          }
+          break;
+        }
+
+        if (retriedForGranularity) {
+          addGranularityIssue(
+            `Retried ${bookName} chunk ${chunkIndex + 1} because the controller violated tree granularity constraints.`,
+            "build_tree_with_llm.granularity_retry",
           );
         }
-        const assignments = parsed.assignments.filter(
-          (value): value is Record<string, unknown> => !!value && typeof value === "object",
-        );
 
-        for (const assignment of assignments) {
-          const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
-          if (!entryId) continue;
-          const path = Array.isArray(assignment.path)
-            ? assignment.path.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-            : [];
-          if (path.length) {
-            const categoryId = ensureCategoryPath(tree, path, "llm");
-            assignEntryToTarget(tree, entryId, { categoryId });
-          } else {
-            assignEntryToTarget(tree, entryId, "unassigned");
-          }
+        const normalized = normalizeTreeAssignmentsForGranularity(tree, assignmentValues, validEntryIds, granularity);
+        if (normalized.violations.length || normalized.adjustments.length) {
+          addGranularityIssue(
+            `Adjusted ${bookName} chunk ${chunkIndex + 1} to enforce ${granularity.label}${granularity.isAuto ? " (auto)" : ""} granularity.`,
+            "build_tree_with_llm.granularity_normalize",
+          );
         }
+        applyTreeAssignments(tree, normalized.assignments, "llm");
 
         completedUnits += 1;
       }
 
       await subdivideLargeLeafNodes(tree, cache.entries, granularity, settings, userId);
+      const movedTopLevelCategories = enforceTopLevelCategoryCap(tree, granularity);
+      if (movedTopLevelCategories > 0) {
+        addGranularityIssue(
+          `Moved ${movedTopLevelCategories} top-level categor${movedTopLevelCategories === 1 ? "y" : "ies"} under existing categories to enforce the ${granularity.targetTopLevelMax} category cap.`,
+          "build_tree_with_llm.granularity_cap",
+        );
+      }
+      const splitLeafCategories = enforceLeafEntryLimit(tree, granularity, "system");
+      if (splitLeafCategories > 0) {
+        addGranularityIssue(
+          `Split ${splitLeafCategories} oversized leaf categor${splitLeafCategories === 1 ? "y" : "ies"} into numbered subgroups to enforce the ${granularity.maxEntries} entries-per-leaf limit.`,
+          "build_tree_with_llm.granularity_split",
+        );
+      }
 
       const categoryNodeIds = Object.keys(tree.nodes).filter((nodeId) => {
         if (nodeId === tree.rootId) return false;

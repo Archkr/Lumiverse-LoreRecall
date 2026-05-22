@@ -3576,6 +3576,239 @@ async function buildRetrievalPreview(messages, settings, config, books, userId, 
   };
 }
 
+// src/backend/granularity.ts
+function labelKey(value) {
+  return value.trim().toLowerCase();
+}
+function pathKey(path) {
+  return path.map(labelKey).join("\x1F");
+}
+function stableHash(value) {
+  let hash = 0;
+  for (let index = 0;index < value.length; index += 1) {
+    hash = hash * 31 + value.charCodeAt(index) >>> 0;
+  }
+  return hash;
+}
+function normalizePath(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+function coerceTreeAssignments(values, validEntryIds) {
+  const byEntryId = new Map;
+  const ignoredEntryIds = [];
+  if (!Array.isArray(values))
+    return { assignments: [], ignoredEntryIds };
+  for (const value of values) {
+    if (!value || typeof value !== "object")
+      continue;
+    const record = value;
+    const entryId = typeof record.entryId === "string" ? record.entryId.trim() : "";
+    if (!entryId || !validEntryIds.has(entryId)) {
+      if (entryId)
+        ignoredEntryIds.push(entryId);
+      continue;
+    }
+    byEntryId.set(entryId, {
+      entryId,
+      path: normalizePath(record.path)
+    });
+  }
+  return {
+    assignments: [...byEntryId.values()],
+    ignoredEntryIds: uniqueStrings(ignoredEntryIds)
+  };
+}
+function getRoot(tree) {
+  return tree.nodes[tree.rootId];
+}
+function getTopLevelNodes(tree) {
+  const root = getRoot(tree);
+  return (root?.childIds ?? []).map((nodeId) => tree.nodes[nodeId]).filter((node) => !!node);
+}
+function findChildByLabel(tree, parentId, label) {
+  const parent = tree.nodes[parentId];
+  if (!parent)
+    return null;
+  const key = labelKey(label);
+  return parent.childIds.find((childId) => labelKey(tree.nodes[childId]?.label ?? "") === key) ?? null;
+}
+function findNodeIdByPath(tree, path) {
+  let parentId = tree.rootId;
+  for (const label of path) {
+    const childId = findChildByLabel(tree, parentId, label);
+    if (!childId)
+      return null;
+    parentId = childId;
+  }
+  return parentId;
+}
+function getAllowedTopLevelLabels(tree, assignments, granularity) {
+  const allowed = [];
+  const seen = new Set;
+  const push = (label) => {
+    const trimmed = label.trim();
+    const key = labelKey(trimmed);
+    if (!trimmed || seen.has(key) || allowed.length >= granularity.targetTopLevelMax)
+      return;
+    allowed.push(trimmed);
+    seen.add(key);
+  };
+  for (const node of getTopLevelNodes(tree))
+    push(node.label);
+  for (const assignment of assignments) {
+    if (assignment.path.length)
+      push(assignment.path[0]);
+  }
+  return allowed;
+}
+function validateTreeAssignmentsGranularity(tree, assignments, granularity) {
+  const violations = [];
+  const existingTopKeys = new Set(getTopLevelNodes(tree).map((node) => labelKey(node.label)));
+  const newTopLabels = [];
+  const newTopKeys = new Set;
+  for (const assignment of assignments) {
+    const topLabel = assignment.path[0];
+    if (!topLabel)
+      continue;
+    const key = labelKey(topLabel);
+    if (existingTopKeys.has(key) || newTopKeys.has(key))
+      continue;
+    newTopKeys.add(key);
+    newTopLabels.push(topLabel);
+  }
+  const totalTopLevel = existingTopKeys.size + newTopLabels.length;
+  if (totalTopLevel > granularity.targetTopLevelMax) {
+    const allowedNewCount = Math.max(0, granularity.targetTopLevelMax - existingTopKeys.size);
+    violations.push(`Top-level category cap exceeded: ${totalTopLevel}/${granularity.targetTopLevelMax}. Excess top-level labels: ${newTopLabels.slice(allowedNewCount).join(", ") || "unknown"}.`);
+  }
+  const leafCounts = new Map;
+  for (const assignment of assignments) {
+    if (!assignment.path.length)
+      continue;
+    const key = pathKey(assignment.path);
+    const current = leafCounts.get(key) ?? { path: assignment.path, count: 0, existingCount: 0 };
+    current.count += 1;
+    leafCounts.set(key, current);
+  }
+  for (const item of leafCounts.values()) {
+    const nodeId = findNodeIdByPath(tree, item.path);
+    const node = nodeId ? tree.nodes[nodeId] : null;
+    item.existingCount = node && node.childIds.length === 0 ? node.entryIds.length : 0;
+    const total = item.existingCount + item.count;
+    if (total > granularity.maxEntries) {
+      violations.push(`Leaf category "${item.path.join(" > ")}" would contain ${total}/${granularity.maxEntries} entries.`);
+    }
+  }
+  return violations;
+}
+function normalizeTreeAssignmentsForGranularity(tree, rawAssignments, validEntryIds, granularity) {
+  const coerced = coerceTreeAssignments(rawAssignments, validEntryIds);
+  const violations = validateTreeAssignmentsGranularity(tree, coerced.assignments, granularity);
+  const adjustments = [];
+  const allowedTopLabels = getAllowedTopLevelLabels(tree, coerced.assignments, granularity);
+  const allowedTopKeys = new Set(allowedTopLabels.map(labelKey));
+  let assignments = coerced.assignments.map((assignment) => {
+    if (!assignment.path.length || allowedTopKeys.has(labelKey(assignment.path[0])))
+      return assignment;
+    const targetTopLabel = allowedTopLabels[stableHash(assignment.path[0]) % allowedTopLabels.length] ?? assignment.path[0];
+    adjustments.push(`Moved "${assignment.path[0]}" under "${targetTopLabel}" to respect the top-level category cap.`);
+    return {
+      ...assignment,
+      path: [targetTopLabel, ...assignment.path]
+    };
+  });
+  const byPath = new Map;
+  for (const assignment of assignments) {
+    if (!assignment.path.length)
+      continue;
+    const key = pathKey(assignment.path);
+    const list = byPath.get(key) ?? [];
+    list.push(assignment);
+    byPath.set(key, list);
+  }
+  const splitEntryIds = new Map;
+  for (const [key, list] of byPath) {
+    const path = list[0]?.path ?? [];
+    const nodeId = findNodeIdByPath(tree, path);
+    const node = nodeId ? tree.nodes[nodeId] : null;
+    const existingCount = node && node.childIds.length === 0 ? node.entryIds.length : 0;
+    if (existingCount + list.length <= granularity.maxEntries)
+      continue;
+    adjustments.push(`Split "${path.join(" > ")}" assignment output to respect ${granularity.maxEntries} entries per leaf.`);
+    splitEntryIds.set(key, list.map((assignment) => assignment.entryId));
+  }
+  if (splitEntryIds.size) {
+    assignments = assignments.map((assignment) => {
+      if (!assignment.path.length)
+        return assignment;
+      const splitIds = splitEntryIds.get(pathKey(assignment.path));
+      if (!splitIds)
+        return assignment;
+      const index = Math.max(0, splitIds.indexOf(assignment.entryId));
+      return {
+        ...assignment,
+        path: [...assignment.path, `Part ${Math.floor(index / granularity.maxEntries) + 1}`]
+      };
+    });
+  }
+  return {
+    assignments,
+    violations,
+    adjustments: uniqueStrings(adjustments),
+    ignoredEntryIds: coerced.ignoredEntryIds
+  };
+}
+function applyTreeAssignments(tree, assignments, createdBy) {
+  for (const assignment of assignments) {
+    if (assignment.path.length) {
+      const categoryId = ensureCategoryPath(tree, assignment.path, createdBy);
+      assignEntryToTarget(tree, assignment.entryId, { categoryId });
+    } else {
+      assignEntryToTarget(tree, assignment.entryId, "unassigned");
+    }
+  }
+}
+function enforceTopLevelCategoryCap(tree, granularity) {
+  const root = getRoot(tree);
+  if (!root || root.childIds.length <= granularity.targetTopLevelMax)
+    return 0;
+  const keptIds = root.childIds.slice(0, granularity.targetTopLevelMax).filter((nodeId) => !!tree.nodes[nodeId]);
+  const excessIds = root.childIds.slice(granularity.targetTopLevelMax).filter((nodeId) => !!tree.nodes[nodeId]);
+  if (!keptIds.length)
+    return 0;
+  root.childIds = keptIds;
+  for (const [index, nodeId] of excessIds.entries()) {
+    const node = tree.nodes[nodeId];
+    const parentId = keptIds[index % keptIds.length];
+    const parent = tree.nodes[parentId];
+    if (!node || !parent)
+      continue;
+    node.parentId = parentId;
+    if (!parent.childIds.includes(nodeId))
+      parent.childIds.push(nodeId);
+  }
+  return excessIds.length;
+}
+function enforceLeafEntryLimit(tree, granularity, createdBy) {
+  const oversizedLeaves = Object.values(tree.nodes).filter((node) => node.id !== tree.rootId && node.childIds.length === 0 && node.entryIds.length > granularity.maxEntries);
+  let splitCount = 0;
+  for (const node of oversizedLeaves) {
+    const entryIds = [...node.entryIds];
+    node.entryIds = [];
+    for (let index = 0;index < entryIds.length; index += granularity.maxEntries) {
+      const label = `Part ${Math.floor(index / granularity.maxEntries) + 1}`;
+      const childId = makeNodeId("cat", `${node.label}-${label}`);
+      tree.nodes[childId] = makeTreeNode(childId, label, node.id, createdBy);
+      tree.nodes[childId].entryIds = entryIds.slice(index, index + granularity.maxEntries);
+      node.childIds.push(childId);
+    }
+    splitCount += 1;
+  }
+  return splitCount;
+}
+
 // src/backend/operations.ts
 var CATEGORIZATION_SYSTEM_PROMPT = "You are a categorization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
 var SUMMARY_SYSTEM_PROMPT = "You are a summarization assistant. Return only the requested JSON. Do not include commentary, markdown fences, or reasoning text.";
@@ -3733,11 +3966,12 @@ async function subdivideLargeLeafNodes(tree, entries, granularity, settings, use
         "Split this oversized lore category into smaller sibling subcategories.",
         'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Subcategory"]}]}',
         `Current category: ${getCategoryLabelPath(tree, nodeId).join(" > ") || node.label}`,
-        `Target: keep subcategories around ${granularity.maxEntries} entries or fewer when practical.`,
+        `Mandatory leaf limit: no returned subcategory should contain more than ${granularity.maxEntries} entries when a split is possible.`,
         "Rules:",
         "- Use short reusable subcategory labels.",
         "- The path should be relative to the current category, not the full tree.",
         "- Create at least 2 useful subcategories when a split is possible.",
+        `- If more than ${granularity.maxEntries} entries share a theme, split that theme into narrower numbered or named subgroups.`,
         "- Leave path [] only if an entry truly belongs directly on the current category.",
         "",
         "Entries:",
@@ -4361,6 +4595,17 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
 - `) : "";
       const entrySummaryBatchSize = 8;
       const entrySummaryBatches = Array.from({ length: Math.ceil(cache.entries.length / entrySummaryBatchSize) }, (_, index) => cache.entries.slice(index * entrySummaryBatchSize, (index + 1) * entrySummaryBatchSize)).filter((batch) => batch.length > 0);
+      const addGranularityIssue = (message, phase) => {
+        const issue = {
+          severity: "warn",
+          message,
+          bookId,
+          bookName,
+          phase
+        };
+        issues.push(issue);
+        operation?.addIssue(issue);
+      };
       for (const [chunkIndex, chunk] of chunks.entries()) {
         operation?.progress({
           phase: "controller",
@@ -4373,12 +4618,22 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           chunkCurrent: chunkIndex + 1,
           chunkTotal: chunkCount
         });
-        const prompt = [
+        const validEntryIds = new Set(chunk.map((entry) => entry.entryId));
+        const buildPrompt = (violations) => [
           "Organize these lore entries into a compact retrieval tree.",
           'Return ONLY JSON in this exact shape: {"assignments":[{"entryId":"...","path":["Category","Subcategory"]}]}',
           `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
-          `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. Aim for ${granularity.targetCategories} top-level categories and no more than ${granularity.maxEntries} entries per leaf category.`,
+          `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
+          "Hard granularity constraints:",
+          `- Final top-level categories must stay within ${granularity.targetCategories}, with an absolute cap of ${granularity.targetTopLevelMax}.`,
+          `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
+          "- Reuse existing top-level categories before creating new ones.",
+          "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
           ...buildExistingTreeGuidance(tree, granularity, chunkIndex, chunkCount),
+          ...violations.length ? [
+            "The previous output violated these non-optional granularity constraints. Correct them in the new JSON:",
+            ...violations.map((violation) => `- ${violation}`)
+          ] : [],
           ...chunkIndex === 0 && allEntryManifest ? [
             `This book has ${cache.entries.length} total entries across ${chunkCount} chunks. Design the category structure to accommodate the whole book, not just this chunk.`,
             "All entry names in the book:",
@@ -4390,54 +4645,71 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           ...chunk.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)))
         ].join(`
 `);
-        const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
-          systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-          maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
-        });
-        const parsed = controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
-        if (!parsed || !Array.isArray(parsed.assignments)) {
-          throw new ControllerJsonError(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`, buildControllerDebugPayload({
-            phase: "build_tree_with_llm.assignments",
-            expectedKey: "assignments",
-            error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
-            bookId,
-            bookName,
-            chunkIndex: chunkIndex + 1,
-            chunkTotal: chunkCount,
-            provider: controllerResult.provider,
-            model: controllerResult.model,
-            connectionId: controllerResult.connectionId,
-            finishReason: controllerResult.finishReason,
-            toolCallsCount: controllerResult.toolCallsCount,
-            usage: controllerResult.usage,
-            parsedFrom: controllerResult.parsedFrom,
-            reasoningLength: controllerResult.rawReasoning.length,
-            settings,
-            prompt,
-            rawContent: controllerResult.rawContent,
-            rawReasoning: controllerResult.rawReasoning,
-            entrySample: chunk.slice(0, 12).map((entry) => ({
-              entryId: entry.entryId,
-              label: entry.label
-            }))
-          }));
-        }
-        const assignments = parsed.assignments.filter((value) => !!value && typeof value === "object");
-        for (const assignment of assignments) {
-          const entryId = typeof assignment.entryId === "string" ? assignment.entryId : "";
-          if (!entryId)
-            continue;
-          const path = Array.isArray(assignment.path) ? assignment.path.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-          if (path.length) {
-            const categoryId = ensureCategoryPath(tree, path, "llm");
-            assignEntryToTarget(tree, entryId, { categoryId });
-          } else {
-            assignEntryToTarget(tree, entryId, "unassigned");
+        let assignmentValues = [];
+        let retryViolations = [];
+        let retriedForGranularity = false;
+        for (let attempt = 0;attempt < 2; attempt += 1) {
+          const prompt = buildPrompt(retryViolations);
+          const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
+            systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
+            maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
+          });
+          const parsed = controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
+          if (!parsed || !Array.isArray(parsed.assignments)) {
+            throw new ControllerJsonError(`The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`, buildControllerDebugPayload({
+              phase: "build_tree_with_llm.assignments",
+              expectedKey: "assignments",
+              error: `The controller did not return usable assignment JSON for chunk ${chunkIndex + 1}.`,
+              bookId,
+              bookName,
+              chunkIndex: chunkIndex + 1,
+              chunkTotal: chunkCount,
+              provider: controllerResult.provider,
+              model: controllerResult.model,
+              connectionId: controllerResult.connectionId,
+              finishReason: controllerResult.finishReason,
+              toolCallsCount: controllerResult.toolCallsCount,
+              usage: controllerResult.usage,
+              parsedFrom: controllerResult.parsedFrom,
+              reasoningLength: controllerResult.rawReasoning.length,
+              settings,
+              prompt,
+              rawContent: controllerResult.rawContent,
+              rawReasoning: controllerResult.rawReasoning,
+              entrySample: chunk.slice(0, 12).map((entry) => ({
+                entryId: entry.entryId,
+                label: entry.label
+              }))
+            }));
           }
+          assignmentValues = parsed.assignments;
+          const check = normalizeTreeAssignmentsForGranularity(tree, assignmentValues, validEntryIds, granularity);
+          if (attempt === 0 && check.violations.length) {
+            retryViolations = check.violations;
+            retriedForGranularity = true;
+            continue;
+          }
+          break;
         }
+        if (retriedForGranularity) {
+          addGranularityIssue(`Retried ${bookName} chunk ${chunkIndex + 1} because the controller violated tree granularity constraints.`, "build_tree_with_llm.granularity_retry");
+        }
+        const normalized = normalizeTreeAssignmentsForGranularity(tree, assignmentValues, validEntryIds, granularity);
+        if (normalized.violations.length || normalized.adjustments.length) {
+          addGranularityIssue(`Adjusted ${bookName} chunk ${chunkIndex + 1} to enforce ${granularity.label}${granularity.isAuto ? " (auto)" : ""} granularity.`, "build_tree_with_llm.granularity_normalize");
+        }
+        applyTreeAssignments(tree, normalized.assignments, "llm");
         completedUnits += 1;
       }
       await subdivideLargeLeafNodes(tree, cache.entries, granularity, settings, userId);
+      const movedTopLevelCategories = enforceTopLevelCategoryCap(tree, granularity);
+      if (movedTopLevelCategories > 0) {
+        addGranularityIssue(`Moved ${movedTopLevelCategories} top-level categor${movedTopLevelCategories === 1 ? "y" : "ies"} under existing categories to enforce the ${granularity.targetTopLevelMax} category cap.`, "build_tree_with_llm.granularity_cap");
+      }
+      const splitLeafCategories = enforceLeafEntryLimit(tree, granularity, "system");
+      if (splitLeafCategories > 0) {
+        addGranularityIssue(`Split ${splitLeafCategories} oversized leaf categor${splitLeafCategories === 1 ? "y" : "ies"} into numbered subgroups to enforce the ${granularity.maxEntries} entries-per-leaf limit.`, "build_tree_with_llm.granularity_split");
+      }
       const categoryNodeIds = Object.keys(tree.nodes).filter((nodeId) => {
         if (nodeId === tree.rootId)
           return false;

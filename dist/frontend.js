@@ -264,17 +264,15 @@ function filterBooks(state, filterText) {
   if (!state)
     return [];
   const query = filterText.trim().toLowerCase();
+  if (query) {
+    return state.allWorldBooks.filter((book) => `${book.name} ${book.description}`.toLowerCase().includes(query)).map((book) => book.id);
+  }
   const ids = new Set([
     ...Object.keys(state.bookConfigs),
     ...state.suggestedBookIds,
     ...state.characterConfig?.managedBookIds ?? []
   ]);
-  const base = state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id) || !query);
-  return base.filter((book) => {
-    if (!query)
-      return true;
-    return `${book.name} ${book.description}`.toLowerCase().includes(query);
-  }).map((book) => book.id);
+  return state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id)).map((book) => book.id);
 }
 function formatMode(mode) {
   if (!mode)
@@ -318,8 +316,8 @@ var LORE_RECALL_CSS = `
 /* ===========================================================
    Lore Recall - "Codex" visual system
    Library/codex identity: editorial serif headings, monospaced
-   metadata, warm dark palette, two-layer elevation, single
-   accent paired with a sparingly-used amber "lore" highlight.
+   metadata, dynamic host palette, two-layer elevation, and the
+   Lumiverse primary accent.
    =========================================================== */
 
 .lore-root {
@@ -353,10 +351,6 @@ var LORE_RECALL_CSS = `
   --lr-acc-soft: var(--lumiverse-primary-light, rgba(107, 143, 240, 0.18));
   --lr-acc-muted: var(--lumiverse-primary-muted, rgba(107, 143, 240, 0.10));
   --lr-acc-fg: var(--lumiverse-primary-contrast, #ffffff);
-
-  /* Lore - amber brand-only highlight, never on buttons/borders */
-  --lr-lore: #d4a35a;
-  --lr-lore-soft: rgba(212, 163, 90, 0.16);
 
   /* Tones */
   --lr-warn: var(--lumiverse-warning, #e08c56);
@@ -558,7 +552,7 @@ var LORE_RECALL_CSS = `
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--lr-lore);
+  color: var(--lr-acc);
   margin-bottom: 6px;
   display: inline-flex;
   align-items: center;
@@ -568,7 +562,7 @@ var LORE_RECALL_CSS = `
 .lore-page-kicker-mark {
   width: 12px;
   height: 12px;
-  color: var(--lr-lore);
+  color: var(--lr-acc);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -700,13 +694,13 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-status.lore::before {
-  background: var(--lr-lore);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-lore) 30%, transparent);
+  background: var(--lr-acc);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-acc) 30%, transparent);
 }
 
 .lore-status.live::before {
-  background: var(--lr-lore);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-lore) 30%, transparent);
+  background: var(--lr-acc);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lr-acc) 30%, transparent);
   animation: lore-pulse 1.6s ease-in-out infinite;
 }
 
@@ -752,9 +746,9 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-tag.lore {
-  color: var(--lr-lore);
-  border-color: color-mix(in srgb, var(--lr-lore) 40%, var(--lr-line));
-  background: var(--lr-lore-soft);
+  color: var(--lr-acc);
+  border-color: color-mix(in srgb, var(--lr-acc) 40%, var(--lr-line));
+  background: var(--lr-acc-soft);
 }
 
 /* ---------- Metric strip ---------------------------------- */
@@ -1625,8 +1619,8 @@ var LORE_RECALL_CSS = `
   background: var(--lr-line-2);
 }
 
-.lore-feed-session.live { box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-lore) 24%, transparent); }
-.lore-feed-session.live::before { background: var(--lr-lore); }
+.lore-feed-session.live { box-shadow: 0 0 0 1px color-mix(in srgb, var(--lr-acc) 24%, transparent); }
+.lore-feed-session.live::before { background: var(--lr-acc); }
 
 /* Session card - vertical stacked layout, dense but legible at narrow widths */
 .lore-feed-session-head {
@@ -1959,10 +1953,8 @@ var LORE_RECALL_CSS = `
   gap: 0;
   padding: 0;
   overflow: hidden;
-  border-color: color-mix(in srgb, var(--lr-lore) 18%, var(--lr-line));
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--lr-lore) 5%, transparent), transparent 110px),
-    var(--lr-bg-panel);
+  border-color: color-mix(in srgb, var(--lr-acc) 18%, var(--lr-line));
+  background: var(--lr-bg-panel);
   box-shadow:
     0 10px 30px rgba(0, 0, 0, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.035);
@@ -1975,9 +1967,7 @@ var LORE_RECALL_CSS = `
   gap: 10px;
   padding: 11px 14px 10px;
   border-bottom: 1px solid var(--lr-line);
-  background:
-    radial-gradient(circle at 16px 0, color-mix(in srgb, var(--lr-lore) 16%, transparent), transparent 90px),
-    color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
+  background: color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
 }
 
 .lore-feed-panel-title {
@@ -1995,7 +1985,7 @@ var LORE_RECALL_CSS = `
 .lore-feed-panel-title svg {
   width: 13px;
   height: 13px;
-  color: var(--lr-lore);
+  color: var(--lr-acc);
 }
 
 .lore-feed-panel-count {
@@ -2006,8 +1996,8 @@ var LORE_RECALL_CSS = `
   height: 16px;
   padding: 0 5px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--lr-lore) 16%, transparent);
-  color: var(--lr-lore);
+  background: color-mix(in srgb, var(--lr-acc) 16%, transparent);
+  color: var(--lr-acc);
   font-size: 10px;
   font-family: var(--lr-font-mono);
   font-weight: 700;
@@ -2068,10 +2058,10 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-tab.active {
-  color: var(--lr-lore);
-  background: color-mix(in srgb, var(--lr-lore) 13%, transparent);
+  color: var(--lr-acc);
+  background: color-mix(in srgb, var(--lr-acc) 13%, transparent);
   font-weight: 700;
-  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--lr-lore) 55%, transparent);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--lr-acc) 55%, transparent);
 }
 
 .lore-feed {
@@ -2081,9 +2071,7 @@ var LORE_RECALL_CSS = `
 .lore-feed-stream {
   max-height: 390px;
   overflow-y: auto;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--lr-lore) 4%, transparent), transparent 90px),
-    color-mix(in srgb, var(--lr-bg-panel) 82%, var(--lr-bg-page));
+  background: color-mix(in srgb, var(--lr-bg-panel) 82%, var(--lr-bg-page));
 }
 
 .lore-feed-session-marker {
@@ -2099,7 +2087,7 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-feed-session-marker.live {
-  border-left-color: var(--lr-lore);
+  border-left-color: var(--lr-acc);
 }
 
 .lore-feed-session-marker.success { border-left-color: color-mix(in srgb, var(--lr-good) 72%, var(--lr-line)); }
@@ -2242,7 +2230,7 @@ var LORE_RECALL_CSS = `
   gap: 5px;
   width: 100%;
   cursor: pointer;
-  color: var(--lr-lore);
+  color: var(--lr-acc);
   font-size: 10.5px;
   font-weight: 700;
   line-height: 1.35;
@@ -2258,7 +2246,7 @@ var LORE_RECALL_CSS = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: color-mix(in srgb, var(--lr-lore) 78%, var(--lr-muted));
+  color: color-mix(in srgb, var(--lr-acc) 78%, var(--lr-muted));
   transition: transform var(--lr-t);
 }
 
@@ -2295,11 +2283,9 @@ var LORE_RECALL_CSS = `
   overflow-y: auto;
   margin-top: 6px;
   padding: 6px;
-  border: 1px solid color-mix(in srgb, var(--lr-lore) 18%, var(--lr-line));
+  border: 1px solid color-mix(in srgb, var(--lr-acc) 18%, var(--lr-line));
   border-radius: 7px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--lr-bg-page) 46%, transparent), transparent),
-    color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
+  background: color-mix(in srgb, var(--lr-bg-page) 42%, transparent);
 }
 
 .lore-feed-detail-item,
@@ -2665,7 +2651,7 @@ var LORE_RECALL_CSS = `
 .lore-editor-kind {
   font-size: 10px;
   font-weight: 600;
-  color: var(--lr-lore);
+  color: var(--lr-acc);
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
@@ -3004,8 +2990,8 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-build-row.building {
-  border-color: color-mix(in srgb, var(--lr-lore) 45%, var(--lr-line));
-  background: color-mix(in srgb, var(--lr-lore) 5%, var(--lr-bg-page));
+  border-color: color-mix(in srgb, var(--lr-acc) 45%, var(--lr-line));
+  background: color-mix(in srgb, var(--lr-acc) 5%, var(--lr-bg-page));
 }
 
 .lore-build-row.building::before {
@@ -3015,7 +3001,7 @@ var LORE_RECALL_CSS = `
   top: 0;
   bottom: 0;
   width: 2px;
-  background: var(--lr-lore);
+  background: var(--lr-acc);
   border-radius: 2px 0 0 2px;
 }
 
@@ -3094,7 +3080,7 @@ var LORE_RECALL_CSS = `
 }
 
 .lore-build-row-status.active {
-  color: var(--lr-lore);
+  color: var(--lr-acc);
   font-style: italic;
   font-family: inherit;
 }

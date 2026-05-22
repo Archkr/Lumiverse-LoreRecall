@@ -49,7 +49,7 @@ import {
 } from "./helpers";
 import { LORE_RECALL_CSS } from "./styles";
 
-/* The Lore Recall brand mark - refined tree-graph in amber for the drawer tab. */
+/* The Lore Recall brand mark - refined tree-graph using the host theme color. */
 const TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="5.5" r="1.8"/><circle cx="5" cy="18.5" r="1.8"/><circle cx="19" cy="12" r="1.8"/><path d="M6.7 5.5h6a4 4 0 0 1 4 4v0.5"/><path d="M6.7 18.5h6a4 4 0 0 0 4-4v-0.5"/></svg>`;
 
 /* Single icon set. 16x16 viewBox, currentColor, stroke 1.6. Use via innerHTML. */

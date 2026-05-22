@@ -96,18 +96,18 @@ export function getEntryBreadcrumb(tree: BookTreeIndex, entry: ManagedBookEntryV
 export function filterBooks(state: FrontendState | null, filterText: string): string[] {
   if (!state) return [];
   const query = filterText.trim().toLowerCase();
+  if (query) {
+    return state.allWorldBooks
+      .filter((book) => `${book.name} ${book.description}`.toLowerCase().includes(query))
+      .map((book) => book.id);
+  }
+
   const ids = new Set<string>([
     ...Object.keys(state.bookConfigs),
     ...state.suggestedBookIds,
     ...(state.characterConfig?.managedBookIds ?? []),
   ]);
-  const base = state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id) || !query);
-  return base
-    .filter((book) => {
-      if (!query) return true;
-      return `${book.name} ${book.description}`.toLowerCase().includes(query);
-    })
-    .map((book) => book.id);
+  return state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id)).map((book) => book.id);
 }
 
 export function formatMode(mode: string | null | undefined): string {
