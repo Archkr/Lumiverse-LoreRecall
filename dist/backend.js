@@ -1030,9 +1030,11 @@ var EMPTY_ENTRY_ID_SET = new Set;
 var DIRECT_MENTION_SEED_LIMIT = 12;
 var SCENE_ANCHOR_LIMIT = 12;
 var SELECTIVE_FALLBACK_LIMIT = 8;
-var ACTIVE_ANCHOR_SCORE_THRESHOLD = 10;
+var ACTIVE_ANCHOR_SCORE_THRESHOLD = 8;
 var BACKGROUND_MENTION_SCORE_THRESHOLD = 10;
 var SUPPORT_CONTEXT_SCORE_THRESHOLD = 14;
+var RELATED_SUPPORT_SCORE_THRESHOLD = 10;
+var RELATED_SUPPORT_LIMIT = 8;
 var HIGH_CONFIDENCE_DYNAMIC_THRESHOLD = 12;
 var FEEDBACK_HOT_MS = 2 * 60 * 60 * 1000;
 var FEEDBACK_WARM_MS = 12 * 60 * 60 * 1000;
@@ -1618,6 +1620,32 @@ var COMPOSITE_LABEL_TERMS = new Set([
   "rivalry",
   "romance"
 ]);
+var SUPPORT_CONTEXT_TERMS = new Set([
+  "abilities",
+  "ability",
+  "angel",
+  "artifact",
+  "base",
+  "doctrine",
+  "equipment",
+  "faction",
+  "facility",
+  "group",
+  "location",
+  "mechanic",
+  "mechanics",
+  "operation",
+  "operations",
+  "organization",
+  "power",
+  "powers",
+  "protocol",
+  "rule",
+  "rules",
+  "system",
+  "technology",
+  "weapon"
+]);
 function getPrincipalLabelTokens(label) {
   return tokenize(label).filter((token) => !COMPOSITE_LABEL_TERMS.has(token));
 }
@@ -1668,6 +1696,9 @@ function hasPrimaryReason(reasons) {
 function isDynamicInjectionEligible(candidate) {
   if (candidate.entry.constant)
     return true;
+  if (candidate.reasons.includes("related_support")) {
+    return candidate.score >= RELATED_SUPPORT_SCORE_THRESHOLD;
+  }
   if (!hasPrimaryReason(candidate.reasons))
     return false;
   if (candidate.reasons.includes("constraint") && !candidate.reasons.includes("active") && !candidate.reasons.includes("background")) {
@@ -1689,6 +1720,103 @@ function filterDynamicInjectionCandidates(candidates) {
 }
 function scoreDensity(candidate) {
   return candidate.score / Math.max(getEntryInjectionBody(candidate.entry).length, 1);
+}
+function entryLooksLikeSupportContext(entry, tree) {
+  const labelTokens = tokenize(entry.label);
+  if (labelTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token)))
+    return true;
+  if ([...entry.tags, entry.groupName, ...entry.key, ...entry.keysecondary].flatMap(tokenize).some((token) => SUPPORT_CONTEXT_TERMS.has(token))) {
+    return true;
+  }
+  if (tree) {
+    const breadcrumbTokens = tokenize(getEntryBreadcrumb(entry, tree));
+    if (breadcrumbTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token)))
+      return true;
+  }
+  return false;
+}
+function scoreRelatedSupportCandidate(candidate, tree, seedEntries, seedText, feedback) {
+  if (candidate.disabled || candidate.constant || !seedEntries.length)
+    return null;
+  const reasons = ["related_support"];
+  let score = 0;
+  const labelPhrases = normalizeVariantList([candidate.label]);
+  const aliasPhrases = normalizeVariantList(candidate.aliases);
+  const keyPhrases = normalizeVariantList([...candidate.key, ...candidate.keysecondary]);
+  const exactLabelMatches = labelPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  const aliasMatches = aliasPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  const keyMatches = keyPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  if (isCompositeEntryLabel(candidate.label) && exactLabelMatches <= 0 && aliasMatches <= 0) {
+    const principalTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
+    const principalHits = principalTokens.filter((token) => containsToken(seedText, token)).length;
+    if (principalHits < Math.min(principalTokens.length, 3))
+      return null;
+  }
+  if (exactLabelMatches > 0) {
+    score += exactLabelMatches * 16;
+    reasons.push("label");
+  }
+  if (aliasMatches > 0) {
+    score += aliasMatches * 12;
+    reasons.push("alias");
+  }
+  if (keyMatches > 0) {
+    score += keyMatches * 10;
+    reasons.push("keyword");
+  }
+  const candidateLabelTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
+  const labelTokenHits = candidateLabelTokens.filter((token) => containsToken(seedText, token)).length;
+  if (labelTokenHits >= Math.min(2, candidateLabelTokens.length)) {
+    score += labelTokenHits * 4;
+    if (!reasons.includes("label"))
+      reasons.push("label");
+  }
+  const candidateText = normalizeSearchText([
+    candidate.label,
+    candidate.summary,
+    candidate.comment,
+    candidate.groupName,
+    candidate.tags.join(" "),
+    getEntryBreadcrumb(candidate, tree),
+    truncateText(getEntryBody(candidate), 1000)
+  ].join(" "));
+  const seedPhraseHits = seedEntries.reduce((total, seed) => {
+    const phrases = normalizeVariantList([seed.entry.label, ...seed.entry.aliases]);
+    return total + phrases.reduce((innerTotal, phrase) => innerTotal + Math.min(1, countSegmentPhrase(candidateText, phrase)), 0);
+  }, 0);
+  if (seedPhraseHits > 0) {
+    score += Math.min(10, seedPhraseHits * 3);
+    reasons.push("content");
+  }
+  if (entryLooksLikeSupportContext(candidate, tree)) {
+    score += 4;
+    reasons.push("support_context");
+  }
+  score += getDynamicFeedbackBoost(candidate, feedback);
+  if (score < RELATED_SUPPORT_SCORE_THRESHOLD)
+    return null;
+  return {
+    entry: candidate,
+    score,
+    reasons: uniqueStrings(reasons),
+    selectionRole: "support_context"
+  };
+}
+function buildRelatedSupportCandidates(seedEntries, books, excludedEntryIds, existingEntryIds, feedback, limit = RELATED_SUPPORT_LIMIT) {
+  if (!seedEntries.length || limit <= 0)
+    return [];
+  const seedText = normalizeSearchText(seedEntries.map((item) => [
+    item.entry.label,
+    item.entry.aliases.join(" "),
+    item.entry.summary,
+    item.entry.comment,
+    item.entry.tags.join(" "),
+    item.entry.groupName,
+    getEntryInjectionBody(item.entry)
+  ].join(" ")).join(" "));
+  if (!seedText)
+    return [];
+  return books.flatMap((book) => book.cache.entries.filter((entry) => !excludedEntryIds.has(entry.entryId) && !existingEntryIds.has(entry.entryId)).map((entry) => scoreRelatedSupportCandidate(entry, book.tree, seedEntries, seedText, feedback))).filter((item) => !!item).sort((left, right) => Number(entryLooksLikeSupportContext(right.entry)) - Number(entryLooksLikeSupportContext(left.entry)) || scoreDensity(right) - scoreDensity(left) || right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, limit);
 }
 function scoreEntry(entry, tree, queryText, queryTokens, feedback) {
   const reasons = [];
@@ -2656,6 +2784,7 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
   }
   const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval, excludedEntryIds, feedback);
   const rawCandidateById = new Map(rawCandidates.map((item) => [item.entry.entryId, item]));
+  const supportSeeds = sceneAnchors.length ? sceneAnchors : rawCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
   for (const anchor of sceneAnchors) {
     const existing = rawCandidateById.get(anchor.entry.entryId);
     rawCandidateById.set(anchor.entry.entryId, existing ? {
@@ -2664,6 +2793,22 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
       reasons: uniqueStrings([...existing.reasons, ...anchor.reasons]),
       selectionRole: existing.selectionRole ?? anchor.selectionRole
     } : anchor);
+  }
+  const relatedSupport = buildRelatedSupportCandidates(supportSeeds, Array.from(booksById.values()), excludedEntryIds, new Set(supportSeeds.map((candidate) => candidate.entry.entryId)), feedback, Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - sceneAnchors.length)));
+  if (relatedSupport.length) {
+    for (const candidate of relatedSupport) {
+      rawCandidateById.set(candidate.entry.entryId, candidate);
+    }
+    const relatedScopes = relatedSupport.map((candidate) => {
+      const book = booksById.get(candidate.entry.worldBookId);
+      if (!book)
+        return null;
+      const path = getEntryCategoryPath(book.tree, candidate.entry.entryId);
+      const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
+      return { book, nodeId };
+    }).filter((scope) => !!scope);
+    activeScopes = dedupeScopes([...activeScopes, ...relatedScopes]);
+    pushTrace(trace, "retrieve", "Expand related support", `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`, { entryCount: relatedSupport.length });
   }
   const mergedRawCandidates = Array.from(rawCandidateById.values());
   const rankedCandidates = rankSelectionCandidates(recentConversation, mergedRawCandidates, activeScopes);
@@ -3030,7 +3175,15 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
     return buildDeterministicSelection(ranked, limit);
   };
   const finalizeAccumulatedSelection = async (reason, label, durationMs) => {
-    const pooledCandidates = getCandidatePool();
+    let pooledCandidates = getCandidatePool();
+    const supportSeeds = sceneAnchorsById.size ? Array.from(sceneAnchorsById.values()) : pooledCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
+    const relatedSupport = buildRelatedSupportCandidates(supportSeeds, books, excludedEntryIds, new Set(supportSeeds.map((candidate) => candidate.entry.entryId)), feedback, Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - supportSeeds.length)));
+    if (relatedSupport.length) {
+      addSearchCandidatesToPool(relatedSupport);
+      pooledCandidates = getCandidatePool();
+      pushTrace(trace, "retrieve", "Expand related support", `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`, { entryCount: relatedSupport.length, durationMs });
+      steps.push(`Traversal expanded ${relatedSupport.length} related support candidate(s) from selected entry content.`);
+    }
     const finalScopes = dedupeScopes(retrievedScopes);
     const manifestCandidates = buildFinalCandidateSet();
     const rankedSceneAnchors = buildDeterministicSelection(rankSelectionCandidates(queryText, Array.from(sceneAnchorsById.values()), finalScopes), Math.min(maxDynamicEntries, sceneAnchorsById.size));

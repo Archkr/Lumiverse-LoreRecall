@@ -238,6 +238,41 @@ describe("retrieval accuracy", () => {
     expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
   });
 
+  test("selected active entries expand into related mechanics and organizations from their own content", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({
+          entryId: "captain",
+          label: "Captain Hale",
+          content:
+            "Captain Hale works under the Harbor Guild and follows Signal Doctrine whenever a field medic is assigned to dangerous inventory work.",
+        }),
+        makeEntry({
+          entryId: "guild",
+          label: "Harbor Guild",
+          content: "Harbor Guild is the organization responsible for safe workplace assignments.",
+        }),
+        makeEntry({
+          entryId: "doctrine",
+          label: "Signal Doctrine",
+          content: "Signal Doctrine is a protocol for deciding when a support specialist needs backup.",
+        }),
+        makeEntry({
+          entryId: "unrelated",
+          label: "Archive Vault",
+          content: "Archive Vault is unrelated storage lore.",
+        }),
+      ],
+      [{ role: "user", content: "Captain Hale wants to put the medic on inventory duty for a week." }],
+      { tokenBudget: 4, maxResults: 4 },
+    );
+
+    expect(dynamicLabels(preview)).toContain("Captain Hale");
+    expect(dynamicLabels(preview)).toContain("Harbor Guild");
+    expect(dynamicLabels(preview)).toContain("Signal Doctrine");
+    expect(dynamicLabels(preview)).not.toContain("Archive Vault");
+  });
+
   test("manifest selectedEntryIds stay consistent with selected dynamic entries", async () => {
     const preview = await previewFor(
       [
