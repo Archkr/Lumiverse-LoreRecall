@@ -245,17 +245,24 @@ describe("retrieval accuracy", () => {
           entryId: "captain",
           label: "Captain Hale",
           content:
-            "Captain Hale works under the Harbor Guild and follows Signal Doctrine whenever a field medic is assigned to dangerous inventory work.",
+            "Captain Hale works under the Harbor Guild, follows Signal Doctrine, and coordinates with Guide Rowan whenever a field medic is assigned to dangerous inventory work.",
         }),
         makeEntry({
           entryId: "guild",
           label: "Harbor Guild",
+          tags: ["organization"],
           content: "Harbor Guild is the organization responsible for safe workplace assignments.",
         }),
         makeEntry({
           entryId: "doctrine",
           label: "Signal Doctrine",
+          tags: ["protocol"],
           content: "Signal Doctrine is a protocol for deciding when a support specialist needs backup.",
+        }),
+        makeEntry({
+          entryId: "rowan",
+          label: "Guide Rowan",
+          content: "Guide Rowan is the liaison Captain Hale calls when inventory duty becomes dangerous.",
         }),
         makeEntry({
           entryId: "unrelated",
@@ -270,6 +277,7 @@ describe("retrieval accuracy", () => {
     expect(dynamicLabels(preview)).toContain("Captain Hale");
     expect(dynamicLabels(preview)).toContain("Harbor Guild");
     expect(dynamicLabels(preview)).toContain("Signal Doctrine");
+    expect(dynamicLabels(preview)).toContain("Guide Rowan");
     expect(dynamicLabels(preview)).not.toContain("Archive Vault");
   });
 

@@ -192,7 +192,10 @@ const ACTIVE_ANCHOR_SCORE_THRESHOLD = 8;
 const BACKGROUND_MENTION_SCORE_THRESHOLD = 10;
 const SUPPORT_CONTEXT_SCORE_THRESHOLD = 14;
 const RELATED_SUPPORT_SCORE_THRESHOLD = 10;
-const RELATED_SUPPORT_LIMIT = 8;
+const RELATED_SUPPORT_LIMIT = 16;
+const PROTECTED_RELATED_SUPPORT_LIMIT = 6;
+const PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT = 4;
+const PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT = 2;
 const HIGH_CONFIDENCE_DYNAMIC_THRESHOLD = 12;
 const FEEDBACK_HOT_MS = 2 * 60 * 60 * 1000;
 const FEEDBACK_WARM_MS = 12 * 60 * 60 * 1000;
@@ -1067,26 +1070,41 @@ const SUPPORT_CONTEXT_TERMS = new Set([
   "ability",
   "angel",
   "artifact",
+  "artifacts",
   "base",
+  "crew",
   "doctrine",
+  "doctrines",
   "equipment",
   "faction",
+  "factions",
   "facility",
+  "facilities",
   "group",
+  "groups",
   "location",
+  "locations",
+  "magic",
   "mechanic",
   "mechanics",
+  "mechanism",
+  "mechanisms",
   "operation",
   "operations",
   "organization",
+  "organizations",
   "power",
   "powers",
   "protocol",
+  "protocols",
   "rule",
   "rules",
   "system",
+  "systems",
+  "tech",
   "technology",
   "weapon",
+  "weapons",
 ]);
 
 function getPrincipalLabelTokens(label: string): string[] {
@@ -1304,6 +1322,61 @@ function buildRelatedSupportCandidates(
         left.entry.label.localeCompare(right.entry.label),
     )
     .slice(0, limit);
+}
+
+function compareSupportContext(left: ScoredEntry, right: ScoredEntry): number {
+  return (
+    Number(right.reasons.includes("support_context")) - Number(left.reasons.includes("support_context")) ||
+    scoreDensity(right) - scoreDensity(left) ||
+    right.score - left.score ||
+    left.entry.label.localeCompare(right.entry.label)
+  );
+}
+
+function compareRelatedBridge(left: ScoredEntry, right: ScoredEntry): number {
+  return (
+    right.score - left.score ||
+    scoreDensity(right) - scoreDensity(left) ||
+    left.entry.label.localeCompare(right.entry.label)
+  );
+}
+
+function selectProtectedRelatedSupport(candidates: ScoredEntry[], limit: number): ScoredEntry[] {
+  if (limit <= 0) return [];
+  const eligible = candidates.filter(
+    (candidate) =>
+      candidate.reasons.includes("related_support") &&
+      !candidate.entry.constant &&
+      isDynamicInjectionEligible(candidate),
+  );
+  if (!eligible.length) return [];
+
+  const selected: ScoredEntry[] = [];
+  const selectedIds = new Set<string>();
+  const addCandidates = (items: ScoredEntry[], count: number): void => {
+    for (const item of items) {
+      if (selected.length >= limit || count <= 0) break;
+      if (selectedIds.has(item.entry.entryId)) continue;
+      selected.push(item);
+      selectedIds.add(item.entry.entryId);
+      count -= 1;
+    }
+  };
+
+  const supportContexts = eligible
+    .filter((candidate) => candidate.reasons.includes("support_context"))
+    .sort(compareSupportContext);
+  addCandidates(supportContexts, Math.min(PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT, limit));
+
+  const bridgeEntries = eligible
+    .filter((candidate) => !candidate.reasons.includes("support_context") && hasPrimaryReason(candidate.reasons))
+    .sort(compareRelatedBridge);
+  addCandidates(bridgeEntries, Math.min(PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT, limit - selected.length));
+
+  const remaining = eligible.filter((candidate) => !selectedIds.has(candidate.entry.entryId)).sort(compareSupportContext);
+  addCandidates(remaining, limit - selected.length);
+
+  return selected;
 }
 
 function scoreEntry(
@@ -2960,7 +3033,13 @@ async function selectEntriesForScopes(
     );
     const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
     const supportCandidates = eligibleCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length);
+    const protectedRelatedSupport = selectProtectedRelatedSupport(
+      supportCandidates,
+      Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length)),
+    );
+    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = supportCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
+    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length);
     const supportSelectionLimit = config.selectiveRetrieval
       ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
       : remainingSupportSlots;
@@ -2968,7 +3047,7 @@ async function selectEntriesForScopes(
       supportSelectionLimit > 0
         ? await maybeSelectEntries(
             recentConversation,
-            supportCandidates,
+            optionalSupportCandidates,
             config,
             controller,
             allowController,
@@ -2976,17 +3055,21 @@ async function selectEntriesForScopes(
             supportSelectionLimit,
           )
         : [];
-    selected = [...rankedSceneAnchors, ...supportSelected].slice(0, maxDynamicEntries);
+    selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...supportSelected].slice(0, maxDynamicEntries);
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
     const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
+    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
     const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s),` : ",";
+    const relatedSummary = selectedRelatedSupportCount
+      ? ` with ${selectedRelatedSupportCount} protected related support candidate(s),`
+      : "";
     pushTrace(
       trace,
       "manifest_select",
       "Select manifest entries",
-      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`,
+      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary}${relatedSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`,
       { entryCount: selected.length },
     );
   } else {
@@ -3514,9 +3597,16 @@ async function selectTraversalEntries(
     );
     const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
     const supportManifestCandidates = manifestCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
+    const protectedRelatedSupport = selectProtectedRelatedSupport(
+      supportManifestCandidates,
+      Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length)),
+    );
+    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = supportManifestCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
     const finalCandidatePool = [
       ...rankedSceneAnchors,
-      ...supportManifestCandidates.slice(0, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length)),
+      ...protectedRelatedSupport,
+      ...optionalSupportCandidates.slice(0, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length)),
     ];
     const manifests = buildScopedManifests(finalCandidatePool, finalScopes);
 
@@ -3543,7 +3633,7 @@ async function selectTraversalEntries(
       };
     }
 
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length);
+    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length);
     const supportSelectionLimit = config.selectiveRetrieval
       ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
       : remainingSupportSlots;
@@ -3551,7 +3641,7 @@ async function selectTraversalEntries(
       config.selectiveRetrieval && supportSelectionLimit > 0
         ? await maybeSelectEntries(
             queryText,
-            supportManifestCandidates,
+            optionalSupportCandidates,
             config,
             controller,
             allowController,
@@ -3560,10 +3650,14 @@ async function selectTraversalEntries(
           )
         : config.selectiveRetrieval
           ? []
-          : supportManifestCandidates.slice(0, supportSelectionLimit);
-    const selected = [...rankedSceneAnchors, ...selectedSupport].slice(0, maxDynamicEntries);
+          : optionalSupportCandidates.slice(0, supportSelectionLimit);
+    const selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...selectedSupport].slice(0, maxDynamicEntries);
     const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
+    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
     const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s)` : "";
+    const relatedSummary = selectedRelatedSupportCount
+      ? `${anchorSummary ? " and" : ", including"} ${selectedRelatedSupportCount} protected related support candidate(s)`
+      : "";
 
     pushTrace(
       trace,
@@ -3576,7 +3670,7 @@ async function selectTraversalEntries(
       trace,
       "manifest_select",
       "Select accumulated entries",
-      `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary} from ${pooledCandidates.length} pooled candidate(s).`,
+      `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary}${relatedSummary} from ${pooledCandidates.length} pooled candidate(s).`,
       { entryCount: selected.length },
     );
 
