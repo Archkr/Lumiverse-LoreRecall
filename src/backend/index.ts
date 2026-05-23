@@ -13,7 +13,8 @@ import type {
   RetrievalProgressEvent,
   RetrievalSession,
 } from "../types";
-import { buildRetrievalPreview } from "./retrieval";
+import type { RuntimeBook } from "./contracts";
+import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import {
   type OperationContext,
   type OperationOutcome,
@@ -64,9 +65,25 @@ const latestStateSequence = new Map<string, number>();
 const previewCache = new Map<string, RetrievalPreview | null>();
 const retrievalFeedCache = new Map<string, RetrievalFeedState>();
 const scheduledStatePushes = new Map<string, ReturnType<typeof setTimeout>>();
+const dynamicFeedbackByChat = new Map<string, ChatDynamicFeedbackState>();
+
+const DYNAMIC_FEEDBACK_RECENT_WINDOW = 3;
 
 interface StateBuildEnvelope {
   state: FrontendState;
+}
+
+interface DynamicFeedbackRecord {
+  entryId: string;
+  label: string;
+  aliases: string[];
+  keys: string[];
+}
+
+interface ChatDynamicFeedbackState {
+  pending: DynamicFeedbackRecord[];
+  entries: DynamicRetrievalFeedbackSnapshot["entries"];
+  recentInjectionEntryIds: string[][];
 }
 
 async function resolveActiveChat(userId: string, chatId?: string | null) {
@@ -90,6 +107,132 @@ async function listConnectionsCached(userId: string): Promise<ConnectionProfileD
 
 function getPreviewCacheKey(userId: string, chatId: string): string {
   return `${userId}:${chatId}`;
+}
+
+function getDynamicFeedbackState(cacheKey: string): ChatDynamicFeedbackState {
+  const existing = dynamicFeedbackByChat.get(cacheKey);
+  if (existing) return existing;
+  const created: ChatDynamicFeedbackState = {
+    pending: [],
+    entries: {},
+    recentInjectionEntryIds: [],
+  };
+  dynamicFeedbackByChat.set(cacheKey, created);
+  return created;
+}
+
+function normalizeFeedbackText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\u2019']/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function feedbackTextIncludes(normalizedText: string, phrase: string): boolean {
+  const normalizedPhrase = normalizeFeedbackText(phrase);
+  if (normalizedPhrase.length < 3) return false;
+  return ` ${normalizedText} `.includes(` ${normalizedPhrase} `);
+}
+
+function feedbackRecordReferenced(record: DynamicFeedbackRecord, normalizedAssistantText: string): boolean {
+  if (feedbackTextIncludes(normalizedAssistantText, record.label)) return true;
+  if (record.aliases.some((alias) => feedbackTextIncludes(normalizedAssistantText, alias))) return true;
+  const keyHits = record.keys.filter((key) => feedbackTextIncludes(normalizedAssistantText, key));
+  if (keyHits.some((key) => normalizeFeedbackText(key).length >= 4)) return true;
+  return keyHits.length >= 2;
+}
+
+function getPriorAssistantResponse(messages: LlmMessageDTO[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant" && typeof message.content === "string" && message.content.trim()) {
+      return message.content;
+    }
+  }
+  return "";
+}
+
+function processPendingDynamicFeedback(cacheKey: string, messages: LlmMessageDTO[]): void {
+  const state = getDynamicFeedbackState(cacheKey);
+  if (!state.pending.length) return;
+  const assistantText = normalizeFeedbackText(getPriorAssistantResponse(messages));
+  if (!assistantText) return;
+  const now = Date.now();
+
+  for (const record of state.pending) {
+    const previous = state.entries[record.entryId] ?? {
+      injections: 0,
+      references: 0,
+      missStreak: 0,
+      lastReferenced: 0,
+      recentInjectionCount: 0,
+    };
+    const referenced = feedbackRecordReferenced(record, assistantText);
+    state.entries[record.entryId] = {
+      ...previous,
+      injections: previous.injections + 1,
+      references: previous.references + (referenced ? 1 : 0),
+      missStreak: referenced ? 0 : previous.missStreak + 1,
+      lastReferenced: referenced ? now : previous.lastReferenced,
+    };
+  }
+
+  state.pending = [];
+}
+
+function buildDynamicFeedbackSnapshot(cacheKey: string): DynamicRetrievalFeedbackSnapshot {
+  const state = getDynamicFeedbackState(cacheKey);
+  const recentCounts = new Map<string, number>();
+  for (const batch of state.recentInjectionEntryIds) {
+    for (const entryId of batch) {
+      recentCounts.set(entryId, (recentCounts.get(entryId) ?? 0) + 1);
+    }
+  }
+
+  return {
+    entries: Object.fromEntries(
+      Object.entries(state.entries).map(([entryId, data]) => [
+        entryId,
+        {
+          ...data,
+          recentInjectionCount: recentCounts.get(entryId) ?? 0,
+        },
+      ]),
+    ),
+  };
+}
+
+function findRuntimeEntry(runtimeBooks: RuntimeBook[], entryId: string): RuntimeBook["cache"]["entries"][number] | null {
+  for (const book of runtimeBooks) {
+    const entry = book.cache.entries.find((item) => item.entryId === entryId);
+    if (entry) return entry;
+  }
+  return null;
+}
+
+function recordDynamicInjection(cacheKey: string, preview: RetrievalPreview | null, runtimeBooks: RuntimeBook[]): void {
+  const state = getDynamicFeedbackState(cacheKey);
+  const dynamicIds = [...new Set((preview?.manifestSelectedEntries ?? []).map((entry) => entry.entryId))];
+  state.pending = dynamicIds
+    .map((entryId): DynamicFeedbackRecord | null => {
+      const entry = findRuntimeEntry(runtimeBooks, entryId);
+      if (!entry || entry.constant) return null;
+      return {
+        entryId,
+        label: entry.label,
+        aliases: [...entry.aliases],
+        keys: [...entry.key, ...entry.keysecondary],
+      };
+    })
+    .filter((item): item is DynamicFeedbackRecord => !!item);
+
+  if (!state.pending.length) return;
+  state.recentInjectionEntryIds.push(state.pending.map((item) => item.entryId));
+  while (state.recentInjectionEntryIds.length > DYNAMIC_FEEDBACK_RECENT_WINDOW) {
+    state.recentInjectionEntryIds.shift();
+  }
 }
 
 function cloneRetrievalFeedItem(item: RetrievalFeedItem): RetrievalFeedItem {
@@ -635,6 +778,10 @@ spindle.registerInterceptor(async (messages, context) => {
     const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
     if (!runtimeBooks.length) return messages;
 
+    const previewCacheKey = getPreviewCacheKey(userId, chatId);
+    processPendingDynamicFeedback(previewCacheKey, messages as LlmMessageDTO[]);
+    const dynamicFeedback = buildDynamicFeedbackSnapshot(previewCacheKey);
+
     retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     const handleProgress = (event: RetrievalProgressEvent) => {
       if (!retrievalSessionId) return;
@@ -669,9 +816,11 @@ spindle.registerInterceptor(async (messages, context) => {
         isActual: true,
         capturedAt: Date.now(),
         reportProgress: handleProgress,
+        dynamicFeedback,
       },
     );
-    previewCache.set(getPreviewCacheKey(userId, chatId), preview);
+    previewCache.set(previewCacheKey, preview);
+    recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
     scheduleLiveStatePush(userId, chatId);
     if (preview) {
       if (preview.mode === "traversal" && preview.fallbackReason) {

@@ -1,0 +1,258 @@
+import { describe, expect, test } from "bun:test";
+import type { CharacterRetrievalConfig, GlobalLoreRecallSettings } from "../types";
+import {
+  DEFAULT_BOOK_CONFIG,
+  DEFAULT_CHARACTER_CONFIG,
+  DEFAULT_GLOBAL_SETTINGS,
+  assignEntryToTarget,
+  createEmptyTreeIndex,
+  ensureCategoryPath,
+} from "../shared";
+import type { IndexedEntry, RuntimeBook } from "./contracts";
+import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
+
+function makeEntry(patch: Partial<IndexedEntry> & Pick<IndexedEntry, "entryId" | "label">): IndexedEntry {
+  return {
+    entryId: patch.entryId,
+    worldBookId: patch.worldBookId ?? "book",
+    worldBookName: patch.worldBookName ?? "Synthetic Lore",
+    label: patch.label,
+    aliases: patch.aliases ?? [],
+    summary: patch.summary ?? `${patch.label} summary.`,
+    collapsedText: patch.collapsedText ?? "",
+    tags: patch.tags ?? [],
+    comment: patch.comment ?? "",
+    key: patch.key ?? [],
+    keysecondary: patch.keysecondary ?? [],
+    disabled: patch.disabled ?? false,
+    updatedAt: patch.updatedAt ?? 1,
+    groupName: patch.groupName ?? "",
+    constant: patch.constant ?? false,
+    selective: patch.selective ?? false,
+    vectorized: patch.vectorized ?? false,
+    previewText: patch.previewText ?? patch.summary ?? `${patch.label} preview.`,
+    content: patch.content ?? patch.collapsedText ?? `${patch.label} content.`,
+    legacyTree: patch.legacyTree ?? null,
+  };
+}
+
+function makeBook(entries: IndexedEntry[]): RuntimeBook {
+  const tree = createEmptyTreeIndex("book");
+  const categoryId = ensureCategoryPath(tree, ["Cast"], "manual");
+  for (const entry of entries) {
+    assignEntryToTarget(tree, entry.entryId, { categoryId });
+  }
+  return {
+    summary: {
+      id: "book",
+      name: "Synthetic Lore",
+      description: "Synthetic regression fixture.",
+      updatedAt: 1,
+    },
+    cache: {
+      version: 2,
+      bookId: "book",
+      bookUpdatedAt: 1,
+      name: "Synthetic Lore",
+      description: "Synthetic regression fixture.",
+      entries,
+    },
+    tree,
+    config: { ...DEFAULT_BOOK_CONFIG, enabled: true },
+    status: {
+      bookId: "book",
+      attachedToCharacter: true,
+      selectedForCharacter: true,
+      entryCount: entries.length,
+      categoryCount: 1,
+      rootEntryCount: 0,
+      unassignedCount: 0,
+      treeMissing: false,
+      warnings: [],
+    },
+  };
+}
+
+function makeConfig(patch: Partial<CharacterRetrievalConfig> = {}): CharacterRetrievalConfig {
+  return {
+    ...DEFAULT_CHARACTER_CONFIG,
+    enabled: true,
+    managedBookIds: ["book"],
+    searchMode: "traversal",
+    maxResults: 8,
+    tokenBudget: 8,
+    selectiveRetrieval: true,
+    rerankEnabled: false,
+    traversalStepLimit: 3,
+    contextMessages: 10,
+    ...patch,
+  };
+}
+
+function makeSettings(): GlobalLoreRecallSettings {
+  return { ...DEFAULT_GLOBAL_SETTINGS, enabled: true };
+}
+
+async function previewFor(
+  entries: IndexedEntry[],
+  conversation: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+  configPatch: Partial<CharacterRetrievalConfig> = {},
+  feedback?: DynamicRetrievalFeedbackSnapshot,
+) {
+  const preview = await buildRetrievalPreview(
+    conversation,
+    makeSettings(),
+    makeConfig(configPatch),
+    [makeBook(entries)],
+    "test-user",
+    { allowController: false, dynamicFeedback: feedback },
+  );
+  expect(preview).not.toBeNull();
+  return preview!;
+}
+
+function dynamicLabels(preview: Awaited<ReturnType<typeof previewFor>>): string[] {
+  return preview.manifestSelectedEntries.map((entry) => entry.label);
+}
+
+function injectedLabels(preview: Awaited<ReturnType<typeof previewFor>>): string[] {
+  return preview.injectedNodes.map((entry) => entry.label);
+}
+
+describe("retrieval accuracy", () => {
+  test("keeps active-beat entries while rejecting note-only and composite false positives", async () => {
+    const entries = [
+      makeEntry({ entryId: "constant", label: "Always-On Operating Rule", constant: true }),
+      makeEntry({ entryId: "commander", label: "Commander Vale", aliases: ["Vale"] }),
+      makeEntry({ entryId: "captain", label: "Captain Hale", aliases: ["Hale"] }),
+      makeEntry({ entryId: "medic", label: "Medic Protocol", key: ["medic"] }),
+      makeEntry({ entryId: "timeline", label: "Distant Moon Accord" }),
+      makeEntry({ entryId: "relationship", label: "Captain Hale-Archivist Nera Relationship" }),
+      makeEntry({ entryId: "engine", label: "War Engine", content: "Captain Hale once saw this machine in a museum." }),
+    ];
+
+    const preview = await previewFor(entries, [
+      { role: "user", content: "Earlier we were talking about the Distant Moon Accord and Archivist Nera." },
+      {
+        role: "assistant",
+        content:
+          "Commander Vale set down the clipboard. Captain Hale was named in the threat about inventory duty, but the room kept moving around the active argument.",
+      },
+      { role: "user", content: "Note: Story takes place after the Distant Moon Accord." },
+      { role: "user", content: "I'm only a field medic; I can't survive a week with Captain Hale." },
+    ]);
+
+    expect(injectedLabels(preview)).toContain("Always-On Operating Rule");
+    expect(dynamicLabels(preview)).toContain("Captain Hale");
+    expect(dynamicLabels(preview)).toContain("Medic Protocol");
+    expect(dynamicLabels(preview)).not.toContain("Distant Moon Accord");
+    expect(dynamicLabels(preview)).not.toContain("Captain Hale-Archivist Nera Relationship");
+    expect(dynamicLabels(preview)).not.toContain("War Engine");
+  });
+
+  test("timeline note mentions do not become active anchors", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "timeline", label: "Old Treaty" }),
+        makeEntry({ entryId: "active", label: "Captain Hale" }),
+      ],
+      [
+        { role: "user", content: "Note: Story takes place after the Old Treaty." },
+        { role: "user", content: "Captain Hale is the one I need to answer right now." },
+      ],
+      { tokenBudget: 1, maxResults: 1 },
+    );
+
+    expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
+  });
+
+  test("composite relationship entries require an exact phrase or both principal endpoints", async () => {
+    const entries = [
+      makeEntry({ entryId: "captain", label: "Captain Hale" }),
+      makeEntry({ entryId: "relationship", label: "Captain Hale-Archivist Nera Relationship" }),
+    ];
+
+    const oneEndpoint = await previewFor(entries, [{ role: "user", content: "Captain Hale is annoyed." }]);
+    expect(dynamicLabels(oneEndpoint)).toContain("Captain Hale");
+    expect(dynamicLabels(oneEndpoint)).not.toContain("Captain Hale-Archivist Nera Relationship");
+
+    const exactPhrase = await previewFor(entries, [
+      { role: "user", content: "The Captain Hale-Archivist Nera Relationship matters here." },
+    ]);
+    expect(dynamicLabels(exactPhrase)).toContain("Captain Hale-Archivist Nera Relationship");
+  });
+
+  test("constants always inject outside dynamic slots and ignore dynamic feedback penalties", async () => {
+    const feedback: DynamicRetrievalFeedbackSnapshot = {
+      entries: {
+        constant: {
+          injections: 10,
+          references: 0,
+          missStreak: 10,
+          lastReferenced: 0,
+          recentInjectionCount: 3,
+        },
+        captain: {
+          injections: 3,
+          references: 0,
+          missStreak: 3,
+          lastReferenced: 0,
+          recentInjectionCount: 0,
+        },
+      },
+    };
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "constant", label: "Unrelated Constant", constant: true }),
+        makeEntry({ entryId: "captain", label: "Captain Hale" }),
+      ],
+      [{ role: "user", content: "Captain Hale is waiting for an answer." }],
+      { tokenBudget: 1, maxResults: 1 },
+      feedback,
+    );
+
+    expect(preview.reservedConstantCount).toBe(1);
+    expect(preview.remainingDynamicSlots).toBe(1);
+    expect(injectedLabels(preview)).toContain("Unrelated Constant");
+    expect(injectedLabels(preview)).toContain("Captain Hale");
+    expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
+  });
+
+  test("latest user and assistant focus outranks older assistant prose", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "old", label: "Archive Vault" }),
+        makeEntry({ entryId: "active", label: "Captain Hale" }),
+      ],
+      [
+        {
+          role: "assistant",
+          content:
+            "Archive Vault. Archive Vault. Archive Vault. The previous scene spent too much time on Archive Vault before the conversation moved on.",
+        },
+        { role: "user", content: "Captain Hale is the only person I'm responding to now." },
+      ],
+      { tokenBudget: 1, maxResults: 1 },
+    );
+
+    expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
+  });
+
+  test("manifest selectedEntryIds stay consistent with selected dynamic entries", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "constant", label: "Always-On Operating Rule", constant: true }),
+        makeEntry({ entryId: "captain", label: "Captain Hale" }),
+        makeEntry({ entryId: "medic", label: "Medic Protocol", key: ["medic"] }),
+      ],
+      [{ role: "user", content: "Captain Hale asked the medic for a status report." }],
+    );
+
+    const manifestIds = new Set(preview.scopeManifestCounts.flatMap((manifest) => manifest.selectedEntryIds));
+    const selectedIds = new Set(preview.manifestSelectedEntries.map((entry) => entry.entryId));
+    expect(manifestIds).toEqual(selectedIds);
+    expect(preview.scopeManifestCounts.reduce((total, manifest) => total + manifest.manifestEntryCount, 0)).toBeGreaterThanOrEqual(
+      selectedIds.size,
+    );
+  });
+});

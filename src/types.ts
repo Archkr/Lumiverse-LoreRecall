@@ -149,6 +149,9 @@ export interface PreviewNode {
   reasons: string[];
   previewText: string;
   selectionRole?:
+    | "active_anchor"
+    | "background_mention"
+    | "support_context"
     | "recent_mention"
     | "context_mention"
     | "label_match"

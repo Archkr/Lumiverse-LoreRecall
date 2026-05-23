@@ -1516,6 +1516,9 @@ export function setup(ctx: SpindleFrontendContext) {
   function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
     if (!role) return "entry";
     const labels: Record<NonNullable<PreviewNode["selectionRole"]>, string> = {
+      active_anchor: "active anchor",
+      background_mention: "background mention",
+      support_context: "support context",
       recent_mention: "recent mention",
       context_mention: "context mention",
       label_match: "label match",

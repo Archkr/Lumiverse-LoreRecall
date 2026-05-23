@@ -4520,6 +4520,9 @@ function setup(ctx) {
     if (!role)
       return "entry";
     const labels = {
+      active_anchor: "active anchor",
+      background_mention: "background mention",
+      support_context: "support context",
       recent_mention: "recent mention",
       context_mention: "context mention",
       label_match: "label match",
