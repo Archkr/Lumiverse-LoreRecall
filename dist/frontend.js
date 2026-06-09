@@ -1119,11 +1119,19 @@ var LORE_RECALL_CSS = `
 .lore-row-tags:empty { display: none; }
 
 .lore-row-actions {
+  grid-column: 2;
   grid-row: 1 / span 2;
   align-self: start;
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.lore-row > .lore-row-action {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
 }
 
 .lore-row-action-fixed { width: 84px; }
@@ -2867,6 +2875,38 @@ var LORE_RECALL_CSS = `
     top: 0;
   }
   .lore-metric { padding: 10px 16px; }
+}
+
+@media (max-width: 520px) {
+  .lore-section {
+    padding: 14px;
+  }
+  .lore-cluster {
+    gap: 7px;
+  }
+  .lore-search-wrap {
+    flex-basis: 0;
+  }
+  .lore-row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 8px;
+    padding: 12px;
+  }
+  .lore-row-title,
+  .lore-row-meta {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .lore-row-actions,
+  .lore-row > .lore-row-action {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: flex-start;
+  }
+  .lore-row-action-fixed {
+    width: auto;
+    min-width: 84px;
+  }
 }
 
 /* ---------- Source pills (compact managed-sources grid) --- */
