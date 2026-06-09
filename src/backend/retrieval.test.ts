@@ -313,6 +313,29 @@ describe("retrieval accuracy", () => {
     expect(dynamicLabels(preview)).toEqual(["Beatrice"]);
   });
 
+  test("single generic token does not activate a multiword named-entity label", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "raizen", label: "Raizen High School" }),
+        makeEntry({ entryId: "kotori", label: "Kotori Itsuka" }),
+      ],
+      [
+        {
+          role: "assistant",
+          content:
+            "Kotori demands a report on the high-output unknowns while the group debates whether to retreat.",
+        },
+      ],
+      { tokenBudget: 2, maxResults: 2 },
+    );
+
+    const pulledByLabel = new Map(preview.pulledNodes.map((entry) => [entry.label, entry]));
+    expect(pulledByLabel.get("Kotori Itsuka")?.selectionRole).toBe("active_anchor");
+    expect(pulledByLabel.get("Kotori Itsuka")?.reasons).toContain("mention");
+    expect(pulledByLabel.get("Raizen High School")?.selectionRole).not.toBe("active_anchor");
+    expect(pulledByLabel.get("Raizen High School")?.reasons).not.toContain("mention");
+  });
+
   test("collapsed mode keeps high-confidence scene support from summary and content matches", async () => {
     const preview = await previewFor(
       [

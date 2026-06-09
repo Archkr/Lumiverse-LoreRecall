@@ -878,7 +878,11 @@ function entryHasDirectMentionSignal(
   const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
   if (matchingTokens.length >= 2) return true;
 
-  return looksLikeNamedEntityLabel(entry.label) && matchingTokens.some((token) => labelTokens.includes(token));
+  return (
+    labelTokens.length <= 2 &&
+    looksLikeNamedEntityLabel(entry.label) &&
+    matchingTokens.some((token) => labelTokens.includes(token))
+  );
 }
 
 function buildDirectMentionCandidates(
@@ -901,6 +905,28 @@ function buildDirectMentionCandidates(
       reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
       selectionRole: "active_anchor",
     }));
+}
+
+function mergeSelectionRole(
+  existingRole: ScoredEntry["selectionRole"],
+  incomingRole: ScoredEntry["selectionRole"],
+): ScoredEntry["selectionRole"] {
+  if (!existingRole) return incomingRole;
+  if (!incomingRole) return existingRole;
+  const priority: Record<NonNullable<ScoredEntry["selectionRole"]>, number> = {
+    active_anchor: 5,
+    recent_mention: 5,
+    background_mention: 4,
+    context_mention: 4,
+    label_match: 3,
+    alias_match: 3,
+    keyword_match: 3,
+    support_context: 2,
+    content_match: 2,
+    branch_match: 1,
+    score_fallback: 0,
+  };
+  return priority[incomingRole] > priority[existingRole] ? incomingRole : existingRole;
 }
 
 function getDynamicEntryLimit(config: CharacterRetrievalConfig, remainingDynamicSlots: number): number {
@@ -3068,7 +3094,7 @@ async function selectEntriesForScopes(
             ...existing,
             score: Math.max(existing.score, anchor.score),
             reasons: uniqueStrings([...existing.reasons, ...anchor.reasons]),
-            selectionRole: existing.selectionRole ?? anchor.selectionRole,
+            selectionRole: mergeSelectionRole(existing.selectionRole, anchor.selectionRole),
           }
         : anchor,
     );
@@ -3569,7 +3595,7 @@ async function selectTraversalEntries(
       ...existing,
       score: Math.max(existing.score, candidate.score),
       reasons: uniqueStrings([...existing.reasons, ...candidate.reasons]),
-      selectionRole: existing.selectionRole ?? candidate.selectionRole,
+      selectionRole: mergeSelectionRole(existing.selectionRole, candidate.selectionRole),
     });
   };
 

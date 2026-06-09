@@ -1494,7 +1494,7 @@ function entryHasDirectMentionSignal(entry, signals) {
   const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
   if (matchingTokens.length >= 2)
     return true;
-  return looksLikeNamedEntityLabel(entry.label) && matchingTokens.some((token) => labelTokens.includes(token));
+  return labelTokens.length <= 2 && looksLikeNamedEntityLabel(entry.label) && matchingTokens.some((token) => labelTokens.includes(token));
 }
 function buildDirectMentionCandidates(recentConversation, candidates, scopes, limit = DIRECT_MENTION_SEED_LIMIT) {
   if (!candidates.length || limit <= 0)
@@ -1505,6 +1505,26 @@ function buildDirectMentionCandidates(recentConversation, candidates, scopes, li
     reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
     selectionRole: "active_anchor"
   }));
+}
+function mergeSelectionRole(existingRole, incomingRole) {
+  if (!existingRole)
+    return incomingRole;
+  if (!incomingRole)
+    return existingRole;
+  const priority = {
+    active_anchor: 5,
+    recent_mention: 5,
+    background_mention: 4,
+    context_mention: 4,
+    label_match: 3,
+    alias_match: 3,
+    keyword_match: 3,
+    support_context: 2,
+    content_match: 2,
+    branch_match: 1,
+    score_fallback: 0
+  };
+  return priority[incomingRole] > priority[existingRole] ? incomingRole : existingRole;
 }
 function getDynamicEntryLimit(config, remainingDynamicSlots) {
   if (remainingDynamicSlots <= 0)
@@ -2897,7 +2917,7 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
       ...existing,
       score: Math.max(existing.score, anchor.score),
       reasons: uniqueStrings([...existing.reasons, ...anchor.reasons]),
-      selectionRole: existing.selectionRole ?? anchor.selectionRole
+      selectionRole: mergeSelectionRole(existing.selectionRole, anchor.selectionRole)
     } : anchor);
   }
   const relatedSupport = buildRelatedSupportCandidates(supportSeeds, Array.from(booksById.values()), excludedEntryIds, new Set(supportSeeds.map((candidate) => candidate.entry.entryId)), feedback, Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - sceneAnchors.length)));
@@ -3214,7 +3234,7 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
       ...existing,
       score: Math.max(existing.score, candidate.score),
       reasons: uniqueStrings([...existing.reasons, ...candidate.reasons]),
-      selectionRole: existing.selectionRole ?? candidate.selectionRole
+      selectionRole: mergeSelectionRole(existing.selectionRole, candidate.selectionRole)
     });
   };
   const getEntryPrimaryScope = (entry) => {
