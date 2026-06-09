@@ -264,15 +264,7 @@ function filterBooks(state, filterText) {
   if (!state)
     return [];
   const query = filterText.trim().toLowerCase();
-  if (query) {
-    return state.allWorldBooks.filter((book) => `${book.name} ${book.description}`.toLowerCase().includes(query)).map((book) => book.id);
-  }
-  const ids = new Set([
-    ...Object.keys(state.bookConfigs),
-    ...state.suggestedBookIds,
-    ...state.characterConfig?.managedBookIds ?? []
-  ]);
-  return state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id)).map((book) => book.id);
+  return state.allWorldBooks.filter((book) => !query || `${book.name} ${book.description}`.toLowerCase().includes(query)).map((book) => book.id);
 }
 function formatMode(mode) {
   if (!mode)

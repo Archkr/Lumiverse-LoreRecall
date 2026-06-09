@@ -77,7 +77,7 @@ describe("filterBooks", () => {
     expect(filterBooks(after, "Date A")).toEqual(["date-a", "date-b", "date-c"]);
   });
 
-  test("uses curated managed/configured/suggested books when the query is empty", () => {
+  test("shows every lorebook when the query is empty even with curated books", () => {
     const state = makeState({
       bookConfigs: { other: { enabled: true, description: "", permission: "read_write" } },
       characterConfig: {
@@ -87,7 +87,7 @@ describe("filterBooks", () => {
       suggestedBookIds: ["date-c"],
     });
 
-    expect(filterBooks(state, "")).toEqual(["date-a", "date-c", "other"]);
+    expect(filterBooks(state, "")).toEqual(["date-a", "date-b", "date-c", "other"]);
   });
 
   test("shows all books on empty query when there is no curated set", () => {
