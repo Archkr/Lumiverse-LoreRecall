@@ -7,7 +7,13 @@ import type {
   PreviewNode,
 } from "../types";
 
-export type ChatLikeMessage = { role: "system" | "user" | "assistant"; content: string };
+export type ChatLikeMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+  __isChatHistory?: boolean;
+  sourceMessageId?: string;
+  sourceIndexInChat?: number;
+};
 
 export interface IndexedEntry extends ManagedBookEntryView {
   content: string;

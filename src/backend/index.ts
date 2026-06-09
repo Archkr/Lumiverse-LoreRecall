@@ -443,21 +443,33 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
+  const previewFallbackPath = cachedPreview?.fallbackPath ?? [];
+  const scopeSelectionTroubleDetails = previewFallbackPath.filter((detail) =>
+    /invalid json|did not map|empty nodeids array/i.test(detail),
+  );
+  const recoveredEntryScopeFallback =
+    !!cachedPreview &&
+    scopeSelectionTroubleDetails.length > 0 &&
+    scopeSelectionTroubleDetails.every((detail) => /deterministic entry-scope fallback/i.test(detail)) &&
+    cachedPreview.selectedScopes.length > 0 &&
+    (cachedPreview.pulledNodes.length > 0 ||
+      cachedPreview.manifestSelectedEntries.length > 0 ||
+      cachedPreview.injectedNodes.length > 0);
   const previewDiagnostics =
     cachedPreview
       ? [
-          ...(cachedPreview.fallbackPath?.length
+          ...(previewFallbackPath.length
             ? [
                 {
                   id: "preview-fallback",
                   severity: "info" as const,
                   bookId: null,
                   title: "Last retrieval used fallback behavior",
-                  detail: cachedPreview.fallbackPath.join(" "),
+                  detail: previewFallbackPath.join(" "),
                 },
               ]
             : []),
-          ...(cachedPreview.fallbackPath?.some((detail) => /invalid json|did not map|empty nodeids array/i.test(detail))
+          ...(scopeSelectionTroubleDetails.length > 0 && !recoveredEntryScopeFallback
             ? [
                 {
                   id: "preview-scope-selection-failure",

@@ -401,13 +401,19 @@ function tokenize(value: string): string[] {
   );
 }
 
+function isRetrievalChatHistoryMessage(message: ChatLikeMessage, messages: ChatLikeMessage[]): boolean {
+  if ((message.role !== "assistant" && message.role !== "user") || !message.content.trim()) return false;
+  const hasHistoryFlags = messages.some((item) => typeof item.__isChatHistory === "boolean");
+  return hasHistoryFlags ? message.__isChatHistory === true : message.role === "assistant";
+}
+
 function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): string {
   const recentMessages = messages
-    .filter((message) => message.role !== "system" && message.content.trim())
+    .filter((message) => isRetrievalChatHistoryMessage(message, messages))
     .slice(-contextMessages);
   return recentMessages
     .map((message, index) => {
-      const role = message.role === "user" ? "User" : "Assistant";
+      const role = message.role === "user" ? "User" : "Character";
       const messageLimit =
         recentMessages.length - index <= SCENE_MESSAGE_LOOKBACK ? RECENT_SCENE_MESSAGE_LIMIT : RECENT_MESSAGE_LIMIT;
       const sanitized = sanitizeRetrievalMessage(message.role, message.content, messageLimit);
@@ -483,7 +489,7 @@ function sanitizeRetrievalMessage(role: ChatLikeMessage["role"], content: string
 
 function buildRecentConversation(messages: ChatLikeMessage[], contextMessages: number): string {
   const recentMessages = messages
-    .filter((message) => message.role !== "system" && message.content.trim())
+    .filter((message) => isRetrievalChatHistoryMessage(message, messages))
     .slice(-contextMessages);
   return recentMessages
     .map((message, index) => {

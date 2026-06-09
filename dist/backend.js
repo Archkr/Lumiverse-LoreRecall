@@ -1202,10 +1202,16 @@ function normalizeSearchText(value) {
 function tokenize(value) {
   return Array.from(new Set(normalizeSearchText(value).split(" ").filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token))));
 }
+function isRetrievalChatHistoryMessage(message, messages) {
+  if (message.role !== "assistant" && message.role !== "user" || !message.content.trim())
+    return false;
+  const hasHistoryFlags = messages.some((item) => typeof item.__isChatHistory === "boolean");
+  return hasHistoryFlags ? message.__isChatHistory === true : message.role === "assistant";
+}
 function buildQueryText(messages, contextMessages) {
-  const recentMessages = messages.filter((message) => message.role !== "system" && message.content.trim()).slice(-contextMessages);
+  const recentMessages = messages.filter((message) => isRetrievalChatHistoryMessage(message, messages)).slice(-contextMessages);
   return recentMessages.map((message, index) => {
-    const role = message.role === "user" ? "User" : "Assistant";
+    const role = message.role === "user" ? "User" : "Character";
     const messageLimit = recentMessages.length - index <= SCENE_MESSAGE_LOOKBACK ? RECENT_SCENE_MESSAGE_LIMIT : RECENT_MESSAGE_LIMIT;
     const sanitized = sanitizeRetrievalMessage(message.role, message.content, messageLimit);
     return sanitized ? `${role}: ${sanitized}` : "";
@@ -1274,7 +1280,7 @@ function sanitizeRetrievalMessage(role, content, maxLength = RECENT_MESSAGE_LIMI
   return truncateText(text.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim(), maxLength);
 }
 function buildRecentConversation(messages, contextMessages) {
-  const recentMessages = messages.filter((message) => message.role !== "system" && message.content.trim()).slice(-contextMessages);
+  const recentMessages = messages.filter((message) => isRetrievalChatHistoryMessage(message, messages)).slice(-contextMessages);
   return recentMessages.map((message, index) => {
     const role = message.role === "user" ? "User" : "Character";
     const messageLimit = recentMessages.length - index <= SCENE_MESSAGE_LOOKBACK ? RECENT_SCENE_MESSAGE_LIMIT : RECENT_MESSAGE_LIMIT;
@@ -6349,17 +6355,20 @@ async function buildState(userId, chatId) {
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
+  const previewFallbackPath = cachedPreview?.fallbackPath ?? [];
+  const scopeSelectionTroubleDetails = previewFallbackPath.filter((detail) => /invalid json|did not map|empty nodeids array/i.test(detail));
+  const recoveredEntryScopeFallback = !!cachedPreview && scopeSelectionTroubleDetails.length > 0 && scopeSelectionTroubleDetails.every((detail) => /deterministic entry-scope fallback/i.test(detail)) && cachedPreview.selectedScopes.length > 0 && (cachedPreview.pulledNodes.length > 0 || cachedPreview.manifestSelectedEntries.length > 0 || cachedPreview.injectedNodes.length > 0);
   const previewDiagnostics = cachedPreview ? [
-    ...cachedPreview.fallbackPath?.length ? [
+    ...previewFallbackPath.length ? [
       {
         id: "preview-fallback",
         severity: "info",
         bookId: null,
         title: "Last retrieval used fallback behavior",
-        detail: cachedPreview.fallbackPath.join(" ")
+        detail: previewFallbackPath.join(" ")
       }
     ] : [],
-    ...cachedPreview.fallbackPath?.some((detail) => /invalid json|did not map|empty nodeids array/i.test(detail)) ? [
+    ...scopeSelectionTroubleDetails.length > 0 && !recoveredEntryScopeFallback ? [
       {
         id: "preview-scope-selection-failure",
         severity: "warn",

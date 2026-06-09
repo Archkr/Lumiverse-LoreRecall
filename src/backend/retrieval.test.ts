@@ -133,7 +133,13 @@ function makeSettings(): GlobalLoreRecallSettings {
 
 async function previewFor(
   entries: IndexedEntry[],
-  conversation: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+  conversation: Array<{
+    role: "user" | "assistant" | "system";
+    content: string;
+    __isChatHistory?: boolean;
+    sourceMessageId?: string;
+    sourceIndexInChat?: number;
+  }>,
   configPatch: Partial<CharacterRetrievalConfig> = {},
   feedback?: DynamicRetrievalFeedbackSnapshot,
 ) {
@@ -170,14 +176,14 @@ describe("retrieval accuracy", () => {
     ];
 
     const preview = await previewFor(entries, [
-      { role: "user", content: "Earlier we were talking about the Distant Moon Accord and Archivist Nera." },
+      { role: "assistant", content: "Earlier we were talking about the Distant Moon Accord and Archivist Nera." },
       {
         role: "assistant",
         content:
           "Commander Vale set down the clipboard. Captain Hale was named in the threat about inventory duty, but the room kept moving around the active argument.",
       },
-      { role: "user", content: "Note: Story takes place after the Distant Moon Accord." },
-      { role: "user", content: "I'm only a field medic; I can't survive a week with Captain Hale." },
+      { role: "assistant", content: "Note: Story takes place after the Distant Moon Accord." },
+      { role: "assistant", content: "The field medic cannot survive a week with Captain Hale." },
     ]);
 
     expect(injectedLabels(preview)).toContain("Always-On Operating Rule");
@@ -195,8 +201,8 @@ describe("retrieval accuracy", () => {
         makeEntry({ entryId: "active", label: "Captain Hale" }),
       ],
       [
-        { role: "user", content: "Note: Story takes place after the Old Treaty." },
-        { role: "user", content: "Captain Hale is the one I need to answer right now." },
+        { role: "assistant", content: "Note: Story takes place after the Old Treaty." },
+        { role: "assistant", content: "Captain Hale is the one speaking in the scene right now." },
       ],
       { tokenBudget: 1, maxResults: 1 },
     );
@@ -210,12 +216,12 @@ describe("retrieval accuracy", () => {
       makeEntry({ entryId: "relationship", label: "Captain Hale-Archivist Nera Relationship" }),
     ];
 
-    const oneEndpoint = await previewFor(entries, [{ role: "user", content: "Captain Hale is annoyed." }]);
+    const oneEndpoint = await previewFor(entries, [{ role: "assistant", content: "Captain Hale is annoyed." }]);
     expect(dynamicLabels(oneEndpoint)).toContain("Captain Hale");
     expect(dynamicLabels(oneEndpoint)).not.toContain("Captain Hale-Archivist Nera Relationship");
 
     const exactPhrase = await previewFor(entries, [
-      { role: "user", content: "The Captain Hale-Archivist Nera Relationship matters here." },
+      { role: "assistant", content: "The Captain Hale-Archivist Nera Relationship matters here." },
     ]);
     expect(dynamicLabels(exactPhrase)).toContain("Captain Hale-Archivist Nera Relationship");
   });
@@ -244,7 +250,7 @@ describe("retrieval accuracy", () => {
         makeEntry({ entryId: "constant", label: "Unrelated Constant", constant: true }),
         makeEntry({ entryId: "captain", label: "Captain Hale" }),
       ],
-      [{ role: "user", content: "Captain Hale is waiting for an answer." }],
+      [{ role: "assistant", content: "Captain Hale is waiting for an answer." }],
       { tokenBudget: 1, maxResults: 1 },
       feedback,
     );
@@ -268,12 +274,43 @@ describe("retrieval accuracy", () => {
           content:
             "Archive Vault. Archive Vault. Archive Vault. The previous scene spent too much time on Archive Vault before the conversation moved on.",
         },
-        { role: "user", content: "Captain Hale is the only person I'm responding to now." },
+        { role: "assistant", content: "Captain Hale is the only person speaking in the scene now." },
       ],
       { tokenBudget: 1, maxResults: 1 },
     );
 
     expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
+  });
+
+  test("retrieval context uses user and assistant chat history when Lumiverse marks it", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "archive", label: "Archive Vault" }),
+        makeEntry({ entryId: "beatrice", label: "Beatrice" }),
+        makeEntry({ entryId: "filter", label: "Filter Behavior", key: ["filter"] }),
+        makeEntry({ entryId: "enhancer", label: "RP Enhancer" }),
+      ],
+      [
+        { role: "system", content: "System preset mentions Archive Vault.", __isChatHistory: false },
+        { role: "user", content: "User says Beatrice has no filter.", __isChatHistory: true },
+        {
+          role: "assistant",
+          content: "[[ Steven's RP enhancer V2]] This assistant-role preset block mentions RP Enhancer.",
+          __isChatHistory: false,
+        },
+        {
+          role: "assistant",
+          content: "Beatrice says she does not have a filter when speaking here.",
+          __isChatHistory: true,
+        },
+      ],
+      { tokenBudget: 1, maxResults: 1 },
+    );
+
+    expect(preview.queryText).toContain("User: User says Beatrice has no filter.");
+    expect(preview.queryText).toContain("Character: Beatrice says");
+    expect(preview.queryText).not.toMatch(/System preset|RP enhancer/i);
+    expect(dynamicLabels(preview)).toEqual(["Beatrice"]);
   });
 
   test("collapsed mode keeps high-confidence scene support from summary and content matches", async () => {
@@ -288,7 +325,7 @@ describe("retrieval accuracy", () => {
       ],
       [
         {
-          role: "user",
+          role: "assistant",
           content:
             "The character is in the infirmary treating crystal fever after an ambush and needs isolation and evacuation timing.",
         },
@@ -319,7 +356,7 @@ describe("retrieval accuracy", () => {
       ],
       [
         {
-          role: "user",
+          role: "assistant",
           content:
             "The character is in the infirmary treating crystal fever after an ambush and needs isolation and evacuation timing.",
         },
@@ -358,7 +395,7 @@ describe("retrieval accuracy", () => {
           { role: "user", content: "Set that aside for now." },
           { role: "assistant", content: "Captain Hale waits near the infirmary doors." },
           {
-            role: "user",
+            role: "assistant",
             content:
               "Captain Hale needs the infirmary protocol for crystal fever after an ambush, including isolation and evacuation timing.",
           },
@@ -430,7 +467,7 @@ describe("retrieval accuracy", () => {
         }),
       );
       const preview = await buildRetrievalPreview(
-        [{ role: "user", content: "Captain Hale needs to answer the infirmary emergency now." }],
+        [{ role: "assistant", content: "Captain Hale needs to answer the infirmary emergency now." }],
         makeSettings(),
         makeConfig({ searchMode: "collapsed", tokenBudget: 3, maxResults: 3 }),
         [
@@ -485,7 +522,7 @@ describe("retrieval accuracy", () => {
         }),
       );
       const preview = await buildRetrievalPreview(
-        [{ role: "user", content: "The scene needs emergency infirmary protocol support." }],
+        [{ role: "assistant", content: "The scene needs emergency infirmary protocol support." }],
         makeSettings(),
         makeConfig({ searchMode: "collapsed", tokenBudget: 6, maxResults: 6 }),
         [
@@ -538,7 +575,7 @@ describe("retrieval accuracy", () => {
         }),
       );
       const preview = await buildRetrievalPreview(
-        [{ role: "user", content: "The scene needs emergency infirmary triage support." }],
+        [{ role: "assistant", content: "The scene needs emergency infirmary triage support." }],
         makeSettings(),
         makeConfig({
           searchMode: "traversal",
@@ -604,7 +641,7 @@ describe("retrieval accuracy", () => {
           content: "Archive Vault is unrelated storage lore.",
         }),
       ],
-      [{ role: "user", content: "Captain Hale wants to put the medic on inventory duty for a week." }],
+      [{ role: "assistant", content: "Captain Hale wants to put the medic on inventory duty for a week." }],
       { tokenBudget: 4, maxResults: 4 },
     );
 
@@ -622,7 +659,7 @@ describe("retrieval accuracy", () => {
         makeEntry({ entryId: "captain", label: "Captain Hale" }),
         makeEntry({ entryId: "medic", label: "Medic Protocol", key: ["medic"] }),
       ],
-      [{ role: "user", content: "Captain Hale asked the medic for a status report." }],
+      [{ role: "assistant", content: "Captain Hale asked the medic for a status report." }],
     );
 
     const manifestIds = new Set(preview.scopeManifestCounts.flatMap((manifest) => manifest.selectedEntryIds));
