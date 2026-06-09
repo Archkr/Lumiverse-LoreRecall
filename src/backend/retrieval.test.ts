@@ -175,16 +175,20 @@ describe("retrieval accuracy", () => {
       makeEntry({ entryId: "engine", label: "War Engine", content: "Captain Hale once saw this machine in a museum." }),
     ];
 
-    const preview = await previewFor(entries, [
-      { role: "assistant", content: "Earlier we were talking about the Distant Moon Accord and Archivist Nera." },
-      {
-        role: "assistant",
-        content:
-          "Commander Vale set down the clipboard. Captain Hale was named in the threat about inventory duty, but the room kept moving around the active argument.",
-      },
-      { role: "assistant", content: "Note: Story takes place after the Distant Moon Accord." },
-      { role: "assistant", content: "The field medic cannot survive a week with Captain Hale." },
-    ]);
+    const preview = await previewFor(
+      entries,
+      [
+        { role: "assistant", content: "Earlier we were talking about the Distant Moon Accord and Archivist Nera." },
+        {
+          role: "assistant",
+          content:
+            "Commander Vale set down the clipboard. Captain Hale was named in the threat about inventory duty, but the room kept moving around the active argument.",
+        },
+        { role: "assistant", content: "Note: Story takes place after the Distant Moon Accord." },
+        { role: "assistant", content: "The field medic cannot survive a week with Captain Hale." },
+      ],
+      { contextMessages: 2 },
+    );
 
     expect(injectedLabels(preview)).toContain("Always-On Operating Rule");
     expect(dynamicLabels(preview)).toContain("Captain Hale");
@@ -336,6 +340,32 @@ describe("retrieval accuracy", () => {
     expect(pulledByLabel.get("Raizen High School")?.reasons).not.toContain("mention");
   });
 
+  test("configured context window is treated as active scene for direct anchors", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({ entryId: "yuzuru", label: "Yuzuru Yamai" }),
+        makeEntry({ entryId: "natsumi", label: "Natsumi Kyouno" }),
+        makeEntry({ entryId: "kaguya", label: "Kaguya Yamai" }),
+        makeEntry({ entryId: "nia", label: "Nia Honjou" }),
+        makeEntry({ entryId: "shido", label: "Shido Itsuka" }),
+      ],
+      [
+        { role: "assistant", content: "Yuzuru observes the impasse while Natsumi asks whether everyone can leave." },
+        { role: "user", content: "Hard pass." },
+        { role: "assistant", content: "Kaguya shouts, Nia laughs, and Shido tries one last bargain." },
+        { role: "user", content: "Still no." },
+      ],
+      { searchMode: "collapsed", contextMessages: 4, tokenBudget: 5, maxResults: 5 },
+    );
+
+    const labels = dynamicLabels(preview);
+    expect(labels).toContain("Yuzuru Yamai");
+    expect(labels).toContain("Natsumi Kyouno");
+    expect(labels).toContain("Kaguya Yamai");
+    expect(labels).toContain("Nia Honjou");
+    expect(labels).toContain("Shido Itsuka");
+  });
+
   test("collapsed mode keeps high-confidence scene support from summary and content matches", async () => {
     const preview = await previewFor(
       [
@@ -391,6 +421,189 @@ describe("retrieval accuracy", () => {
     expect(dynamicLabels(preview)).toContain("Blue Annex");
   });
 
+  test("collapsed mode protects selected faction scope members ahead of unrelated stragglers", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            if (prompt.includes("Select the exact lore entries")) {
+              return { content: JSON.stringify({ entryIds: ["beryl", "cyra"] }) };
+            }
+            const factionAChoice = /choiceId=(category:[^;]+); label=Faction A\b/.exec(prompt)?.[1] ?? "root";
+            return { content: JSON.stringify({ nodeIds: [factionAChoice], reason: "Faction A cast" }) };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const preview = await buildRetrievalPreview(
+        [{ role: "assistant", content: "Astra Vale asks for the Faction A cast briefing before the next move." }],
+        makeSettings(),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 5, maxResults: 5 }),
+        [
+          makeCategorizedBook([
+            {
+              entry: makeEntry({
+                entryId: "astra",
+                label: "Astra Vale",
+                content: "Astra Vale keeps dossiers on Beryl Cross and Cyra Drift.",
+              }),
+              path: ["Factions", "Faction A"],
+            },
+            { entry: makeEntry({ entryId: "borin", label: "Borin Tal" }), path: ["Factions", "Faction A"] },
+            { entry: makeEntry({ entryId: "celia", label: "Celia Voss" }), path: ["Factions", "Faction A"] },
+            { entry: makeEntry({ entryId: "darin", label: "Darin Sol" }), path: ["Factions", "Faction A"] },
+            {
+              entry: makeEntry({ entryId: "manual", label: "Faction A Protocol", content: "Generic protocol notes." }),
+              path: ["Factions", "Faction A"],
+            },
+            { entry: makeEntry({ entryId: "beryl", label: "Beryl Cross" }), path: ["Factions", "Faction B"] },
+            { entry: makeEntry({ entryId: "cyra", label: "Cyra Drift" }), path: ["Factions", "Faction C"] },
+          ]),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      const pulledLabels = preview!.pulledNodes.map((entry) => entry.label);
+      expect(pulledLabels).toContain("Beryl Cross");
+      expect(pulledLabels).toContain("Cyra Drift");
+      const labels = dynamicLabels(preview!);
+      expect(labels.slice(0, 4)).toEqual(["Astra Vale", "Borin Tal", "Celia Voss", "Darin Sol"]);
+      expect(labels).not.toContain("Faction A Protocol");
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
+  test("traversal mode protects selected faction scope members ahead of unrelated stragglers", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            if (prompt.includes("Select the exact lore entries")) {
+              return { content: JSON.stringify({ entryIds: ["beryl", "cyra"] }) };
+            }
+            const factionAChoice = /choiceId=(category:[^;]+); label=Faction A\b/.exec(prompt)?.[1] ?? "";
+            return {
+              content: JSON.stringify({
+                action: "retrieve",
+                choiceIds: factionAChoice ? [factionAChoice] : [],
+                reason: "Faction A cast",
+              }),
+            };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const preview = await buildRetrievalPreview(
+        [{ role: "assistant", content: "Astra Vale asks for the Faction A cast briefing before the next move." }],
+        makeSettings(),
+        makeConfig({ searchMode: "traversal", traversalStepLimit: 1, tokenBudget: 5, maxResults: 5 }),
+        [
+          makeCategorizedBook([
+            {
+              entry: makeEntry({
+                entryId: "astra",
+                label: "Astra Vale",
+                content: "Astra Vale keeps dossiers on Beryl Cross and Cyra Drift.",
+              }),
+              path: ["Factions", "Faction A"],
+            },
+            { entry: makeEntry({ entryId: "borin", label: "Borin Tal" }), path: ["Factions", "Faction A"] },
+            { entry: makeEntry({ entryId: "celia", label: "Celia Voss" }), path: ["Factions", "Faction A"] },
+            { entry: makeEntry({ entryId: "darin", label: "Darin Sol" }), path: ["Factions", "Faction A"] },
+            {
+              entry: makeEntry({ entryId: "manual", label: "Faction A Protocol", content: "Generic protocol notes." }),
+              path: ["Factions", "Faction A"],
+            },
+            { entry: makeEntry({ entryId: "beryl", label: "Beryl Cross" }), path: ["Factions", "Faction B"] },
+            { entry: makeEntry({ entryId: "cyra", label: "Cyra Drift" }), path: ["Factions", "Faction C"] },
+          ]),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      const pulledLabels = preview!.pulledNodes.map((entry) => entry.label);
+      expect(pulledLabels).toContain("Beryl Cross");
+      expect(pulledLabels).toContain("Cyra Drift");
+      const labels = dynamicLabels(preview!);
+      expect(labels.slice(0, 4)).toEqual(["Astra Vale", "Borin Tal", "Celia Voss", "Darin Sol"]);
+      expect(labels).not.toContain("Faction A Protocol");
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
+  test("selected scope core reserve scales without forcing every large-scope member", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            if (prompt.includes("Select the exact lore entries")) {
+              return { content: JSON.stringify({ entryIds: [] }) };
+            }
+            const factionAChoice = /choiceId=(category:[^;]+); label=Faction A\b/.exec(prompt)?.[1] ?? "root";
+            return { content: JSON.stringify({ nodeIds: [factionAChoice], reason: "Faction A cast" }) };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const members = Array.from({ length: 12 }, (_, index) =>
+        makeEntry({
+          entryId: `member-${index + 1}`,
+          label: `Aster ${index + 1}`,
+          content: "Primary cast profile.",
+        }),
+      );
+      const preview = await buildRetrievalPreview(
+        [{ role: "assistant", content: "The scene needs the Faction A cast briefing." }],
+        makeSettings(),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 10, maxResults: 10 }),
+        [
+          makeCategorizedBook(
+            members.map((entry) => ({
+              entry,
+              path: ["Factions", "Faction A"],
+            })),
+          ),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      const labels = dynamicLabels(preview!);
+      expect(labels).toHaveLength(6);
+      expect(labels.every((label) => /^Aster \d+$/.test(label))).toBe(true);
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
   test("live collapsed manifest cannot drop protected active anchors or scene support", async () => {
     const previousSpindle = (globalThis as any).spindle;
     const temperatures: unknown[] = [];
@@ -424,7 +637,7 @@ describe("retrieval accuracy", () => {
           },
         ],
         makeSettings(),
-        makeConfig({ searchMode: "collapsed", tokenBudget: 3, maxResults: 3 }),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 7, maxResults: 7 }),
         [
           makeBook([
             makeEntry({ entryId: "captain", label: "Captain Hale" }),
@@ -443,6 +656,30 @@ describe("retrieval accuracy", () => {
               key: ["Archive Vault"],
               summary: "Background logistics storage.",
               content: "Background logistics storage.",
+            }),
+            makeEntry({
+              entryId: "isolation",
+              label: "Isolation Protocol",
+              summary:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+              content:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+            }),
+            makeEntry({
+              entryId: "evacuation",
+              label: "Evacuation Protocol",
+              summary:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+              content:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+            }),
+            makeEntry({
+              entryId: "monitoring",
+              label: "Monitoring Protocol",
+              summary:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+              content:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
             }),
           ]),
         ],
