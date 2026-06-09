@@ -23,6 +23,7 @@ export interface ControllerJsonOptions {
   schema?: Record<string, unknown>;
   systemPrompt?: string;
   maxTokensOverride?: number;
+  temperatureOverride?: number;
   disableReasoning?: boolean;
   connectionId?: string | null;
   signal?: AbortSignal;
@@ -180,7 +181,7 @@ export async function runControllerJson(
       { role: "user" as const, content: prompt },
     ],
     parameters: {
-      temperature: settings.controllerTemperature,
+      temperature: options.temperatureOverride ?? settings.controllerTemperature,
       max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...noReasoningParameters,
       ...structuredParameters,

@@ -238,6 +238,137 @@ describe("retrieval accuracy", () => {
     expect(dynamicLabels(preview)).toEqual(["Captain Hale"]);
   });
 
+  test("collapsed mode keeps high-confidence scene support from summary and content matches", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({
+          entryId: "infirmary",
+          label: "Blue Annex",
+          summary: "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+          content: "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+        }),
+      ],
+      [
+        {
+          role: "user",
+          content:
+            "The character is in the infirmary treating crystal fever after an ambush and needs isolation and evacuation timing.",
+        },
+      ],
+      { searchMode: "collapsed", tokenBudget: 2, maxResults: 2 },
+    );
+
+    expect(preview.pulledNodes.map((entry) => entry.label)).toContain("Blue Annex");
+    expect(dynamicLabels(preview)).toContain("Blue Annex");
+  });
+
+  test("collapsed mode keeps scene support alongside a more literal keyed candidate", async () => {
+    const preview = await previewFor(
+      [
+        makeEntry({
+          entryId: "infirmary",
+          label: "Blue Annex",
+          summary: "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+          content: "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+        }),
+        makeEntry({
+          entryId: "glossary",
+          label: "Crystal Fever",
+          key: ["crystal"],
+          summary: "A general glossary entry for the condition.",
+          content: "A general glossary entry for the condition.",
+        }),
+      ],
+      [
+        {
+          role: "user",
+          content:
+            "The character is in the infirmary treating crystal fever after an ambush and needs isolation and evacuation timing.",
+        },
+      ],
+      { searchMode: "collapsed", tokenBudget: 2, maxResults: 2 },
+    );
+
+    expect(dynamicLabels(preview)).toContain("Crystal Fever");
+    expect(dynamicLabels(preview)).toContain("Blue Annex");
+  });
+
+  test("live collapsed manifest cannot drop protected active anchors or scene support", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    const temperatures: unknown[] = [];
+    const prompts: string[] = [];
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            prompts.push(prompt);
+            temperatures.push(request.parameters?.temperature);
+            if (prompt.includes("Select the exact lore entries")) {
+              return { content: JSON.stringify({ entryIds: ["archive"] }) };
+            }
+            const categoryChoice = /choiceId=(category:[^;\s]+)/.exec(prompt)?.[1] ?? "root";
+            return { content: JSON.stringify({ nodeIds: [categoryChoice], reason: "test scope" }) };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const preview = await buildRetrievalPreview(
+        [
+          { role: "assistant", content: "Earlier, Archive Vault was mentioned in background logistics." },
+          { role: "user", content: "Set that aside for now." },
+          { role: "assistant", content: "Captain Hale waits near the infirmary doors." },
+          {
+            role: "user",
+            content:
+              "Captain Hale needs the infirmary protocol for crystal fever after an ambush, including isolation and evacuation timing.",
+          },
+        ],
+        makeSettings(),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 3, maxResults: 3 }),
+        [
+          makeBook([
+            makeEntry({ entryId: "captain", label: "Captain Hale" }),
+            makeEntry({
+              entryId: "infirmary",
+              label: "Blue Annex",
+              summary:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+              content:
+                "The infirmary protocol for treating crystal fever after an ambush, including isolation and evacuation timing.",
+            }),
+            makeEntry({
+              entryId: "archive",
+              label: "Archive Vault",
+              aliases: ["Archive Vault"],
+              key: ["Archive Vault"],
+              summary: "Background logistics storage.",
+              content: "Background logistics storage.",
+            }),
+          ]),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      const labels = dynamicLabels(preview!);
+      expect(labels).toContain("Captain Hale");
+      expect(labels).toContain("Blue Annex");
+      expect(labels).toContain("Archive Vault");
+      expect(prompts.some((prompt) => prompt.includes("Select the exact lore entries"))).toBe(true);
+      expect(temperatures.length).toBeGreaterThanOrEqual(1);
+      expect(temperatures.every((temperature) => temperature === 0.1)).toBe(true);
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
   test("selected active entries expand into related mechanics and organizations from their own content", async () => {
     const preview = await previewFor(
       [

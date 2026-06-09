@@ -550,7 +550,7 @@ async function runControllerJson(prompt, settings, userId, options = {}) {
       { role: "user", content: prompt }
     ],
     parameters: {
-      temperature: settings.controllerTemperature,
+      temperature: options.temperatureOverride ?? settings.controllerTemperature,
       max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...noReasoningParameters,
       ...structuredParameters
@@ -1033,11 +1033,13 @@ var SELECTIVE_FALLBACK_LIMIT = 8;
 var ACTIVE_ANCHOR_SCORE_THRESHOLD = 8;
 var BACKGROUND_MENTION_SCORE_THRESHOLD = 10;
 var SUPPORT_CONTEXT_SCORE_THRESHOLD = 14;
+var SCENE_SUPPORT_SCORE_THRESHOLD = 8;
 var RELATED_SUPPORT_SCORE_THRESHOLD = 10;
 var RELATED_SUPPORT_LIMIT = 16;
 var PROTECTED_RELATED_SUPPORT_LIMIT = 6;
 var PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT = 4;
 var PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT = 2;
+var PROTECTED_SCENE_SUPPORT_LIMIT = 2;
 var HIGH_CONFIDENCE_DYNAMIC_THRESHOLD = 12;
 var FEEDBACK_HOT_MS = 2 * 60 * 60 * 1000;
 var FEEDBACK_WARM_MS = 12 * 60 * 60 * 1000;
@@ -1711,17 +1713,25 @@ function getDynamicFeedbackBoost(entry, feedback) {
 function hasPrimaryReason(reasons) {
   return reasons.includes("label") || reasons.includes("alias") || reasons.includes("keyword");
 }
+function hasSceneSupportReason(reasons) {
+  return reasons.includes("summary") || reasons.includes("content") || reasons.includes("comment");
+}
+function isConstraintOnlyCandidate(reasons) {
+  return reasons.includes("constraint") && !reasons.includes("active") && !reasons.includes("background");
+}
+function isHighConfidenceSceneSupport(candidate) {
+  return candidate.selectionRole === "support_context" && candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD && hasSceneSupportReason(candidate.reasons) && !isConstraintOnlyCandidate(candidate.reasons);
+}
 function isDynamicInjectionEligible(candidate) {
   if (candidate.entry.constant)
     return true;
   if (candidate.reasons.includes("related_support")) {
     return candidate.score >= RELATED_SUPPORT_SCORE_THRESHOLD;
   }
+  if (isConstraintOnlyCandidate(candidate.reasons))
+    return false;
   if (!hasPrimaryReason(candidate.reasons))
-    return false;
-  if (candidate.reasons.includes("constraint") && !candidate.reasons.includes("active") && !candidate.reasons.includes("background")) {
-    return false;
-  }
+    return isHighConfidenceSceneSupport(candidate);
   switch (candidate.selectionRole) {
     case "active_anchor":
       return candidate.score >= ACTIVE_ANCHOR_SCORE_THRESHOLD;
@@ -1869,6 +1879,11 @@ function selectProtectedRelatedSupport(candidates, limit) {
   addCandidates(remaining, limit - selected.length);
   return selected;
 }
+function selectProtectedSceneSupport(candidates, recentConversation, scopes, limit) {
+  if (limit <= 0)
+    return [];
+  return rankSelectionCandidates(recentConversation, candidates.filter((candidate) => !candidate.reasons.includes("related_support") && isHighConfidenceSceneSupport(candidate)), scopes).slice(0, limit).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+}
 function scoreEntry(entry, tree, queryText, queryTokens, feedback) {
   const reasons = [];
   let score = 0;
@@ -1983,6 +1998,7 @@ async function runControllerJson2(prompt, controller, systemPrompt, requestLabel
     const requestPromise = runControllerJson(prompt, controller.settings, controller.userId, {
       systemPrompt,
       connectionId: controller.connectionId,
+      temperatureOverride: 0.1,
       signal: abortController.signal
     }).then((result) => {
       const durationMs = Date.now() - requestStartedAt;
@@ -2885,19 +2901,24 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
     const supportCandidates = eligibleCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
     const protectedRelatedSupport = selectProtectedRelatedSupport(supportCandidates, Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length)));
     const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
-    const optionalSupportCandidates = supportCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length);
+    const sceneSupportCandidates = supportCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
+    const protectedSceneSupport = selectProtectedSceneSupport(sceneSupportCandidates, recentConversation, activeScopes, Math.min(PROTECTED_SCENE_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length)));
+    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
+    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length - protectedSceneSupport.length);
     const supportSelectionLimit = config.selectiveRetrieval ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT) : remainingSupportSlots;
     const supportSelected = supportSelectionLimit > 0 ? await maybeSelectEntries(recentConversation, optionalSupportCandidates, config, controller, allowController, activeScopes, supportSelectionLimit) : [];
-    selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...supportSelected].slice(0, maxDynamicEntries);
+    selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...protectedSceneSupport, ...supportSelected].slice(0, maxDynamicEntries);
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
     const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
     const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
+    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
     const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s),` : ",";
     const relatedSummary = selectedRelatedSupportCount ? ` with ${selectedRelatedSupportCount} protected related support candidate(s),` : "";
-    pushTrace(trace, "manifest_select", "Select manifest entries", `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary}${relatedSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`, { entryCount: selected.length });
+    const sceneSupportSummary = selectedSceneSupportCount ? ` with ${selectedSceneSupportCount} protected scene support candidate(s),` : "";
+    pushTrace(trace, "manifest_select", "Select manifest entries", `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary}${relatedSummary}${sceneSupportSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`, { entryCount: selected.length });
   } else {
     selected = eligibleCandidates;
     pushTrace(trace, "retrieve", "Resolve scoped entries", `Resolved ${selected.length} scoped entry candidate(s) directly from ${Math.max(activeScopes.length, 1)} chosen scope(s).`, { entryCount: selected.length });
@@ -3247,11 +3268,15 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
     const supportManifestCandidates = manifestCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
     const protectedRelatedSupport = selectProtectedRelatedSupport(supportManifestCandidates, Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length)));
     const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
-    const optionalSupportCandidates = supportManifestCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
+    const sceneSupportCandidates = supportManifestCandidates.filter((item) => !protectedRelatedIds.has(item.entry.entryId));
+    const protectedSceneSupport = selectProtectedSceneSupport(sceneSupportCandidates, queryText, finalScopes, Math.min(PROTECTED_SCENE_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length)));
+    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
     const finalCandidatePool = [
       ...rankedSceneAnchors,
       ...protectedRelatedSupport,
-      ...optionalSupportCandidates.slice(0, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length))
+      ...protectedSceneSupport,
+      ...optionalSupportCandidates.slice(0, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length - protectedSceneSupport.length))
     ];
     const manifests = buildScopedManifests(finalCandidatePool, finalScopes);
     if (!pooledCandidates.length || !finalCandidatePool.length) {
@@ -3270,16 +3295,18 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
         trace
       };
     }
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length);
+    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedRelatedSupport.length - protectedSceneSupport.length);
     const supportSelectionLimit = config.selectiveRetrieval ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT) : remainingSupportSlots;
     const selectedSupport = config.selectiveRetrieval && supportSelectionLimit > 0 ? await maybeSelectEntries(queryText, optionalSupportCandidates, config, controller, allowController, finalScopes, supportSelectionLimit) : config.selectiveRetrieval ? [] : optionalSupportCandidates.slice(0, supportSelectionLimit);
-    const selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...selectedSupport].slice(0, maxDynamicEntries);
+    const selected = [...rankedSceneAnchors, ...protectedRelatedSupport, ...protectedSceneSupport, ...selectedSupport].slice(0, maxDynamicEntries);
     const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
     const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
+    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
     const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s)` : "";
     const relatedSummary = selectedRelatedSupportCount ? `${anchorSummary ? " and" : ", including"} ${selectedRelatedSupportCount} protected related support candidate(s)` : "";
+    const sceneSupportSummary = selectedSceneSupportCount ? `${anchorSummary || relatedSummary ? " and" : ", including"} ${selectedSceneSupportCount} protected scene support candidate(s)` : "";
     pushTrace(trace, "finish", label, `${reason} Exploration accumulated ${pooledCandidates.length} dynamic candidate(s) across ${Math.max(finalScopes.length, 1)} retrieved scope(s).`, { entryCount: pooledCandidates.length, durationMs });
-    pushTrace(trace, "manifest_select", "Select accumulated entries", `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary}${relatedSummary} from ${pooledCandidates.length} pooled candidate(s).`, { entryCount: selected.length });
+    pushTrace(trace, "manifest_select", "Select accumulated entries", `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary}${relatedSummary}${sceneSupportSummary} from ${pooledCandidates.length} pooled candidate(s).`, { entryCount: selected.length });
     return {
       scopes: finalScopes.length ? finalScopes : scopes,
       selected,
