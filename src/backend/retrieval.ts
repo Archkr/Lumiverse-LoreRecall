@@ -2508,6 +2508,63 @@ function chooseDeterministicScopes(
   return selected.length ? selected : currentScopes;
 }
 
+function limitScopeSelection(scopes: TraversalScope[], limit = MAX_SCOPE_CHOICES): TraversalScope[] {
+  return dedupeScopes(scopes).slice(0, Math.max(0, limit));
+}
+
+function getEntryPrimaryScopeFromBooks(
+  entry: ScoredEntry["entry"],
+  booksById: Map<string, RuntimeBook>,
+): TraversalScope | null {
+  const preferredBook = booksById.get(entry.worldBookId);
+  const candidateBooks = preferredBook
+    ? [preferredBook, ...Array.from(booksById.values()).filter((book) => book.summary.id !== preferredBook.summary.id)]
+    : Array.from(booksById.values());
+  for (const book of candidateBooks) {
+    const node = Object.values(book.tree.nodes).find((item) => item.entryIds.includes(entry.entryId));
+    if (node) return { book, nodeId: node.id };
+    if (book.tree.unassignedEntryIds.includes(entry.entryId)) return { book, nodeId: book.tree.rootId };
+  }
+  return null;
+}
+
+function isScopeFallbackSeedCandidate(candidate: ScoredEntry): boolean {
+  const reasons = candidate.reasons;
+  const nonStructuralReasons = reasons.filter(
+    (reason) => reason !== "branch" && reason !== "tag" && reason !== "group" && reason !== "constraint",
+  );
+  if (isConstraintOnlyCandidate(reasons)) return false;
+  if (!nonStructuralReasons.length) return false;
+  return (
+    hasPrimaryReason(reasons) ||
+    hasSceneSupportReason(reasons) ||
+    reasons.includes("active") ||
+    reasons.includes("background") ||
+    reasons.includes("related_support") ||
+    candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD
+  );
+}
+
+function chooseDeterministicEntryScopes(
+  recentConversation: string,
+  rootScopes: TraversalScope[],
+  deterministicById: Map<string, ScoredEntry>,
+  config: CharacterRetrievalConfig,
+): TraversalScope[] {
+  const deterministic = Array.from(deterministicById.values());
+  if (!deterministic.length) return chooseDeterministicScopes(rootScopes, deterministicById, config);
+
+  const booksById = new Map(rootScopes.map((scope) => [scope.book.summary.id, scope.book]));
+  const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes)
+    .filter((item) => isScopeFallbackSeedCandidate(item.candidate))
+    .slice(0, Math.min(MAX_SCOPE_CHOICES, Math.max(1, config.maxResults)))
+    .map((item) => item.candidate);
+  const scopes = ranked
+    .map((candidate) => getEntryPrimaryScopeFromBooks(candidate.entry, booksById))
+    .filter((scope): scope is TraversalScope => !!scope);
+  return scopes.length ? limitScopeSelection(scopes) : [];
+}
+
 function buildInitialScopePrompt(recentConversation: string, treeOverview: string): string {
   return [
     'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
@@ -2518,7 +2575,7 @@ function buildInitialScopePrompt(recentConversation: string, treeOverview: strin
     "- If document selectors like doc:<bookId> are shown, you may pick them to narrow to a single lorebook before refining deeper.",
     "- Pick nodes whose content would be most useful for the next reply.",
     "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
-    "- If nothing seems relevant, return an empty nodeIds array.",
+    "- Return an empty nodeIds array only when the recent conversation has no retrievable lore need.",
     "",
     "KNOWLEDGE TREE INDEX:",
     treeOverview || "- none",
@@ -2625,7 +2682,7 @@ async function selectScopesSinglePass(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2701,7 +2758,7 @@ async function chooseCollapsedScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2712,15 +2769,15 @@ async function chooseCollapsedScopes(
       fallbackPath.push(
         response.error ??
           (requestedNodeIds.length
-            ? "Collapsed scope selection returned nodeIds that did not map to visible scopes; used top-level deterministic scope fallback."
-            : "Collapsed scope selection returned an empty nodeIds array; used top-level deterministic scope fallback."),
+            ? "Collapsed scope selection returned nodeIds that did not map to visible scopes; used deterministic entry-scope fallback."
+            : "Collapsed scope selection returned an empty nodeIds array; used deterministic entry-scope fallback."),
       );
-      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+      scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
       selectionReason = fallbackPath[fallbackPath.length - 1];
     }
   } else {
-    fallbackPath.push("Collapsed scope selection skipped the controller and used top-level deterministic scope fallback.");
-    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+    fallbackPath.push("Collapsed scope selection skipped the controller and used deterministic entry-scope fallback.");
+    scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
     selectionReason = fallbackPath[fallbackPath.length - 1];
   }
 
@@ -2751,7 +2808,7 @@ async function chooseCollapsedScopes(
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds)
           ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
           : [];
-        refinedScopes = resolveScopeChoices(requestedNodeIds, books);
+        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
         refinedReason =
           typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim()
             ? refinement.parsed.reason.trim()
@@ -2817,7 +2874,7 @@ async function chooseTraversalScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2828,15 +2885,15 @@ async function chooseTraversalScopes(
       fallbackPath.push(
         response.error ??
           (requestedNodeIds.length
-            ? "Traversal scope selection returned nodeIds that did not map to visible scopes; used top-level deterministic scope fallback."
-            : "Traversal scope selection returned an empty nodeIds array; used top-level deterministic scope fallback."),
+            ? "Traversal scope selection returned nodeIds that did not map to visible scopes; used deterministic entry-scope fallback."
+            : "Traversal scope selection returned an empty nodeIds array; used deterministic entry-scope fallback."),
       );
-      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+      scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
       selectionReason = fallbackPath[fallbackPath.length - 1];
     }
   } else {
-    fallbackPath.push("Traversal scope selection skipped the controller and used top-level deterministic scope fallback.");
-    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+    fallbackPath.push("Traversal scope selection skipped the controller and used deterministic entry-scope fallback.");
+    scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
     selectionReason = fallbackPath[fallbackPath.length - 1];
   }
 
@@ -2871,7 +2928,7 @@ async function chooseTraversalScopes(
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
         ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         : [];
-      nextScopes = resolveScopeChoices(requestedNodeIds, books);
+      nextScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
       nextReason =
         typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
           ? response.parsed.reason.trim()
@@ -2973,7 +3030,7 @@ async function selectEntriesForScopes(
         return { book, nodeId };
       })
       .filter((scope): scope is TraversalScope => !!scope);
-    activeScopes = dedupeScopes([...activeScopes, ...anchorScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes]);
     pushTrace(
       trace,
       "retrieve",
@@ -3031,7 +3088,7 @@ async function selectEntriesForScopes(
         return { book, nodeId };
       })
       .filter((scope): scope is TraversalScope => !!scope);
-    activeScopes = dedupeScopes([...activeScopes, ...relatedScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes]);
     pushTrace(
       trace,
       "retrieve",
@@ -3558,8 +3615,8 @@ async function selectTraversalEntries(
 
     for (const anchor of anchors) {
       sceneAnchorsById.set(anchor.entry.entryId, anchor);
+      mergeCandidate(anchor);
     }
-    addSearchCandidatesToPool(anchors);
     pushTrace(
       trace,
       "retrieve",
@@ -3954,7 +4011,7 @@ async function selectTraversalEntries(
           trace,
         };
       }
-      const nextScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
+      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
 
       if (!nextScopes.length) {
         if (getCandidatePool().length) {
@@ -4120,7 +4177,7 @@ async function selectTraversalEntries(
         continue;
       }
 
-      const requestedScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
+      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
       if (choiceIds.length > 0 && !requestedScopes.length) {
         const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
         if (directChoiceCandidates.length) {

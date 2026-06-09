@@ -73,6 +73,44 @@ function makeBook(entries: IndexedEntry[]): RuntimeBook {
   };
 }
 
+function makeCategorizedBook(items: Array<{ entry: IndexedEntry; path: string[] }>): RuntimeBook {
+  const tree = createEmptyTreeIndex("book");
+  for (const item of items) {
+    const categoryId = ensureCategoryPath(tree, item.path, "manual");
+    assignEntryToTarget(tree, item.entry.entryId, { categoryId });
+  }
+  const entries = items.map((item) => item.entry);
+  return {
+    summary: {
+      id: "book",
+      name: "Synthetic Lore",
+      description: "Synthetic regression fixture.",
+      updatedAt: 1,
+    },
+    cache: {
+      version: 2,
+      bookId: "book",
+      bookUpdatedAt: 1,
+      name: "Synthetic Lore",
+      description: "Synthetic regression fixture.",
+      entries,
+    },
+    tree,
+    config: { ...DEFAULT_BOOK_CONFIG, enabled: true },
+    status: {
+      bookId: "book",
+      attachedToCharacter: true,
+      selectedForCharacter: true,
+      entryCount: entries.length,
+      categoryCount: Math.max(0, Object.keys(tree.nodes).length - 1),
+      rootEntryCount: 0,
+      unassignedCount: 0,
+      treeMissing: false,
+      warnings: [],
+    },
+  };
+}
+
 function makeConfig(patch: Partial<CharacterRetrievalConfig> = {}): CharacterRetrievalConfig {
   return {
     ...DEFAULT_CHARACTER_CONFIG,
@@ -360,6 +398,171 @@ describe("retrieval accuracy", () => {
       expect(prompts.some((prompt) => prompt.includes("Select the exact lore entries"))).toBe(true);
       expect(temperatures.length).toBeGreaterThanOrEqual(1);
       expect(temperatures.every((temperature) => temperature === 0.1)).toBe(true);
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
+  test("collapsed empty scope response falls back to scored entry scopes instead of broad roots", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async () => ({ content: JSON.stringify({ nodeIds: [], reason: "nothing relevant" }) }),
+        },
+        log: { warn: () => undefined },
+      };
+
+      const target = makeEntry({
+        entryId: "captain",
+        label: "Captain Hale",
+        content: "Captain Hale is handling the infirmary emergency.",
+      });
+      const distractors = Array.from({ length: 12 }, (_, index) =>
+        makeEntry({
+          entryId: `archive-${index + 1}`,
+          label: `Archive Note ${index + 1}`,
+          content: "Unrelated logistics and background archives.",
+        }),
+      );
+      const preview = await buildRetrievalPreview(
+        [{ role: "user", content: "Captain Hale needs to answer the infirmary emergency now." }],
+        makeSettings(),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 3, maxResults: 3 }),
+        [
+          makeCategorizedBook([
+            { entry: target, path: ["Cast"] },
+            ...distractors.map((entry) => ({ entry, path: ["Archives"] })),
+          ]),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      expect(preview!.pulledNodes.map((entry) => entry.label)).toContain("Captain Hale");
+      expect(preview!.pulledNodes.map((entry) => entry.label)).not.toContain("Archive Note 1");
+      expect(preview!.selectedScopes.map((scope) => scope.breadcrumb)).toContain("Cast");
+      expect(preview!.fallbackReason).toContain("deterministic entry-scope fallback");
+      expect(preview!.fallbackReason).not.toContain("top-level deterministic scope fallback");
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
+  test("collapsed refinement caps overbroad controller scope lists", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            if (prompt.includes("CATEGORY CHOICES:")) {
+              const nodeIds = Array.from(prompt.matchAll(/^- \[([^\]]+)\]/gm), (match) => match[1]);
+              return { content: JSON.stringify({ nodeIds, reason: "all children" }) };
+            }
+            const topChoice = /choiceId=(category:[^;]+); label=Top\b/.exec(prompt)?.[1] ?? "root";
+            return { content: JSON.stringify({ nodeIds: [topChoice], reason: "top branch" }) };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const entries = Array.from({ length: 15 }, (_, index) =>
+        makeEntry({
+          entryId: `protocol-${index + 1}`,
+          label: `Protocol ${index + 1}`,
+          summary: "Emergency infirmary protocol support.",
+          content: "Emergency infirmary protocol support.",
+        }),
+      );
+      const preview = await buildRetrievalPreview(
+        [{ role: "user", content: "The scene needs emergency infirmary protocol support." }],
+        makeSettings(),
+        makeConfig({ searchMode: "collapsed", tokenBudget: 6, maxResults: 6 }),
+        [
+          makeCategorizedBook(
+            entries.map((entry, index) => ({
+              entry,
+              path: ["Top", `Child ${index + 1}`],
+            })),
+          ),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      expect(preview!.selectedScopes).toHaveLength(5);
+      expect(preview!.trace.some((step) => step.summary.includes("Narrowed retrieval to 5 scope(s)"))).toBe(true);
+    } finally {
+      if (previousSpindle === undefined) {
+        delete (globalThis as any).spindle;
+      } else {
+        (globalThis as any).spindle = previousSpindle;
+      }
+    }
+  });
+
+  test("traversal retrieve caps overbroad controller scope lists", async () => {
+    const previousSpindle = (globalThis as any).spindle;
+    try {
+      (globalThis as any).spindle = {
+        generate: {
+          quiet: async (request: any) => {
+            const prompt = String(request.messages?.at(-1)?.content ?? "");
+            if (prompt.includes("hierarchical knowledge tree")) {
+              const choiceIds = Array.from(prompt.matchAll(/choiceId=(category:[^;]+);/g), (match) => match[1]);
+              return { content: JSON.stringify({ action: "finish", choiceIds, reason: "all visible branches" }) };
+            }
+            return { content: JSON.stringify({ entryIds: [] }) };
+          },
+        },
+        log: { warn: () => undefined },
+      };
+
+      const entries = Array.from({ length: 15 }, (_, index) =>
+        makeEntry({
+          entryId: `triage-${index + 1}`,
+          label: `Triage Branch ${index + 1}`,
+          summary: "Emergency infirmary triage support.",
+          content: "Emergency infirmary triage support.",
+        }),
+      );
+      const preview = await buildRetrievalPreview(
+        [{ role: "user", content: "The scene needs emergency infirmary triage support." }],
+        makeSettings(),
+        makeConfig({
+          searchMode: "traversal",
+          selectiveRetrieval: false,
+          traversalStepLimit: 1,
+          tokenBudget: 20,
+          maxResults: 20,
+        }),
+        [
+          makeCategorizedBook(
+            entries.map((entry, index) => ({
+              entry,
+              path: [`Branch ${index + 1}`],
+            })),
+          ),
+        ],
+        "test-user",
+        { allowController: true },
+      );
+
+      expect(preview).not.toBeNull();
+      expect(preview!.retrievedScopes).toHaveLength(5);
+      expect(preview!.trace.some((step) => step.summary.includes("from 5 retrieval scope(s)"))).toBe(true);
+      expect(preview!.fallbackReason).toBeNull();
     } finally {
       if (previousSpindle === undefined) {
         delete (globalThis as any).spindle;
