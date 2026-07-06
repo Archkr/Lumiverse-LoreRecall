@@ -809,7 +809,7 @@ describe("retrieval accuracy", () => {
     }
   });
 
-  test("traversal retrieve caps overbroad controller scope lists", async () => {
+  test("traversal retrieve respects configured scope pick limit", async () => {
     const previousSpindle = (globalThis as any).spindle;
     try {
       (globalThis as any).spindle = {
@@ -841,6 +841,7 @@ describe("retrieval accuracy", () => {
           searchMode: "traversal",
           selectiveRetrieval: false,
           traversalStepLimit: 1,
+          scopePickLimit: 8,
           tokenBudget: 20,
           maxResults: 20,
         }),
@@ -857,8 +858,8 @@ describe("retrieval accuracy", () => {
       );
 
       expect(preview).not.toBeNull();
-      expect(preview!.retrievedScopes).toHaveLength(5);
-      expect(preview!.trace.some((step) => step.summary.includes("from 5 retrieval scope(s)"))).toBe(true);
+      expect(preview!.retrievedScopes).toHaveLength(8);
+      expect(preview!.trace.some((step) => step.summary.includes("from 8 retrieval scope(s)"))).toBe(true);
       expect(preview!.fallbackReason).toBeNull();
     } finally {
       if (previousSpindle === undefined) {

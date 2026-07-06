@@ -22,6 +22,7 @@ var DEFAULT_CHARACTER_CONFIG = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
+  scopePickLimit: 5,
   tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
@@ -166,6 +167,7 @@ function normalizeCharacterConfig(value) {
     maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 64),
     maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 16),
     traversalStepLimit: clampInt(typeof next.traversalStepLimit === "number" ? next.traversalStepLimit : DEFAULT_CHARACTER_CONFIG.traversalStepLimit, 1, 24),
+    scopePickLimit: clampInt(typeof next.scopePickLimit === "number" ? next.scopePickLimit : DEFAULT_CHARACTER_CONFIG.scopePickLimit, 1, 24),
     tokenBudget: clampInt(injectedEntryLimit, 1, 64),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
@@ -1024,7 +1026,7 @@ var TRAVERSAL_FULL_OVERVIEW_LIMIT = 1e4;
 var RECENT_MESSAGE_LIMIT = 700;
 var RECENT_SCENE_MESSAGE_LIMIT = 6000;
 var SCENE_MESSAGE_LOOKBACK = 4;
-var MAX_SCOPE_CHOICES = 5;
+var DEFAULT_SCOPE_PICK_LIMIT = 5;
 var DOCUMENT_CHOICE_PREFIX = "doc:";
 var EMPTY_ENTRY_ID_SET = new Set;
 var DIRECT_MENTION_SEED_LIMIT = 12;
@@ -2839,6 +2841,7 @@ function resolveScopeChoices(nodeIds, books) {
   return Array.from(scopes.values());
 }
 function chooseDeterministicScopes(currentScopes, deterministicById, config) {
+  const scopePickLimit = getScopePickLimit(config);
   const choices = collectChildScopeChoices(currentScopes, deterministicById, config);
   const ranked = sortScopeChoices(choices).filter((choice) => choice.entryCount > 0);
   if (!ranked.length)
@@ -2850,12 +2853,15 @@ function chooseDeterministicScopes(currentScopes, deterministicById, config) {
     if (overlaps)
       continue;
     selected.push(scope);
-    if (selected.length >= MAX_SCOPE_CHOICES)
+    if (selected.length >= scopePickLimit)
       break;
   }
   return selected.length ? selected : currentScopes;
 }
-function limitScopeSelection(scopes, limit = MAX_SCOPE_CHOICES) {
+function getScopePickLimit(config) {
+  return clampInt(config.scopePickLimit ?? DEFAULT_SCOPE_PICK_LIMIT, 1, 24);
+}
+function limitScopeSelection(scopes, limit) {
   return dedupeScopes(scopes).slice(0, Math.max(0, limit));
 }
 function getEntryPrimaryScopeFromBooks(entry, booksById) {
@@ -2884,14 +2890,14 @@ function chooseDeterministicEntryScopes(recentConversation, rootScopes, determin
   if (!deterministic.length)
     return chooseDeterministicScopes(rootScopes, deterministicById, config);
   const booksById = new Map(rootScopes.map((scope) => [scope.book.summary.id, scope.book]));
-  const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes).filter((item) => isScopeFallbackSeedCandidate(item.candidate)).slice(0, Math.min(MAX_SCOPE_CHOICES, Math.max(1, config.maxResults))).map((item) => item.candidate);
+  const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes).filter((item) => isScopeFallbackSeedCandidate(item.candidate)).slice(0, Math.min(getScopePickLimit(config), Math.max(1, config.maxResults))).map((item) => item.candidate);
   const scopes = ranked.map((candidate) => getEntryPrimaryScopeFromBooks(candidate.entry, booksById)).filter((scope) => !!scope);
-  return scopes.length ? limitScopeSelection(scopes) : [];
+  return scopes.length ? limitScopeSelection(scopes, getScopePickLimit(config)) : [];
 }
-function buildInitialScopePrompt(recentConversation, treeOverview) {
+function buildInitialScopePrompt(recentConversation, treeOverview, scopePickLimit) {
   return [
     'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
-    `Pick 1-${MAX_SCOPE_CHOICES} nodeIds maximum.`,
+    `Pick 1-${scopePickLimit} nodeIds maximum.`,
     "Rules:",
     "- Prefer specific leaves over broad branches.",
     "- Pick only nodeIds exactly as shown in the knowledge tree index.",
@@ -2912,7 +2918,7 @@ function buildChildScopePrompt(recentConversation, scopes, categories, step, con
     'Return ONLY JSON in this exact shape: {"action":"refine|retrieve","nodeIds":["node-id-1"],"reason":"brief explanation"}.',
     `Traversal step ${step + 1} of ${config.traversalStepLimit}.`,
     "Rules:",
-    `- Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum from the choices below.`,
+    `- Pick 1-${getScopePickLimit(config)} category nodeIds maximum from the choices below.`,
     '- Use action "refine" when child categories should be opened before retrieval.',
     '- Use action "retrieve" when the chosen nodeIds are already specific enough to resolve entries.',
     "- Prefer specific leaves over broad branches.",
@@ -2937,13 +2943,14 @@ function buildFallbackReason(fallbackPath) {
 }
 async function chooseCollapsedScopes(recentConversation, books, config, controller, allowController, deterministicById, trace) {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = getScopePickLimit(config);
   const fallbackPath = [];
   let scopes = [];
   let selectionReason = "Controller selected retrieval scopes.";
   if (allowController) {
-    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
+    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected retrieval scopes.";
     if (scopes.length) {
       selectionReason = controllerReason;
@@ -2970,7 +2977,7 @@ async function chooseCollapsedScopes(recentConversation, books, config, controll
       if (allowController) {
         const refinement = await runControllerJson2(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine collapsed scopes");
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds) ? refinement.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
         refinedReason = typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim() ? refinement.parsed.reason.trim() : "Refined broad scopes.";
         if (!refinedScopes.length) {
           fallbackPath.push(refinement.error ?? (requestedNodeIds.length ? "Collapsed scope refinement returned nodeIds that did not map to current child scopes; used deterministic child-scope fallback." : "Collapsed scope refinement returned an empty nodeIds array; used deterministic child-scope fallback."));
@@ -3033,7 +3040,7 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
       const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
       return { book, nodeId };
     }).filter((scope) => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes], getScopePickLimit(config));
     pushTrace(trace, "retrieve", "Seed active anchors", `Seeded ${sceneAnchors.length} directly mentioned active anchor candidate(s) from the current scene before selecting scoped support entries.`, { entryCount: sceneAnchors.length });
   }
   const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval, excludedEntryIds, feedback);
@@ -3061,7 +3068,7 @@ async function selectEntriesForScopes(recentConversation, scopes, config, contro
       const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
       return { book, nodeId };
     }).filter((scope) => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes], getScopePickLimit(config));
     pushTrace(trace, "retrieve", "Expand related support", `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`, { entryCount: relatedSupport.length });
   }
   const mergedRawCandidates = Array.from(rawCandidateById.values());
@@ -3286,7 +3293,7 @@ function buildTraversalPrompt(queryText, frontier, step, config, candidatePool =
       "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
       "- The candidate pool is additive. Retrieve only missing context; finish once the pool contains enough candidates for final entry selection.",
       "- Treat directly mentioned active anchors already in the candidate pool as relevant; use search retrieval to add missing named entities or support lore.",
-      "- Pick 1-5 choiceIds maximum when using retrieve.",
+      `- Pick 1-${getScopePickLimit(config)} choiceIds maximum when using retrieve.`,
       "- Do not invent new choiceIds or entry IDs.",
       `- Stay within ${config.traversalStepLimit} total steps.`,
       "",
@@ -3309,7 +3316,7 @@ function buildTraversalPrompt(queryText, frontier, step, config, candidatePool =
     "Task:",
     "- Pick the most relevant traversal choices from the tree to retrieve for the next response.",
     "Rules:",
-    "- Pick 1-5 choiceIds maximum and prefer specific branches over broad branches.",
+    `- Pick 1-${getScopePickLimit(config)} choiceIds maximum and prefer specific branches over broad branches.`,
     "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
     hasFullTreeOverview ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index." : "- Choose choiceIds only from the category list shown below.",
     "- Use action navigate when a shown category or document root still needs to be opened before retrieval.",
@@ -3663,7 +3670,7 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
           trace
         };
       }
-      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
+      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
       if (!nextScopes.length) {
         if (getCandidatePool().length) {
           return finalizeAccumulatedSelection(`Controller picked no valid traversal branches after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`, "Finish traversal", response.durationMs);
@@ -3781,7 +3788,7 @@ async function selectTraversalEntries(queryText, books, initialScopes, config, c
         }
         continue;
       }
-      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
+      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
       if (choiceIds.length > 0 && !requestedScopes.length) {
         const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
         if (directChoiceCandidates.length) {

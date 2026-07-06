@@ -182,7 +182,7 @@ const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
 const RECENT_MESSAGE_LIMIT = 700;
 const RECENT_SCENE_MESSAGE_LIMIT = 6000;
 const SCENE_MESSAGE_LOOKBACK = 4;
-const MAX_SCOPE_CHOICES = 5;
+const DEFAULT_SCOPE_PICK_LIMIT = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
 const EMPTY_ENTRY_ID_SET = new Set<string>();
 const DIRECT_MENTION_SEED_LIMIT = 12;
@@ -2674,6 +2674,7 @@ function chooseDeterministicScopes(
   deterministicById: Map<string, ScoredEntry>,
   config: CharacterRetrievalConfig,
 ): TraversalScope[] {
+  const scopePickLimit = getScopePickLimit(config);
   const choices = collectChildScopeChoices(currentScopes, deterministicById, config);
   const ranked = sortScopeChoices(choices).filter((choice) => choice.entryCount > 0);
   if (!ranked.length) return currentScopes;
@@ -2689,13 +2690,17 @@ function chooseDeterministicScopes(
     );
     if (overlaps) continue;
     selected.push(scope);
-    if (selected.length >= MAX_SCOPE_CHOICES) break;
+    if (selected.length >= scopePickLimit) break;
   }
 
   return selected.length ? selected : currentScopes;
 }
 
-function limitScopeSelection(scopes: TraversalScope[], limit = MAX_SCOPE_CHOICES): TraversalScope[] {
+function getScopePickLimit(config: CharacterRetrievalConfig): number {
+  return clampInt(config.scopePickLimit ?? DEFAULT_SCOPE_PICK_LIMIT, 1, 24);
+}
+
+function limitScopeSelection(scopes: TraversalScope[], limit: number): TraversalScope[] {
   return dedupeScopes(scopes).slice(0, Math.max(0, limit));
 }
 
@@ -2744,18 +2749,18 @@ function chooseDeterministicEntryScopes(
   const booksById = new Map(rootScopes.map((scope) => [scope.book.summary.id, scope.book]));
   const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes)
     .filter((item) => isScopeFallbackSeedCandidate(item.candidate))
-    .slice(0, Math.min(MAX_SCOPE_CHOICES, Math.max(1, config.maxResults)))
+    .slice(0, Math.min(getScopePickLimit(config), Math.max(1, config.maxResults)))
     .map((item) => item.candidate);
   const scopes = ranked
     .map((candidate) => getEntryPrimaryScopeFromBooks(candidate.entry, booksById))
     .filter((scope): scope is TraversalScope => !!scope);
-  return scopes.length ? limitScopeSelection(scopes) : [];
+  return scopes.length ? limitScopeSelection(scopes, getScopePickLimit(config)) : [];
 }
 
-function buildInitialScopePrompt(recentConversation: string, treeOverview: string): string {
+function buildInitialScopePrompt(recentConversation: string, treeOverview: string, scopePickLimit: number): string {
   return [
     'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
-    `Pick 1-${MAX_SCOPE_CHOICES} nodeIds maximum.`,
+    `Pick 1-${scopePickLimit} nodeIds maximum.`,
     "Rules:",
     "- Prefer specific leaves over broad branches.",
     "- Pick only nodeIds exactly as shown in the knowledge tree index.",
@@ -2784,7 +2789,7 @@ function buildChildScopePrompt(
     'Return ONLY JSON in this exact shape: {"action":"refine|retrieve","nodeIds":["node-id-1"],"reason":"brief explanation"}.',
     `Traversal step ${step + 1} of ${config.traversalStepLimit}.`,
     "Rules:",
-    `- Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum from the choices below.`,
+    `- Pick 1-${getScopePickLimit(config)} category nodeIds maximum from the choices below.`,
     "- Use action \"refine\" when child categories should be opened before retrieval.",
     "- Use action \"retrieve\" when the chosen nodeIds are already specific enough to resolve entries.",
     "- Prefer specific leaves over broad branches.",
@@ -2855,13 +2860,14 @@ async function selectScopesSinglePass(
   fallbackPath: string[];
 }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = DEFAULT_SCOPE_PICK_LIMIT;
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected retrieval scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose scopes",
@@ -2869,7 +2875,7 @@ async function selectScopesSinglePass(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2931,13 +2937,14 @@ async function chooseCollapsedScopes(
   trace: TraversalTraceStep[],
 ): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = getScopePickLimit(config);
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected retrieval scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose collapsed scopes",
@@ -2945,7 +2952,7 @@ async function chooseCollapsedScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2995,7 +3002,7 @@ async function chooseCollapsedScopes(
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds)
           ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
           : [];
-        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
         refinedReason =
           typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim()
             ? refinement.parsed.reason.trim()
@@ -3047,13 +3054,14 @@ async function chooseTraversalScopes(
   trace: TraversalTraceStep[],
 ): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = getScopePickLimit(config);
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected traversal scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose traversal scopes",
@@ -3061,7 +3069,7 @@ async function chooseTraversalScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -3115,7 +3123,7 @@ async function chooseTraversalScopes(
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
         ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         : [];
-      nextScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books));
+      nextScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
       nextReason =
         typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
           ? response.parsed.reason.trim()
@@ -3218,7 +3226,7 @@ async function selectEntriesForScopes(
         return { book, nodeId };
       })
       .filter((scope): scope is TraversalScope => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes], getScopePickLimit(config));
     pushTrace(
       trace,
       "retrieve",
@@ -3276,7 +3284,7 @@ async function selectEntriesForScopes(
         return { book, nodeId };
       })
       .filter((scope): scope is TraversalScope => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes]);
+    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes], getScopePickLimit(config));
     pushTrace(
       trace,
       "retrieve",
@@ -3660,7 +3668,7 @@ function buildTraversalPrompt(
       "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
       "- The candidate pool is additive. Retrieve only missing context; finish once the pool contains enough candidates for final entry selection.",
       "- Treat directly mentioned active anchors already in the candidate pool as relevant; use search retrieval to add missing named entities or support lore.",
-      "- Pick 1-5 choiceIds maximum when using retrieve.",
+      `- Pick 1-${getScopePickLimit(config)} choiceIds maximum when using retrieve.`,
       "- Do not invent new choiceIds or entry IDs.",
       `- Stay within ${config.traversalStepLimit} total steps.`,
       "",
@@ -3690,7 +3698,7 @@ function buildTraversalPrompt(
     "Task:",
     "- Pick the most relevant traversal choices from the tree to retrieve for the next response.",
     "Rules:",
-    "- Pick 1-5 choiceIds maximum and prefer specific branches over broad branches.",
+    `- Pick 1-${getScopePickLimit(config)} choiceIds maximum and prefer specific branches over broad branches.`,
     "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
     hasFullTreeOverview
       ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index."
@@ -4263,7 +4271,7 @@ async function selectTraversalEntries(
           trace,
         };
       }
-      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
+      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
 
       if (!nextScopes.length) {
         if (getCandidatePool().length) {
@@ -4429,7 +4437,7 @@ async function selectTraversalEntries(
         continue;
       }
 
-      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById));
+      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
       if (choiceIds.length > 0 && !requestedScopes.length) {
         const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
         if (directChoiceCandidates.length) {

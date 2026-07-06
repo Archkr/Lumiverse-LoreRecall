@@ -18,6 +18,7 @@ var DEFAULT_CHARACTER_CONFIG = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
+  scopePickLimit: 5,
   tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
@@ -156,6 +157,7 @@ function normalizeCharacterConfig(value) {
     maxResults: clampInt(typeof next.maxResults === "number" ? next.maxResults : DEFAULT_CHARACTER_CONFIG.maxResults, 1, 64),
     maxTraversalDepth: clampInt(typeof next.maxTraversalDepth === "number" ? next.maxTraversalDepth : DEFAULT_CHARACTER_CONFIG.maxTraversalDepth, 1, 16),
     traversalStepLimit: clampInt(typeof next.traversalStepLimit === "number" ? next.traversalStepLimit : DEFAULT_CHARACTER_CONFIG.traversalStepLimit, 1, 24),
+    scopePickLimit: clampInt(typeof next.scopePickLimit === "number" ? next.scopePickLimit : DEFAULT_CHARACTER_CONFIG.scopePickLimit, 1, 24),
     tokenBudget: clampInt(injectedEntryLimit, 1, 64),
     rerankEnabled: !!next.rerankEnabled,
     selectiveRetrieval: next.selectiveRetrieval !== false,
@@ -5572,6 +5574,7 @@ function setup(ctx) {
       ["maxResults", "Pull limit"],
       ["maxTraversalDepth", "Traversal depth"],
       ["traversalStepLimit", "Traversal step limit"],
+      ["scopePickLimit", "Scope pick limit"],
       ["tokenBudget", "Inject limit"],
       ["contextMessages", "Context messages"]
     ]) {
@@ -5579,7 +5582,7 @@ function setup(ctx) {
         characterDraft[key] = Number.parseInt(String(next), 10) || 0;
       })));
     }
-    form.appendChild(createFieldNote("Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately."));
+    form.appendChild(createFieldNote("Scope pick limit caps how many scopes the controller may choose in one step. Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately."));
     const switches = createElement("div", "lore-field-span");
     const switchRow = createElement("div", "lore-cluster");
     switchRow.style.gap = "20px";

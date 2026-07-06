@@ -184,6 +184,7 @@ Clone the repo, then either:
 | `Collapsed depth` | Tree depth shown to the controller in collapsed mode |
 | `Traversal depth` | Max tree depth the controller can drill into |
 | `Traversal step limit` | Max controller drill calls per turn |
+| `Scope pick limit` | Max scopes the controller can choose in one step |
 | `Pull limit` | Max pooled candidates exposed to final manifest selection |
 | `Inject limit` | Max entries written into the prompt |
 | `Context messages` | How many recent chat messages become retrieval context |
@@ -255,6 +256,7 @@ Live sessions get a subtle pulse and an amber outer edge so you can see retrieva
 | `Pull limit` | 6 | Max pooled candidates exposed to final manifest selection |
 | `Traversal depth` | 3 | Max tree depth in traversal mode |
 | `Traversal step limit` | 5 | Max controller drill-down calls per turn |
+| `Scope pick limit` | 5 | Max scopes the controller can choose in one step |
 | `Inject limit` | 6 | Max entries injected into the prompt |
 | `Context messages` | 10 | Recent chat messages used as retrieval context |
 | `Rerank top candidates` | Off | Reorder candidates before final manifest selection |

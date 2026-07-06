@@ -2887,6 +2887,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ["maxResults", "Pull limit"],
       ["maxTraversalDepth", "Traversal depth"],
       ["traversalStepLimit", "Traversal step limit"],
+      ["scopePickLimit", "Scope pick limit"],
       ["tokenBudget", "Inject limit"],
       ["contextMessages", "Context messages"],
     ] as const) {
@@ -2902,7 +2903,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately.",
+        "Scope pick limit caps how many scopes the controller may choose in one step. Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately.",
       ),
     );
 

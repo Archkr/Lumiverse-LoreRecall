@@ -24,6 +24,7 @@ function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
       maxResults: 6,
       maxTraversalDepth: 3,
       traversalStepLimit: 5,
+      scopePickLimit: 5,
       tokenBudget: 6,
       rerankEnabled: false,
       selectiveRetrieval: true,

@@ -38,6 +38,7 @@ export interface CharacterRetrievalConfig {
   maxResults: number;
   maxTraversalDepth: number;
   traversalStepLimit: number;
+  scopePickLimit: number;
   tokenBudget: number;
   rerankEnabled: boolean;
   selectiveRetrieval: boolean;
