@@ -28,6 +28,7 @@ interface RetrievalPreviewOptions {
   capturedAt?: number;
   isActual?: boolean;
   reportProgress?: (event: RetrievalProgressEvent) => void;
+  dynamicFeedback?: DynamicRetrievalFeedbackSnapshot;
 }
 
 interface ControllerSession {
@@ -109,6 +110,30 @@ interface ScopedManifest {
 interface SceneSelectionSignals {
   normalizedConversation: string;
   latestExchange: string;
+  activeText: string;
+  backgroundText: string;
+  constraintText: string;
+}
+
+export interface DynamicRetrievalFeedbackEntry {
+  injections: number;
+  references: number;
+  missStreak: number;
+  lastReferenced: number;
+  recentInjectionCount: number;
+}
+
+export interface DynamicRetrievalFeedbackSnapshot {
+  entries: Record<string, DynamicRetrievalFeedbackEntry>;
+}
+
+interface RetrievalTextSegments {
+  fullText: string;
+  latestUserText: string;
+  latestAssistantText: string;
+  activeText: string;
+  backgroundText: string;
+  constraintText: string;
 }
 
 interface RankedSelectionCandidate {
@@ -154,10 +179,90 @@ const CONTROLLER_MAX_CALLS = 12;
 const TRAVERSAL_CATEGORY_LIMIT = 24;
 const TRAVERSAL_SEARCH_LIMIT = 18;
 const TRAVERSAL_FULL_OVERVIEW_LIMIT = 10_000;
-const RECENT_MESSAGE_LIMIT = 500;
-const MAX_SCOPE_CHOICES = 5;
+const RECENT_MESSAGE_LIMIT = 700;
+const RECENT_SCENE_MESSAGE_LIMIT = 6000;
+const SCENE_MESSAGE_LOOKBACK = 4;
+const DEFAULT_SCOPE_PICK_LIMIT = 5;
 const DOCUMENT_CHOICE_PREFIX = "doc:";
 const EMPTY_ENTRY_ID_SET = new Set<string>();
+const DIRECT_MENTION_SEED_LIMIT = 12;
+const SCENE_ANCHOR_LIMIT = 12;
+const SELECTIVE_FALLBACK_LIMIT = 8;
+const ACTIVE_ANCHOR_SCORE_THRESHOLD = 8;
+const BACKGROUND_MENTION_SCORE_THRESHOLD = 10;
+const SUPPORT_CONTEXT_SCORE_THRESHOLD = 14;
+const SCENE_SUPPORT_SCORE_THRESHOLD = 8;
+const RELATED_SUPPORT_SCORE_THRESHOLD = 10;
+const RELATED_SUPPORT_LIMIT = 16;
+const PROTECTED_RELATED_SUPPORT_LIMIT = 6;
+const PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT = 4;
+const PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT = 2;
+const PROTECTED_SCENE_SUPPORT_LIMIT = 2;
+const SCOPE_CORE_SMALL_CANDIDATE_LIMIT = 6;
+const SCOPE_CORE_REMAINING_SLOT_RATIO = 0.6;
+const SCOPE_CORE_CANDIDATE_RATIO = 0.6;
+const HIGH_CONFIDENCE_DYNAMIC_THRESHOLD = 12;
+const FEEDBACK_HOT_MS = 2 * 60 * 60 * 1000;
+const FEEDBACK_WARM_MS = 12 * 60 * 60 * 1000;
+const FEEDBACK_STALE_INJECTION_THRESHOLD = 3;
+const SCOPE_CORE_GENERIC_LABEL_TERMS = new Set([
+  "accord",
+  "accords",
+  "archive",
+  "archives",
+  "checklist",
+  "classification",
+  "classifications",
+  "class",
+  "classes",
+  "doctrine",
+  "engine",
+  "engines",
+  "log",
+  "logs",
+  "machine",
+  "machines",
+  "manual",
+  "manuals",
+  "mechanic",
+  "mechanics",
+  "note",
+  "notes",
+  "overview",
+  "part",
+  "protocol",
+  "protocols",
+  "reference",
+  "references",
+  "report",
+  "reports",
+  "response",
+  "rule",
+  "rules",
+  "system",
+  "systems",
+  "treaties",
+  "treaty",
+  "vault",
+  "vaults",
+]);
+const SCOPE_CORE_ENTITY_HINT_TERMS = new Set([
+  "cast",
+  "character",
+  "characters",
+  "clan",
+  "crew",
+  "faction",
+  "factions",
+  "guild",
+  "member",
+  "members",
+  "organization",
+  "organizations",
+  "squad",
+  "team",
+  "unit",
+]);
 const SEARCH_STOPWORDS = new Set([
   "about",
   "after",
@@ -239,7 +344,6 @@ const SEARCH_STOPWORDS = new Set([
   "you",
   "your",
 ]);
-
 const RETRIEVAL_SCOPE_SYSTEM_PROMPT =
   "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
 const RETRIEVAL_BOOK_SYSTEM_PROMPT =
@@ -326,12 +430,14 @@ function pushTrace(
     nodeId: extra.nodeId ?? null,
     entryCount: extra.entryCount ?? null,
   });
-  emitTraceFeedItem(trace, label, summary, {
-    phase,
-    count: typeof extra.entryCount === "number" ? extra.entryCount : null,
-    tone: phase === "fallback" ? "warn" : phase === "finish" ? "success" : "info",
-    durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null,
-  });
+  if (phase === "fallback") {
+    emitTraceFeedItem(trace, label, summary, {
+      phase,
+      count: typeof extra.entryCount === "number" ? extra.entryCount : null,
+      tone: "warn",
+      durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null,
+    });
+  }
 }
 
 function stripSearchMarkup(value: string): string {
@@ -356,13 +462,22 @@ function tokenize(value: string): string[] {
   );
 }
 
+function isRetrievalChatHistoryMessage(message: ChatLikeMessage, messages: ChatLikeMessage[]): boolean {
+  if ((message.role !== "assistant" && message.role !== "user") || !message.content.trim()) return false;
+  const hasHistoryFlags = messages.some((item) => typeof item.__isChatHistory === "boolean");
+  return hasHistoryFlags ? message.__isChatHistory === true : message.role === "assistant";
+}
+
 function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): string {
-  return messages
-    .filter((message) => message.role !== "system" && message.content.trim())
-    .slice(-contextMessages)
-    .map((message) => {
-      const role = message.role === "user" ? "User" : "Assistant";
-      const sanitized = sanitizeRetrievalMessage(message.role, message.content);
+  const recentMessages = messages
+    .filter((message) => isRetrievalChatHistoryMessage(message, messages))
+    .slice(-contextMessages);
+  return recentMessages
+    .map((message, index) => {
+      const role = message.role === "user" ? "User" : "Character";
+      const messageLimit =
+        recentMessages.length - index <= SCENE_MESSAGE_LOOKBACK ? RECENT_SCENE_MESSAGE_LIMIT : RECENT_MESSAGE_LIMIT;
+      const sanitized = sanitizeRetrievalMessage(message.role, message.content, messageLimit);
       return sanitized ? `${role}: ${sanitized}` : "";
     })
     .filter(Boolean)
@@ -401,6 +516,17 @@ function findUserProtocolCutIndex(value: string): number {
     /###\s*active\s+personality\s+matrix/i,
     /private\s+workspace/i,
     /the\s+human\s+never\s+sees/i,
+    /\[narrative/i,
+    /\[emotional/i,
+    /\[strict/i,
+    /treat\s+.+?\s+as a black box/i,
+    /^you represent\b/im,
+    /^the moment\b/im,
+    /^you are forbidden\b/im,
+    /^characters will not\b/im,
+    /^no character may\b/im,
+    /^emotional shifts require\b/im,
+    /^unreciprocated attraction\b/im,
   ];
 
   let cutIndex = -1;
@@ -412,23 +538,26 @@ function findUserProtocolCutIndex(value: string): number {
   return cutIndex;
 }
 
-function sanitizeRetrievalMessage(role: ChatLikeMessage["role"], content: string): string {
+function sanitizeRetrievalMessage(role: ChatLikeMessage["role"], content: string, maxLength = RECENT_MESSAGE_LIMIT): string {
   let text = stripSearchMarkup(content).replace(/\r\n?/g, "\n");
   const cutIndex = role === "user" ? findUserProtocolCutIndex(text) : findNarrativeProtocolCutIndex(text);
   if (cutIndex >= 0) {
     text = text.slice(0, cutIndex);
   }
 
-  return truncateText(text.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim(), RECENT_MESSAGE_LIMIT);
+  return truncateText(text.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim(), maxLength);
 }
 
 function buildRecentConversation(messages: ChatLikeMessage[], contextMessages: number): string {
-  return messages
-    .filter((message) => message.role !== "system" && message.content.trim())
-    .slice(-contextMessages)
-    .map((message) => {
+  const recentMessages = messages
+    .filter((message) => isRetrievalChatHistoryMessage(message, messages))
+    .slice(-contextMessages);
+  return recentMessages
+    .map((message, index) => {
       const role = message.role === "user" ? "User" : "Character";
-      const sanitized = sanitizeRetrievalMessage(message.role, message.content);
+      const messageLimit =
+        recentMessages.length - index <= SCENE_MESSAGE_LOOKBACK ? RECENT_SCENE_MESSAGE_LIMIT : RECENT_MESSAGE_LIMIT;
+      const sanitized = sanitizeRetrievalMessage(message.role, message.content, messageLimit);
       return sanitized ? `${role}: ${sanitized}` : "";
     })
     .filter(Boolean)
@@ -450,8 +579,8 @@ function buildCompactSceneSummary(queryText: string): string {
     ?.replace(/^user:\s*/i, "");
   const latestAssistant = [...lines]
     .reverse()
-    .find((line) => /^assistant:/i.test(line))
-    ?.replace(/^assistant:\s*/i, "");
+    .find((line) => /^(assistant|character):/i.test(line))
+    ?.replace(/^(assistant|character):\s*/i, "");
 
   const parts = [
     latestUser ? `Latest user move: ${truncateText(latestUser, 320)}` : "",
@@ -535,16 +664,79 @@ function buildPromptContext(recentConversation: string): string {
   return `RECENT CONVERSATION:\n${recentConversation}`;
 }
 
-function buildSceneSelectionSignals(recentConversation: string): SceneSelectionSignals {
-  const lines = recentConversation
+function getTailText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return normalized.slice(-maxLength).trim();
+}
+
+function isConstraintLine(text: string): boolean {
+  const normalized = text.trim();
+  return /^(?:note|timeline|context|setting|canon|continuity)\s*:/i.test(normalized) ||
+    /\bstory\s+takes\s+place\b/i.test(normalized);
+}
+
+function isConstraintUserLine(text: string): boolean {
+  return isConstraintLine(text);
+}
+
+function buildRetrievalTextSegments(recentConversation: string): RetrievalTextSegments {
+  const parsed = recentConversation
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean);
-  const latestExchange = normalizeSearchText(lines.slice(-2).join(" "));
-  const normalizedConversation = normalizeSearchText(lines.join(" "));
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^(User|Assistant|Character):\s*(.*)$/i.exec(line);
+      return {
+        role: match?.[1]?.toLowerCase() ?? "",
+        text: match?.[2]?.trim() ?? line,
+        raw: line,
+      };
+    });
+
+  const latestUserIndex = (() => {
+    for (let index = parsed.length - 1; index >= 0; index -= 1) {
+      if (parsed[index]?.role === "user" && !isConstraintUserLine(parsed[index].text)) return index;
+    }
+    return -1;
+  })();
+  const latestAssistantIndex = (() => {
+    for (let index = parsed.length - 1; index >= 0; index -= 1) {
+      const role = parsed[index]?.role;
+      if (role === "assistant" || role === "character") return index;
+    }
+    return -1;
+  })();
+
+  const constraintLines = parsed
+    .filter((item) => isConstraintLine(item.text))
+    .map((item) => item.text);
+  const latestUserText = latestUserIndex >= 0 ? parsed[latestUserIndex].text : "";
+  const latestAssistantText = latestAssistantIndex >= 0 ? getTailText(parsed[latestAssistantIndex].text, 1400) : "";
+  const activeSceneText = parsed
+    .filter((item) => !isConstraintLine(item.text))
+    .map((item) => item.text)
+    .join(" ");
+
+  const fallbackText = parsed.length ? parsed.map((item) => item.text).join(" ") : recentConversation;
   return {
-    normalizedConversation,
-    latestExchange,
+    fullText: normalizeSearchText(fallbackText),
+    latestUserText: normalizeSearchText(latestUserText),
+    latestAssistantText: normalizeSearchText(latestAssistantText),
+    activeText: normalizeSearchText(activeSceneText),
+    backgroundText: "",
+    constraintText: normalizeSearchText(constraintLines.join(" ")),
+  };
+}
+
+function buildSceneSelectionSignals(recentConversation: string): SceneSelectionSignals {
+  const segments = buildRetrievalTextSegments(recentConversation);
+  return {
+    normalizedConversation: segments.fullText,
+    latestExchange: segments.activeText,
+    activeText: segments.activeText,
+    backgroundText: segments.backgroundText,
+    constraintText: segments.constraintText,
   };
 }
 
@@ -587,19 +779,19 @@ function inferSelectionSignal(
   const labelVariants = normalizeVariantList([entry.label]);
   const aliasVariants = normalizeVariantList(entry.aliases);
   const latestLabelMentions = labelVariants.reduce(
-    (total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase),
+    (total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.activeText, phrase)),
     0,
   );
   const latestAliasMentions = aliasVariants.reduce(
-    (total, phrase) => total + countPhraseOccurrences(signals.latestExchange, phrase),
+    (total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.activeText, phrase)),
     0,
   );
   const overallLabelMentions = labelVariants.reduce(
-    (total, phrase) => total + countPhraseOccurrences(signals.normalizedConversation, phrase),
+    (total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.normalizedConversation, phrase)),
     0,
   );
   const overallAliasMentions = aliasVariants.reduce(
-    (total, phrase) => total + countPhraseOccurrences(signals.normalizedConversation, phrase),
+    (total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.normalizedConversation, phrase)),
     0,
   );
   const latestMentionCount = latestLabelMentions + latestAliasMentions;
@@ -607,32 +799,23 @@ function inferSelectionSignal(
 
   if (latestMentionCount > 0) {
     return {
-      role: "recent_mention",
+      role: "active_anchor",
       latestMentionCount,
       overallMentionCount: Math.max(overallMentionCount, latestMentionCount),
     };
   }
   if (overallMentionCount > 0) {
     return {
-      role: "context_mention",
+      role: "background_mention",
       latestMentionCount,
       overallMentionCount,
     };
   }
-  if (reasons.includes("label")) {
-    return { role: "label_match", latestMentionCount, overallMentionCount };
+  if (reasons.some((reason) => reason === "label" || reason === "alias" || reason === "keyword")) {
+    return { role: "support_context", latestMentionCount, overallMentionCount };
   }
-  if (reasons.includes("alias")) {
-    return { role: "alias_match", latestMentionCount, overallMentionCount };
-  }
-  if (reasons.includes("keyword")) {
-    return { role: "keyword_match", latestMentionCount, overallMentionCount };
-  }
-  if (reasons.includes("branch")) {
-    return { role: "branch_match", latestMentionCount, overallMentionCount };
-  }
-  if (reasons.some((reason) => reason === "summary" || reason === "content" || reason === "comment" || reason === "tag")) {
-    return { role: "content_match", latestMentionCount, overallMentionCount };
+  if (reasons.some((reason) => reason === "branch" || reason === "summary" || reason === "content" || reason === "comment" || reason === "tag")) {
+    return { role: "support_context", latestMentionCount, overallMentionCount };
   }
   return { role: "score_fallback", latestMentionCount, overallMentionCount };
 }
@@ -644,6 +827,9 @@ function rankSelectionCandidates(
 ): RankedSelectionCandidate[] {
   const signals = buildSceneSelectionSignals(recentConversation);
   const roleWeight: Record<NonNullable<PreviewNode["selectionRole"]>, number> = {
+    active_anchor: 700,
+    background_mention: 420,
+    support_context: 300,
     recent_mention: 640,
     context_mention: 540,
     label_match: 420,
@@ -660,18 +846,21 @@ function rankSelectionCandidates(
         getScopedEntryIds(item.book, item.nodeId, true).includes(candidate.entry.entryId),
       );
       const inferred = inferSelectionSignal(candidate.entry, candidate.reasons, signals);
+      const selectionRole = candidate.selectionRole ?? inferred.role;
       let priority =
-        roleWeight[inferred.role] +
+        roleWeight[selectionRole] +
         candidate.score * 10 +
         inferred.latestMentionCount * 45 +
         inferred.overallMentionCount * 20;
+      if (selectionRole === "background_mention") priority -= 60;
+      if (selectionRole === "support_context") priority -= 80;
       if (candidate.reasons.includes("label")) priority += 18;
       if (candidate.reasons.includes("alias")) priority += 12;
       if (candidate.reasons.includes("keyword")) priority += 8;
       if (candidate.reasons.includes("branch")) priority += 4;
       return {
-        candidate: { ...candidate, selectionRole: inferred.role },
-        selectionRole: inferred.role,
+        candidate: { ...candidate, selectionRole },
+        selectionRole,
         priority,
         scopeBreadcrumb: scope ? getScopeBreadcrumb(scope.book, scope.nodeId) : "Unscoped",
         latestMentionCount: inferred.latestMentionCount,
@@ -691,9 +880,139 @@ function buildDeterministicSelection(
   maxResults: number,
 ): ScoredEntry[] {
   if (!rankedCandidates.length || maxResults <= 0) return [];
-  return rankedCandidates
+  const eligibleRankedCandidates = rankedCandidates.filter((item) => isDynamicInjectionEligible(item.candidate));
+  const activeAnchors = eligibleRankedCandidates.filter(
+    (item) => item.selectionRole === "active_anchor" || item.selectionRole === "recent_mention",
+  );
+  const supportContext = eligibleRankedCandidates
+    .filter((item) => item.selectionRole !== "active_anchor" && item.selectionRole !== "recent_mention")
+    .sort(
+      (left, right) =>
+        scoreDensity(right.candidate) - scoreDensity(left.candidate) ||
+        right.priority - left.priority ||
+        right.candidate.score - left.candidate.score ||
+        left.candidate.entry.label.localeCompare(right.candidate.entry.label),
+    );
+  return [...activeAnchors, ...supportContext]
     .slice(0, maxResults)
     .map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+}
+
+function containsToken(normalizedText: string, token: string): boolean {
+  return ` ${normalizedText} `.includes(` ${token} `);
+}
+
+function looksLikeNamedEntityLabel(label: string): boolean {
+  const words = label.match(/[A-Za-z0-9']+/g) ?? [];
+  const meaningfulWords = words.filter((word) => !SEARCH_STOPWORDS.has(word.toLowerCase()));
+  if (!meaningfulWords.length || meaningfulWords.length > 4) return false;
+  if (words.some((word) => SEARCH_STOPWORDS.has(word.toLowerCase()))) return false;
+  return meaningfulWords.every((word) => /^[A-Z0-9]/.test(word));
+}
+
+function entryHasDirectMentionSignal(
+  entry: RuntimeBook["cache"]["entries"][number],
+  signals: SceneSelectionSignals,
+): boolean {
+  if (isCompositeEntryLabel(entry.label) && !hasStrongCompositeEvidence(entry, {
+    fullText: signals.normalizedConversation,
+    latestUserText: "",
+    latestAssistantText: "",
+    activeText: signals.activeText,
+    backgroundText: signals.backgroundText,
+    constraintText: signals.constraintText,
+  })) {
+    return false;
+  }
+  const exactPhraseMention = [entry.label, ...entry.aliases]
+    .map((value) => normalizeSearchText(value))
+    .filter((value) => value.length >= 3)
+    .some((phrase) => countPhraseOccurrences(signals.activeText, phrase) > 0);
+  if (exactPhraseMention) return true;
+
+  const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter(
+    (token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token),
+  );
+  const matchingTokens = mentionTokens.filter((token) => containsToken(signals.activeText, token));
+  if (!matchingTokens.length) return false;
+
+  const rawLabel = entry.label.toLowerCase();
+  if (rawLabel.includes("'s") || rawLabel.includes("&")) return false;
+
+  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
+  if (labelTokens.some((token) => SCOPE_CORE_GENERIC_LABEL_TERMS.has(token))) return false;
+  if (matchingTokens.length >= 2) return true;
+
+  return (
+    labelTokens.length <= 2 &&
+    looksLikeNamedEntityLabel(entry.label) &&
+    matchingTokens.some((token) => labelTokens.includes(token))
+  );
+}
+
+function buildDirectMentionCandidates(
+  recentConversation: string,
+  candidates: ScoredEntry[],
+  scopes: TraversalScope[],
+  limit = DIRECT_MENTION_SEED_LIMIT,
+): ScoredEntry[] {
+  if (!candidates.length || limit <= 0) return [];
+  const signals = buildSceneSelectionSignals(recentConversation);
+  return rankSelectionCandidates(recentConversation, candidates, scopes)
+    .filter(
+      (item) =>
+        item.selectionRole === "active_anchor" ||
+        entryHasDirectMentionSignal(item.candidate.entry, signals),
+    )
+    .slice(0, limit)
+    .map((item) => ({
+      ...item.candidate,
+      score: Math.max(item.candidate.score, ACTIVE_ANCHOR_SCORE_THRESHOLD),
+      reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
+      selectionRole: "active_anchor",
+    }));
+}
+
+function mergeSelectionRole(
+  existingRole: ScoredEntry["selectionRole"],
+  incomingRole: ScoredEntry["selectionRole"],
+): ScoredEntry["selectionRole"] {
+  if (!existingRole) return incomingRole;
+  if (!incomingRole) return existingRole;
+  const priority: Record<NonNullable<ScoredEntry["selectionRole"]>, number> = {
+    active_anchor: 5,
+    recent_mention: 5,
+    background_mention: 4,
+    context_mention: 4,
+    label_match: 3,
+    alias_match: 3,
+    keyword_match: 3,
+    support_context: 2,
+    content_match: 2,
+    branch_match: 1,
+    score_fallback: 0,
+  };
+  return priority[incomingRole] > priority[existingRole] ? incomingRole : existingRole;
+}
+
+function mergeScoredEntry(existing: ScoredEntry, incoming: ScoredEntry): ScoredEntry {
+  return {
+    ...existing,
+    score: Math.max(existing.score, incoming.score),
+    reasons: uniqueStrings([...existing.reasons, ...incoming.reasons]),
+    selectionRole: mergeSelectionRole(existing.selectionRole, incoming.selectionRole),
+  };
+}
+
+function mergeScoredEntryLists(...lists: ScoredEntry[][]): ScoredEntry[] {
+  const byId = new Map<string, ScoredEntry>();
+  for (const list of lists) {
+    for (const item of list) {
+      const existing = byId.get(item.entry.entryId);
+      byId.set(item.entry.entryId, existing ? mergeScoredEntry(existing, item) : item);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function getDynamicEntryLimit(config: CharacterRetrievalConfig, remainingDynamicSlots: number): number {
@@ -738,19 +1057,23 @@ function summarizeSelection(
     return "No entries selected.";
   }
   const mentionCount = selection.filter(
-    (item) => item.selectionRole === "recent_mention" || item.selectionRole === "context_mention",
+    (item) =>
+      item.selectionRole === "active_anchor" ||
+      item.selectionRole === "background_mention" ||
+      item.selectionRole === "recent_mention" ||
+      item.selectionRole === "context_mention",
   ).length;
   const reservedPrefix =
     reservedConstantCount > 0 ? `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
   const freeSuffix =
     typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap: ${Math.max(0, remainingDynamicSlots)}.` : "";
   if (mentionCount > 0) {
-    return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by direct query mentions.${freeSuffix}`.replace(
+    return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by active anchors and direct query mentions.${freeSuffix}`.replace(
       /^f/,
       (match) => match.toUpperCase(),
     );
   }
-  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from the chosen node manifests.${freeSuffix}`.replace(
+  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from final manifest selection.${freeSuffix}`.replace(
     /^f/,
     (match) => match.toUpperCase(),
   );
@@ -773,6 +1096,11 @@ function getEntryBody(entry: RuntimeBook["cache"]["entries"][number]): string {
   return looksLikeLabelOnly ? content : collapsed;
 }
 
+function getEntryInjectionBody(entry: RuntimeBook["cache"]["entries"][number]): string {
+  const content = entry.content.trim();
+  return content || getEntryBody(entry);
+}
+
 function getEntryBreadcrumb(entry: RuntimeBook["cache"]["entries"][number], tree: BookTreeIndex): string {
   const path = getEntryCategoryPath(tree, entry.entryId)
     .map((node) => node.label)
@@ -784,7 +1112,7 @@ function countTokenMatches(queryTokens: string[], targetTokens: string[]): numbe
   if (!queryTokens.length || !targetTokens.length) return 0;
   const targetSet = new Set(targetTokens);
   let count = 0;
-  for (const token of queryTokens) {
+  for (const token of new Set(queryTokens)) {
     if (targetSet.has(token)) count += 1;
   }
   return count;
@@ -795,51 +1123,533 @@ function countPhraseBonus(queryText: string, value: string): boolean {
   return queryText.includes(value) || value.includes(queryText);
 }
 
+function countSegmentPhrase(segment: string, phrase: string): number {
+  if (!segment || !phrase || phrase.length < 2) return 0;
+  return countPhraseOccurrences(segment, phrase);
+}
+
+function scorePhraseVariants(
+  values: string[],
+  segments: RetrievalTextSegments,
+  weights: { active: number; background: number; constraint: number },
+): { score: number; active: number; background: number; constraint: number; overall: number } {
+  let score = 0;
+  let active = 0;
+  let background = 0;
+  let constraint = 0;
+  let overall = 0;
+
+  for (const phrase of normalizeVariantList(values)) {
+    const latestUserMatches = Math.min(2, countSegmentPhrase(segments.latestUserText, phrase));
+    const latestAssistantMatches = Math.min(1, countSegmentPhrase(segments.latestAssistantText, phrase));
+    const activeMatches = latestUserMatches + latestAssistantMatches;
+    const backgroundMatches = Math.min(1, countSegmentPhrase(segments.backgroundText, phrase));
+    const constraintMatches = Math.min(1, countSegmentPhrase(segments.constraintText, phrase));
+    const fullMatches = countSegmentPhrase(segments.fullText, phrase);
+    if (latestUserMatches) {
+      active += latestUserMatches;
+      score += weights.active * latestUserMatches;
+    }
+    if (latestAssistantMatches) {
+      active += latestAssistantMatches;
+      score += Math.max(1, weights.active * 0.65) * latestAssistantMatches;
+    }
+    if (backgroundMatches) {
+      background += backgroundMatches;
+      score += weights.background * backgroundMatches;
+    }
+    if (constraintMatches) {
+      constraint += constraintMatches;
+      score += weights.constraint * constraintMatches;
+    }
+    overall += fullMatches;
+  }
+
+  return { score, active, background, constraint, overall };
+}
+
+const COMPOSITE_LABEL_TERMS = new Set([
+  "affection",
+  "alliance",
+  "bond",
+  "bonds",
+  "dynamic",
+  "family",
+  "friend",
+  "friendship",
+  "lover",
+  "relationship",
+  "relationships",
+  "rival",
+  "rivalry",
+  "romance",
+]);
+
+const SUPPORT_CONTEXT_TERMS = new Set([
+  "abilities",
+  "ability",
+  "angel",
+  "artifact",
+  "artifacts",
+  "base",
+  "crew",
+  "doctrine",
+  "doctrines",
+  "equipment",
+  "faction",
+  "factions",
+  "facility",
+  "facilities",
+  "group",
+  "groups",
+  "location",
+  "locations",
+  "magic",
+  "mechanic",
+  "mechanics",
+  "mechanism",
+  "mechanisms",
+  "operation",
+  "operations",
+  "organization",
+  "organizations",
+  "power",
+  "powers",
+  "protocol",
+  "protocols",
+  "rule",
+  "rules",
+  "system",
+  "systems",
+  "tech",
+  "technology",
+  "weapon",
+  "weapons",
+]);
+
+function getPrincipalLabelTokens(label: string): string[] {
+  return tokenize(label).filter((token) => !COMPOSITE_LABEL_TERMS.has(token));
+}
+
+function isCompositeEntryLabel(label: string): boolean {
+  const raw = label.toLowerCase();
+  const tokens = tokenize(label);
+  return (
+    /(?:&|\/|\+)|\b(?:and|with)\b|(?:'s|\u2019s)\b/.test(raw) ||
+    COMPOSITE_LABEL_TERMS.has(tokens[tokens.length - 1] ?? "") ||
+    tokens.some((token) => COMPOSITE_LABEL_TERMS.has(token))
+  );
+}
+
+function hasStrongCompositeEvidence(
+  entry: RuntimeBook["cache"]["entries"][number],
+  segments: RetrievalTextSegments,
+): boolean {
+  const exactVariants = normalizeVariantList([entry.label, ...entry.aliases]);
+  if (exactVariants.some((phrase) => countSegmentPhrase(segments.fullText, phrase) > 0)) return true;
+
+  const principalTokens = getPrincipalLabelTokens(entry.label);
+  if (principalTokens.length < 2) return false;
+  const activeHits = principalTokens.filter((token) => containsToken(segments.activeText, token)).length;
+  const requiredHits = principalTokens.length <= 2 ? principalTokens.length : 3;
+  return activeHits >= requiredHits;
+}
+
+function getDynamicFeedbackBoost(
+  entry: RuntimeBook["cache"]["entries"][number],
+  feedback?: DynamicRetrievalFeedbackSnapshot,
+): number {
+  if (entry.constant || !feedback) return 0;
+  const data = feedback.entries[entry.entryId];
+  if (!data) return 0;
+
+  let boost = 0;
+  if (data.lastReferenced) {
+    const elapsed = Date.now() - data.lastReferenced;
+    if (elapsed < FEEDBACK_HOT_MS) boost += 5;
+    else if (elapsed < FEEDBACK_WARM_MS) boost += 3;
+  }
+  if (data.injections >= 3 && data.references / data.injections > 0.5) boost += 3;
+  if (data.missStreak >= 5) boost -= 4;
+  else if (data.missStreak >= 3) boost -= 2;
+  if (data.injections >= FEEDBACK_STALE_INJECTION_THRESHOLD && data.references === 0) boost -= 3;
+  boost -= Math.max(0, data.recentInjectionCount) * 5;
+  return boost;
+}
+
+function hasPrimaryReason(reasons: string[]): boolean {
+  return reasons.includes("label") || reasons.includes("alias") || reasons.includes("keyword");
+}
+
+function hasSceneSupportReason(reasons: string[]): boolean {
+  return reasons.includes("summary") || reasons.includes("content") || reasons.includes("comment");
+}
+
+function isConstraintOnlyCandidate(reasons: string[]): boolean {
+  return reasons.includes("constraint") && !reasons.includes("active") && !reasons.includes("background");
+}
+
+function isHighConfidenceSceneSupport(candidate: ScoredEntry): boolean {
+  return (
+    candidate.selectionRole === "support_context" &&
+    candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD &&
+    hasSceneSupportReason(candidate.reasons) &&
+    !isConstraintOnlyCandidate(candidate.reasons)
+  );
+}
+
+function isDynamicInjectionEligible(candidate: ScoredEntry): boolean {
+  if (candidate.entry.constant) return true;
+  if (candidate.reasons.includes("related_support")) {
+    return candidate.score >= RELATED_SUPPORT_SCORE_THRESHOLD;
+  }
+  if (isConstraintOnlyCandidate(candidate.reasons)) return false;
+  if (!hasPrimaryReason(candidate.reasons)) return isHighConfidenceSceneSupport(candidate);
+  switch (candidate.selectionRole) {
+    case "active_anchor":
+      return candidate.score >= ACTIVE_ANCHOR_SCORE_THRESHOLD;
+    case "background_mention":
+      return candidate.score >= BACKGROUND_MENTION_SCORE_THRESHOLD;
+    case "support_context":
+      return candidate.score >= SUPPORT_CONTEXT_SCORE_THRESHOLD;
+    default:
+      return candidate.score >= HIGH_CONFIDENCE_DYNAMIC_THRESHOLD;
+  }
+}
+
+function filterDynamicInjectionCandidates(candidates: ScoredEntry[]): ScoredEntry[] {
+  return candidates.filter(isDynamicInjectionEligible);
+}
+
+function getScopeCoreReserve(candidateCount: number, remainingSlots: number): number {
+  if (candidateCount <= 0 || remainingSlots <= 0) return 0;
+  if (candidateCount <= SCOPE_CORE_SMALL_CANDIDATE_LIMIT) return Math.min(candidateCount, remainingSlots);
+  return Math.min(
+    remainingSlots,
+    Math.max(
+      SCOPE_CORE_SMALL_CANDIDATE_LIMIT,
+      Math.min(
+        Math.ceil(remainingSlots * SCOPE_CORE_REMAINING_SLOT_RATIO),
+        Math.ceil(candidateCount * SCOPE_CORE_CANDIDATE_RATIO),
+      ),
+    ),
+  );
+}
+
+function entryLooksLikeScopeCoreEntity(entry: RuntimeBook["cache"]["entries"][number]): boolean {
+  if (isCompositeEntryLabel(entry.label)) return false;
+  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token));
+  if (!labelTokens.length) return false;
+  if (labelTokens.some((token) => SCOPE_CORE_GENERIC_LABEL_TERMS.has(token))) return false;
+  if (looksLikeNamedEntityLabel(entry.label)) return true;
+
+  const metadataTokens = [
+    entry.groupName,
+    entry.tags.join(" "),
+    entry.key.join(" "),
+    entry.keysecondary.join(" "),
+  ].flatMap(tokenize);
+  return metadataTokens.some((token) => SCOPE_CORE_ENTITY_HINT_TERMS.has(token));
+}
+
+function collectScopeCoreCandidates(
+  candidates: ScoredEntry[],
+  scopes: TraversalScope[],
+  excludedEntryIds: ReadonlySet<string>,
+): ScoredEntry[] {
+  if (!candidates.length || !scopes.length) return [];
+  const scopedEntryIds = new Set(scopes.flatMap((scope) => getScopedEntryIds(scope.book, scope.nodeId, true)));
+  return candidates.filter(
+    (candidate) =>
+      scopedEntryIds.has(candidate.entry.entryId) &&
+      !excludedEntryIds.has(candidate.entry.entryId) &&
+      !candidate.entry.constant &&
+      !candidate.reasons.includes("related_support") &&
+      !isConstraintOnlyCandidate(candidate.reasons) &&
+      entryLooksLikeScopeCoreEntity(candidate.entry),
+  );
+}
+
+function selectProtectedScopeCore(
+  candidates: ScoredEntry[],
+  recentConversation: string,
+  scopes: TraversalScope[],
+  remainingSlots: number,
+  excludedEntryIds: ReadonlySet<string>,
+): ScoredEntry[] {
+  const coreCandidates = collectScopeCoreCandidates(candidates, scopes, excludedEntryIds);
+  const limit = getScopeCoreReserve(coreCandidates.length, remainingSlots);
+  if (limit <= 0) return [];
+  return rankSelectionCandidates(recentConversation, coreCandidates, scopes)
+    .slice(0, limit)
+    .map((item) => ({
+      ...item.candidate,
+      reasons: uniqueStrings([...item.candidate.reasons, "scope_core"]),
+      selectionRole: item.selectionRole,
+    }));
+}
+
+function scoreDensity(candidate: ScoredEntry): number {
+  return candidate.score / Math.max(getEntryInjectionBody(candidate.entry).length, 1);
+}
+
+function entryLooksLikeSupportContext(entry: RuntimeBook["cache"]["entries"][number], tree?: BookTreeIndex): boolean {
+  const labelTokens = tokenize(entry.label);
+  if (labelTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token))) return true;
+  if ([...entry.tags, entry.groupName, ...entry.key, ...entry.keysecondary].flatMap(tokenize).some((token) => SUPPORT_CONTEXT_TERMS.has(token))) {
+    return true;
+  }
+  if (tree) {
+    const breadcrumbTokens = tokenize(getEntryBreadcrumb(entry, tree));
+    if (breadcrumbTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token))) return true;
+  }
+  return false;
+}
+
+function scoreRelatedSupportCandidate(
+  candidate: RuntimeBook["cache"]["entries"][number],
+  tree: BookTreeIndex,
+  seedEntries: ScoredEntry[],
+  seedText: string,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
+): ScoredEntry | null {
+  if (candidate.disabled || candidate.constant || !seedEntries.length) return null;
+
+  const reasons: string[] = ["related_support"];
+  let score = 0;
+
+  const labelPhrases = normalizeVariantList([candidate.label]);
+  const aliasPhrases = normalizeVariantList(candidate.aliases);
+  const keyPhrases = normalizeVariantList([...candidate.key, ...candidate.keysecondary]);
+  const exactLabelMatches = labelPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  const aliasMatches = aliasPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  const keyMatches = keyPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
+  if (isCompositeEntryLabel(candidate.label) && exactLabelMatches <= 0 && aliasMatches <= 0) {
+    const principalTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
+    const principalHits = principalTokens.filter((token) => containsToken(seedText, token)).length;
+    if (principalHits < Math.min(principalTokens.length, 3)) return null;
+  }
+
+  if (exactLabelMatches > 0) {
+    score += exactLabelMatches * 16;
+    reasons.push("label");
+  }
+  if (aliasMatches > 0) {
+    score += aliasMatches * 12;
+    reasons.push("alias");
+  }
+  if (keyMatches > 0) {
+    score += keyMatches * 10;
+    reasons.push("keyword");
+  }
+
+  const candidateLabelTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
+  const labelTokenHits = candidateLabelTokens.filter((token) => containsToken(seedText, token)).length;
+  if (labelTokenHits >= Math.min(2, candidateLabelTokens.length)) {
+    score += labelTokenHits * 4;
+    if (!reasons.includes("label")) reasons.push("label");
+  }
+
+  const candidateText = normalizeSearchText([
+    candidate.label,
+    candidate.summary,
+    candidate.comment,
+    candidate.groupName,
+    candidate.tags.join(" "),
+    getEntryBreadcrumb(candidate, tree),
+    truncateText(getEntryBody(candidate), 1000),
+  ].join(" "));
+  const seedPhraseHits = seedEntries.reduce((total, seed) => {
+    const phrases = normalizeVariantList([seed.entry.label, ...seed.entry.aliases]);
+    return total + phrases.reduce((innerTotal, phrase) => innerTotal + Math.min(1, countSegmentPhrase(candidateText, phrase)), 0);
+  }, 0);
+  if (seedPhraseHits > 0) {
+    score += Math.min(10, seedPhraseHits * 3);
+    reasons.push("content");
+  }
+
+  if (entryLooksLikeSupportContext(candidate, tree)) {
+    score += 4;
+    reasons.push("support_context");
+  }
+
+  score += getDynamicFeedbackBoost(candidate, feedback);
+  if (score < RELATED_SUPPORT_SCORE_THRESHOLD) return null;
+
+  return {
+    entry: candidate,
+    score,
+    reasons: uniqueStrings(reasons),
+    selectionRole: "support_context",
+  };
+}
+
+function buildRelatedSupportCandidates(
+  seedEntries: ScoredEntry[],
+  books: RuntimeBook[],
+  excludedEntryIds: ReadonlySet<string>,
+  existingEntryIds: ReadonlySet<string>,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
+  limit = RELATED_SUPPORT_LIMIT,
+): ScoredEntry[] {
+  if (!seedEntries.length || limit <= 0) return [];
+  const seedText = normalizeSearchText(
+    seedEntries
+      .map((item) =>
+        [
+          item.entry.label,
+          item.entry.aliases.join(" "),
+          item.entry.summary,
+          item.entry.comment,
+          item.entry.tags.join(" "),
+          item.entry.groupName,
+          getEntryInjectionBody(item.entry),
+        ].join(" "),
+      )
+      .join(" "),
+  );
+  if (!seedText) return [];
+
+  return books
+    .flatMap((book) =>
+      book.cache.entries
+        .filter((entry) => !excludedEntryIds.has(entry.entryId) && !existingEntryIds.has(entry.entryId))
+        .map((entry) => scoreRelatedSupportCandidate(entry, book.tree, seedEntries, seedText, feedback)),
+    )
+    .filter((item): item is ScoredEntry => !!item)
+    .sort(
+      (left, right) =>
+        Number(entryLooksLikeSupportContext(right.entry)) - Number(entryLooksLikeSupportContext(left.entry)) ||
+        scoreDensity(right) - scoreDensity(left) ||
+        right.score - left.score ||
+        left.entry.label.localeCompare(right.entry.label),
+    )
+    .slice(0, limit);
+}
+
+function compareSupportContext(left: ScoredEntry, right: ScoredEntry): number {
+  return (
+    Number(right.reasons.includes("support_context")) - Number(left.reasons.includes("support_context")) ||
+    scoreDensity(right) - scoreDensity(left) ||
+    right.score - left.score ||
+    left.entry.label.localeCompare(right.entry.label)
+  );
+}
+
+function compareRelatedBridge(left: ScoredEntry, right: ScoredEntry): number {
+  return (
+    right.score - left.score ||
+    scoreDensity(right) - scoreDensity(left) ||
+    left.entry.label.localeCompare(right.entry.label)
+  );
+}
+
+function selectProtectedRelatedSupport(candidates: ScoredEntry[], limit: number): ScoredEntry[] {
+  if (limit <= 0) return [];
+  const eligible = candidates.filter(
+    (candidate) =>
+      candidate.reasons.includes("related_support") &&
+      !candidate.entry.constant &&
+      isDynamicInjectionEligible(candidate),
+  );
+  if (!eligible.length) return [];
+
+  const selected: ScoredEntry[] = [];
+  const selectedIds = new Set<string>();
+  const addCandidates = (items: ScoredEntry[], count: number): void => {
+    for (const item of items) {
+      if (selected.length >= limit || count <= 0) break;
+      if (selectedIds.has(item.entry.entryId)) continue;
+      selected.push(item);
+      selectedIds.add(item.entry.entryId);
+      count -= 1;
+    }
+  };
+
+  const supportContexts = eligible
+    .filter((candidate) => candidate.reasons.includes("support_context"))
+    .sort(compareSupportContext);
+  addCandidates(supportContexts, Math.min(PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT, limit));
+
+  const bridgeEntries = eligible
+    .filter((candidate) => !candidate.reasons.includes("support_context") && hasPrimaryReason(candidate.reasons))
+    .sort(compareRelatedBridge);
+  addCandidates(bridgeEntries, Math.min(PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT, limit - selected.length));
+
+  const remaining = eligible.filter((candidate) => !selectedIds.has(candidate.entry.entryId)).sort(compareSupportContext);
+  addCandidates(remaining, limit - selected.length);
+
+  return selected;
+}
+
+function selectProtectedSceneSupport(
+  candidates: ScoredEntry[],
+  recentConversation: string,
+  scopes: TraversalScope[],
+  limit: number,
+): ScoredEntry[] {
+  if (limit <= 0) return [];
+  return rankSelectionCandidates(
+    recentConversation,
+    candidates.filter((candidate) => !candidate.reasons.includes("related_support") && isHighConfidenceSceneSupport(candidate)),
+    scopes,
+  )
+    .slice(0, limit)
+    .map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+}
+
 function scoreEntry(
   entry: RuntimeBook["cache"]["entries"][number],
   tree: BookTreeIndex,
   queryText: string,
   queryTokens: string[],
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): ScoredEntry {
   const reasons: string[] = [];
   let score = 0;
+  const segments = buildRetrievalTextSegments(queryText);
 
   const breadcrumb = normalizeSearchText(getEntryBreadcrumb(entry, tree));
   const labelText = normalizeSearchText(entry.label);
-  const aliasText = normalizeSearchText(entry.aliases.join(" "));
-  const keyText = normalizeSearchText([...entry.key, ...entry.keysecondary].join(" "));
   const summaryText = normalizeSearchText(entry.summary);
   const tagText = normalizeSearchText(entry.tags.join(" "));
   const commentText = normalizeSearchText(entry.comment);
   const bodyText = normalizeSearchText(truncateText(getEntryBody(entry), 500));
   const groupText = normalizeSearchText(entry.groupName);
+  const scoringTokens = tokenize(segments.activeText);
+  const supportQueryTokens = scoringTokens.length ? scoringTokens : queryTokens;
 
-  if (countPhraseBonus(queryText, labelText)) {
-    score += 12;
-    reasons.push("label");
-  }
-  if (countPhraseBonus(queryText, aliasText)) {
-    score += 8;
-    reasons.push("alias");
-  }
-  if (countPhraseBonus(queryText, keyText)) {
-    score += 7;
-    reasons.push("keyword");
-  }
+  const compositeLabel = isCompositeEntryLabel(entry.label);
+  const compositeEvidence = !compositeLabel || hasStrongCompositeEvidence(entry, segments);
+  const labelEvidence = compositeEvidence
+    ? scorePhraseVariants([entry.label], segments, { active: 18, background: 5, constraint: 3 })
+    : { score: 0, active: 0, background: 0, constraint: 0, overall: 0 };
+  const aliasEvidence = scorePhraseVariants(entry.aliases, segments, { active: 14, background: 4, constraint: 2 });
+  const keyEvidence = scorePhraseVariants([...entry.key, ...entry.keysecondary], segments, {
+    active: 10,
+    background: 3,
+    constraint: 2,
+  });
 
-  const labelMatches = countTokenMatches(queryTokens, tokenize(labelText));
-  const aliasMatches = countTokenMatches(queryTokens, tokenize(aliasText));
-  const keyMatches = countTokenMatches(queryTokens, tokenize(keyText));
-  const tagMatches = countTokenMatches(queryTokens, tokenize(tagText));
-  const summaryMatches = countTokenMatches(queryTokens, tokenize(summaryText));
-  const bodyMatches = Math.min(6, countTokenMatches(queryTokens, tokenize(bodyText)));
-  const breadcrumbMatches = countTokenMatches(queryTokens, tokenize(breadcrumb));
-  const commentMatches = countTokenMatches(queryTokens, tokenize(commentText));
-  const groupMatches = countTokenMatches(queryTokens, tokenize(groupText));
+  if (labelEvidence.score > 0) reasons.push("label");
+  if (aliasEvidence.score > 0) reasons.push("alias");
+  if (keyEvidence.score > 0) reasons.push("keyword");
 
-  if (labelMatches > 0) reasons.push("label");
-  if (aliasMatches > 0) reasons.push("alias");
-  if (keyMatches > 0) reasons.push("keyword");
+  score += labelEvidence.score + aliasEvidence.score + keyEvidence.score;
+
+  const labelMatches = compositeEvidence ? countTokenMatches(supportQueryTokens, tokenize(labelText)) : 0;
+  const aliasMatches = countTokenMatches(supportQueryTokens, uniqueStrings(entry.aliases.flatMap(tokenize)));
+  const keyMatches = countTokenMatches(supportQueryTokens, uniqueStrings([...entry.key, ...entry.keysecondary].flatMap(tokenize)));
+  const tagMatches = countTokenMatches(supportQueryTokens, tokenize(tagText));
+  const summaryMatches = countTokenMatches(supportQueryTokens, tokenize(summaryText));
+  const bodyMatches = Math.min(6, countTokenMatches(supportQueryTokens, tokenize(bodyText)));
+  const breadcrumbMatches = countTokenMatches(supportQueryTokens, tokenize(breadcrumb));
+  const commentMatches = countTokenMatches(supportQueryTokens, tokenize(commentText));
+  const groupMatches = countTokenMatches(supportQueryTokens, tokenize(groupText));
+
+  if (labelMatches > 0 && !reasons.includes("label")) reasons.push("label");
+  if (aliasMatches > 0 && !reasons.includes("alias")) reasons.push("alias");
+  if (keyMatches > 0 && !reasons.includes("keyword")) reasons.push("keyword");
   if (tagMatches > 0) reasons.push("tag");
   if (summaryMatches > 0) reasons.push("summary");
   if (bodyMatches > 0) reasons.push("content");
@@ -847,24 +1657,46 @@ function scoreEntry(
   if (commentMatches > 0) reasons.push("comment");
   if (groupMatches > 0) reasons.push("group");
 
-  score += labelMatches * 4;
-  score += aliasMatches * 3;
-  score += keyMatches * 3;
-  score += tagMatches * 2;
-  score += summaryMatches * 2;
-  score += bodyMatches;
-  score += breadcrumbMatches * 2;
-  score += commentMatches * 2;
+  score += labelMatches * 2;
+  score += aliasMatches * 2;
+  score += keyMatches * 2;
+  score += tagMatches;
+  score += summaryMatches;
+  score += Math.min(3, bodyMatches);
+  score += breadcrumbMatches;
+  score += commentMatches;
   score += groupMatches;
+  score += getDynamicFeedbackBoost(entry, feedback);
   if (entry.selective) score += 0.1;
 
-  return { entry, score, reasons: Array.from(new Set(reasons)) };
+  const primaryActive = labelEvidence.active + aliasEvidence.active + keyEvidence.active;
+  const primaryBackground = labelEvidence.background + aliasEvidence.background + keyEvidence.background;
+  const primaryConstraint = labelEvidence.constraint + aliasEvidence.constraint + keyEvidence.constraint;
+  const primaryOverall = labelEvidence.overall + aliasEvidence.overall + keyEvidence.overall;
+  let selectionRole: PreviewNode["selectionRole"] = "score_fallback";
+  if (primaryActive > 0) {
+    selectionRole = "active_anchor";
+    reasons.push("active");
+  } else if (primaryBackground > 0) {
+    selectionRole = "background_mention";
+    reasons.push("background");
+  } else if (primaryConstraint > 0) {
+    selectionRole = "support_context";
+    reasons.push("constraint");
+  } else if (primaryOverall > 0) {
+    selectionRole = "support_context";
+  } else if (score > 0) {
+    selectionRole = "support_context";
+  }
+
+  return { entry, score, reasons: Array.from(new Set(reasons)), selectionRole };
 }
 
 function scoreEntries(
   queryText: string,
   books: RuntimeBook[],
   excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): ScoredEntry[] {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
@@ -874,7 +1706,7 @@ function scoreEntries(
     .flatMap((book) =>
       book.cache.entries
         .filter((entry) => !entry.disabled && !excludedEntryIds.has(entry.entryId))
-        .map((entry) => scoreEntry(entry, book.tree, normalized, queryTokens)),
+        .map((entry) => scoreEntry(entry, book.tree, queryText, queryTokens, feedback)),
     )
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
@@ -897,13 +1729,6 @@ async function runControllerJson(
 
   controller.callCount += 1;
   const requestStartedAt = Date.now();
-  emitProgress(controller.reportProgress, {
-    type: "item",
-    item: createFeedItem("trace", `Controller: ${requestLabel}`, "Waiting for controller response.", {
-      phase: "controller",
-      tone: "info",
-    }),
-  });
   const abortController = new AbortController();
   const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -916,6 +1741,7 @@ async function runControllerJson(
       {
         systemPrompt,
         connectionId: controller.connectionId,
+        temperatureOverride: 0.1,
         signal: abortController.signal,
       },
     )
@@ -938,19 +1764,6 @@ async function runControllerJson(
               ),
             });
           }
-          emitProgress(controller.reportProgress, {
-            type: "item",
-            item: createFeedItem(
-              "trace",
-              `Controller finished: ${requestLabel}`,
-              `Parsed JSON from ${result.parsedFrom === "reasoning" ? "reasoning" : "content"} response.`,
-              {
-                phase: "controller",
-                tone: "info",
-                durationMs,
-              },
-            ),
-          });
           return { parsed: result.parsed, error: null, durationMs };
         }
         spindle.log.warn("Lore Recall controller call returned invalid JSON.");
@@ -1153,13 +1966,37 @@ async function maybeSelectEntries(
   scopes: TraversalScope[] = [],
   maxFinalEntries = clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32),
 ): Promise<ScoredEntry[]> {
-  const rankedCandidates = rankSelectionCandidates(queryText, candidates, scopes);
-  const clampedFinalEntries = Math.min(candidates.length, Math.max(0, maxFinalEntries));
+  const eligibleCandidates = filterDynamicInjectionCandidates(candidates);
+  if (!eligibleCandidates.length) return [];
+  const initialRankedCandidates = rankSelectionCandidates(queryText, eligibleCandidates, scopes);
+  const initialRankedById = new Map(initialRankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
+  let orderedEntries: ScoredEntry[] = initialRankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
+  if (config.rerankEnabled) {
+    orderedEntries = await maybeRerankEntries(queryText, orderedEntries, controller, allowController);
+  }
+  const rankedCandidates = orderedEntries.map((entry) => {
+    const ranked = initialRankedById.get(entry.entry.entryId);
+    const selectionRole = ranked?.selectionRole ?? entry.selectionRole ?? "score_fallback";
+    return {
+      candidate: { ...entry, selectionRole },
+      selectionRole,
+      priority: ranked?.priority ?? entry.score * 10,
+      scopeBreadcrumb: ranked?.scopeBreadcrumb ?? "Unscoped",
+      latestMentionCount: ranked?.latestMentionCount ?? 0,
+      overallMentionCount: ranked?.overallMentionCount ?? 0,
+    };
+  });
+  const clampedFinalEntries = Math.min(eligibleCandidates.length, Math.max(0, maxFinalEntries));
   if (!clampedFinalEntries) return [];
-  const buildScopedFallbackSelection = (): ScoredEntry[] =>
-    buildDeterministicSelection(rankedCandidates, clampedFinalEntries);
+  const fallbackLimit = config.selectiveRetrieval
+    ? Math.min(clampedFinalEntries, SELECTIVE_FALLBACK_LIMIT)
+    : clampedFinalEntries;
+  const buildScopedFallbackSelection = (limit = fallbackLimit): ScoredEntry[] =>
+    buildDeterministicSelection(rankedCandidates, limit);
   const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
   const manifests = buildScopedManifests(rankedEntries, scopes);
+  const manifestedIds = new Set(manifests.flatMap((manifest) => manifest.candidates.map((item) => item.entry.entryId)));
+  const additionalCandidates = rankedCandidates.filter((item) => !manifestedIds.has(item.candidate.entry.entryId));
 
   if (!config.selectiveRetrieval || !rankedCandidates.length) {
     return buildScopedFallbackSelection();
@@ -1169,14 +2006,18 @@ async function maybeSelectEntries(
   }
 
   const prompt = [
-    "Select the exact lore entries that should be injected as the final set from the chosen node manifests.",
+    "Select the exact lore entries that should be injected as the final set from the retrieved manifests and accumulated candidate pool.",
     'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${clampedFinalEntries} entryIds from the manifests below.`,
-    "Use only entryIds that appear in the manifests.",
-    "The selected scopes are already the retrieval decision. The returned entryIds are the final entries that will be injected.",
+    `Choose up to ${clampedFinalEntries} entryIds from the candidates below.`,
+    "Default to a compact final set: usually 1-6 entries, rarely more than 8. The cap is a maximum, not a target.",
+    "Use only entryIds that appear below.",
+    "Preserve directly mentioned active anchors such as active characters, places, objects, or factions unless the candidate is plainly a false positive.",
+    "Preserve selected-scope core entries marked with reason scope_core; they are the main cast/faction/group payload and should not be replaced by unrelated faction or support stragglers.",
+    "The retrieved scopes are already the traversal decision. Additional candidates are pooled entries not represented in a scope manifest, not forced injections.",
     "Entries may come from any listed scope, and some scopes may contribute zero entries.",
-    "Prefer a useful set of supporting entries over an overly sparse one when several entries are plausibly relevant.",
-    "Return an empty entryIds array only when every listed entry is irrelevant to the next reply.",
+    "It is valid to choose fewer entries than the cap when only a sparse set is useful.",
+    "Return an empty entryIds array when none of the listed entries should be injected.",
+    "Do not select every entry in a broad manifest just because the scope is relevant; reject background entries that will not affect the next reply.",
     "",
     buildPromptContext(queryText),
     "",
@@ -1196,10 +2037,26 @@ async function maybeSelectEntries(
               )}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(
                 getEntryBody(item.entry),
                 180,
-              )}`,
+            )}`,
           ),
         ])
-      : rankedCandidates.map(
+      : []),
+    ...(additionalCandidates.length
+      ? [
+          "",
+          "Additional candidate entries:",
+          ...additionalCandidates.map(
+            (item) =>
+              `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(
+                2,
+              )}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(
+                item.candidate.entry.summary,
+                140,
+              )}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`,
+          ),
+        ]
+      : !manifests.length
+        ? rankedCandidates.map(
           (item) =>
             `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(
               2,
@@ -1207,56 +2064,82 @@ async function maybeSelectEntries(
               item.candidate.entry.summary,
               140,
             )}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`,
-        )),
+        )
+        : []),
   ].join("\n");
 
   const byId = new Map(rankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
+  const parseManifestSelection = (
+    parsedValue: Record<string, unknown> | null,
+  ): {
+    mappedIds: string[];
+    invalidSelectionReasons: string[];
+  } => {
+    const parsedEntryIds = parsedValue?.entryIds;
+    const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
+    const requestedIds = hasExplicitEntryIds
+      ? parsedEntryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+
+    const uniqueRequestedIds = uniqueStrings(requestedIds);
+    const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
+    const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
+    const invalidSelectionReasons: string[] = [];
+
+    if (!hasExplicitEntryIds) {
+      invalidSelectionReasons.push("Controller did not return an entryIds array.");
+    }
+    if (requestedIds.length !== uniqueRequestedIds.length) {
+      invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
+    }
+    if (unmappedIds.length) {
+      invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
+    }
+    if (mappedIds.length > clampedFinalEntries) {
+      invalidSelectionReasons.push(
+        `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`,
+      );
+    }
+
+    return { mappedIds, invalidSelectionReasons };
+  };
   const { parsed } = await runControllerJson(
     prompt,
     controller,
     RETRIEVAL_MANIFEST_SYSTEM_PROMPT,
     "Select manifest entries",
   );
-  const parsedEntryIds = parsed?.entryIds;
-  const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
-  const requestedIds = hasExplicitEntryIds
-    ? parsedEntryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    : [];
+  let { mappedIds, invalidSelectionReasons } = parseManifestSelection(parsed);
 
-  const uniqueRequestedIds = uniqueStrings(requestedIds);
-  const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
-  const mappedIds = uniqueRequestedIds.filter((id) => byId.has(id));
-  const minimumUsefulSelection = Math.min(clampedFinalEntries, rankedCandidates.length, 3);
-  const selectedAllManifestEntries =
-    rankedCandidates.length > clampedFinalEntries && mappedIds.length === rankedCandidates.length && rankedCandidates.length > 0;
-  const invalidSelectionReasons: string[] = [];
+  const selectedWholeManifest =
+    !invalidSelectionReasons.length &&
+    mappedIds.length >= Math.min(rankedCandidates.length, clampedFinalEntries) &&
+    mappedIds.length > Math.min(SELECTIVE_FALLBACK_LIMIT, clampedFinalEntries);
 
-  if (!hasExplicitEntryIds) {
-    invalidSelectionReasons.push("Controller did not return an entryIds array.");
-  }
-  if (hasExplicitEntryIds && requestedIds.length === 0) {
-    invalidSelectionReasons.push("Controller returned an empty entryIds array despite scoped candidates being available.");
-  }
-  if (requestedIds.length !== uniqueRequestedIds.length) {
-    invalidSelectionReasons.push("Controller returned duplicate entry IDs.");
-  }
-  if (unmappedIds.length) {
-    invalidSelectionReasons.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
-  }
-  if (mappedIds.length > clampedFinalEntries) {
-    invalidSelectionReasons.push(
-      `Controller returned ${mappedIds.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`,
+  if (selectedWholeManifest) {
+    const retryPrompt = [
+      prompt,
+      "",
+      "The previous selection included every available manifest candidate. That is too broad for automatic prompt injection.",
+      'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
+      "Choose a sparse final set only. Usually 1-6 entries is enough; choose 0 if no dynamic entry is truly needed.",
+      "Prioritize direct named entities, currently active characters, and mechanics that directly change the next reply.",
+      "Drop general background, duplicate parent/child coverage, and entries that are only loosely related.",
+    ].join("\n");
+    const retry = await runControllerJson(
+      retryPrompt,
+      controller,
+      RETRIEVAL_MANIFEST_SYSTEM_PROMPT,
+      "Retry sparse manifest selection",
     );
-  }
-  if (mappedIds.length > 0 && mappedIds.length < minimumUsefulSelection) {
-    invalidSelectionReasons.push(
-      `Controller returned only ${mappedIds.length} entry ID(s), below the minimum useful set of ${minimumUsefulSelection} for this manifest.`,
-    );
-  }
-  if (selectedAllManifestEntries) {
-    invalidSelectionReasons.push(
-      `Controller selected every manifest entry from a broad scope set (${rankedCandidates.length} entries for a final cap of ${clampedFinalEntries}).`,
-    );
+    const retrySelection = parseManifestSelection(retry.parsed);
+    if (!retrySelection.invalidSelectionReasons.length && retrySelection.mappedIds.length < mappedIds.length) {
+      mappedIds = retrySelection.mappedIds;
+      invalidSelectionReasons = [];
+    } else {
+      invalidSelectionReasons.push("Controller selected every manifest entry from a broad candidate pool.");
+      invalidSelectionReasons.push(...retrySelection.invalidSelectionReasons);
+    }
   }
 
   if (invalidSelectionReasons.length) {
@@ -1266,7 +2149,7 @@ async function maybeSelectEntries(
       item: createFeedItem(
         "issue",
         "Manifest selection fell back",
-        `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${clampedFinalEntries}.`,
+        `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${fallbackLimit}.`,
         {
           phase: "manifest_select",
           tone: "warn",
@@ -1278,12 +2161,12 @@ async function maybeSelectEntries(
   }
 
   const mappedIdSet = new Set(mappedIds);
-  const chosen = rankedCandidates
-    .filter((item) => mappedIdSet.has(item.candidate.entry.entryId))
-    .slice(0, clampedFinalEntries)
-    .map((item) => item.candidate);
-
-  return chosen.length ? chosen : buildScopedFallbackSelection();
+  return buildDeterministicSelection(
+    rankedCandidates
+      .filter((item) => mappedIdSet.has(item.candidate.entry.entryId))
+      .slice(0, clampedFinalEntries),
+    clampedFinalEntries,
+  );
 }
 
 function getDescendantCategoryIds(tree: BookTreeIndex, nodeId: string, depthLimit: number): string[] {
@@ -1336,25 +2219,126 @@ function parseEntryChoiceId(choiceId: string): string | null {
   return match?.[1] ?? null;
 }
 
+function stripChoiceIdDecoration(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  const choiceIdMatch = /choiceId\s*=\s*([^;\s,)]+)/i.exec(trimmed);
+  if (choiceIdMatch?.[1]) return stripChoiceIdDecoration(choiceIdMatch[1]);
+
+  const leadingBracketMatch = /^\[([^\]]+)\]/.exec(trimmed);
+  if (leadingBracketMatch?.[1]) return stripChoiceIdDecoration(leadingBracketMatch[1]);
+
+  return trimmed
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^[\[(]+/g, "")
+    .replace(/[\]),.;]+$/g, "")
+    .trim();
+}
+
+function expandChoiceIdVariants(choiceId: string): string[] {
+  const variants: string[] = [];
+  const pushVariant = (value: string): void => {
+    const stripped = stripChoiceIdDecoration(value);
+    if (stripped && !variants.includes(stripped)) variants.push(stripped);
+  };
+
+  pushVariant(choiceId);
+  for (const match of choiceId.matchAll(/\[([^\]]+)\]/g)) {
+    if (match[1]) pushVariant(match[1]);
+  }
+  for (const match of choiceId.matchAll(/choiceId\s*=\s*([^;\s,)]+)/gi)) {
+    if (match[1]) pushVariant(match[1]);
+  }
+
+  return variants;
+}
+
+function formatChoiceIdList(choiceIds: string[], limit = 5): string {
+  if (!choiceIds.length) return "none";
+  const shown = choiceIds.slice(0, limit).map((choiceId) => `"${truncateText(choiceId, 80)}"`);
+  return choiceIds.length > limit ? `${shown.join(", ")} (+${choiceIds.length - limit} more)` : shown.join(", ");
+}
+
 function resolveTraversalChoiceScopes(
   choiceIds: string[],
   booksById: Map<string, RuntimeBook>,
 ): TraversalScope[] {
   const scopes = new Map<string, TraversalScope>();
-  for (const choiceId of choiceIds) {
-    const categoryChoice = parseCategoryChoiceId(choiceId);
-    if (categoryChoice) {
-      const book = booksById.get(categoryChoice.bookId);
-      if (book && book.tree.nodes[categoryChoice.nodeId]) {
-        scopes.set(`${book.summary.id}:${categoryChoice.nodeId}`, { book, nodeId: categoryChoice.nodeId });
-      }
-      continue;
+
+  const addScope = (book: RuntimeBook, nodeId: string): void => {
+    if (!book.tree.nodes[nodeId]) return;
+    scopes.set(`${book.summary.id}:${nodeId}`, { book, nodeId });
+  };
+
+  const addNodeIdAcrossBooks = (nodeId: string): boolean => {
+    let resolved = false;
+    for (const book of booksById.values()) {
+      if (!book.tree.nodes[nodeId]) continue;
+      addScope(book, nodeId);
+      resolved = true;
     }
-    const documentBookId = parseDocumentChoiceId(choiceId);
-    if (!documentBookId) continue;
-    const book = booksById.get(documentBookId);
-    if (!book) continue;
-    scopes.set(`${book.summary.id}:${book.tree.rootId}`, { book, nodeId: book.tree.rootId });
+    return resolved;
+  };
+
+  const labelIndex = new Map<string, TraversalScope[]>();
+  const addLabelIndex = (label: string, book: RuntimeBook, nodeId: string): void => {
+    const key = normalizeSearchText(label);
+    if (!key) return;
+    const existing = labelIndex.get(key) ?? [];
+    if (!existing.some((scope) => scope.book.summary.id === book.summary.id && scope.nodeId === nodeId)) {
+      existing.push({ book, nodeId });
+    }
+    labelIndex.set(key, existing);
+  };
+
+  for (const book of booksById.values()) {
+    for (const node of Object.values(book.tree.nodes)) {
+      const breadcrumb = getScopeBreadcrumb(book, node.id);
+      addLabelIndex(node.id, book, node.id);
+      addLabelIndex(node.label, book, node.id);
+      addLabelIndex(breadcrumb, book, node.id);
+      addLabelIndex(`${book.summary.name} :: ${node.label}`, book, node.id);
+      addLabelIndex(`${book.summary.name} :: ${breadcrumb}`, book, node.id);
+      addLabelIndex(`${book.summary.id}:${node.id}`, book, node.id);
+      if (node.id === book.tree.rootId) {
+        addLabelIndex(book.summary.name, book, node.id);
+        addLabelIndex("root", book, node.id);
+      }
+    }
+  }
+
+  for (const choiceId of choiceIds) {
+    for (const variant of expandChoiceIdVariants(choiceId)) {
+      const categoryChoice = parseCategoryChoiceId(variant);
+      if (categoryChoice) {
+        const book = booksById.get(categoryChoice.bookId);
+        if (book && book.tree.nodes[categoryChoice.nodeId]) {
+          addScope(book, categoryChoice.nodeId);
+        } else {
+          addNodeIdAcrossBooks(categoryChoice.nodeId);
+        }
+        continue;
+      }
+
+      const categoryNodeOnly = /^category:(.+)$/i.exec(variant);
+      if (categoryNodeOnly?.[1] && addNodeIdAcrossBooks(categoryNodeOnly[1])) continue;
+
+      const documentBookId = parseDocumentChoiceId(variant);
+      if (documentBookId) {
+        const book = booksById.get(documentBookId);
+        if (book) addScope(book, book.tree.rootId);
+        continue;
+      }
+
+      if (addNodeIdAcrossBooks(variant)) continue;
+
+      const twoPartChoice = /^([^:]+):(.+)$/.exec(variant);
+      if (twoPartChoice?.[2] && addNodeIdAcrossBooks(twoPartChoice[2])) continue;
+
+      const labelScopes = labelIndex.get(normalizeSearchText(variant)) ?? [];
+      for (const scope of labelScopes) addScope(scope.book, scope.nodeId);
+    }
   }
   return Array.from(scopes.values());
 }
@@ -1460,6 +2444,7 @@ function collectCandidatesForScopes(
   fallbackById?: Map<string, ScoredEntry>,
   preserveScopeOrder = false,
   excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): ScoredEntry[] {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
@@ -1474,13 +2459,14 @@ function collectCandidatesForScopes(
       const entry = entriesById.get(entryId);
       if (!entry || entry.disabled) continue;
       seen.add(entryId);
-      const scored = normalized && queryTokens.length ? scoreEntry(entry, scope.book.tree, normalized, queryTokens) : { entry, score: 0, reasons: [] };
+      const scored = normalized && queryTokens.length ? scoreEntry(entry, scope.book.tree, queryText, queryTokens, feedback) : { entry, score: 0, reasons: [] };
       const reasons = uniqueStrings([...scored.reasons, "branch"]);
-      selected.push({
-        entry,
-        score: scored.score > 0 ? scored.score + 0.25 : 0.25,
-        reasons,
-      });
+    selected.push({
+      entry,
+      score: scored.score > 0 ? scored.score + 0.25 : 0.25,
+      reasons,
+      selectionRole: scored.selectionRole,
+    });
     }
   }
 
@@ -1495,11 +2481,12 @@ function collectCandidatesForScopes(
         const entry = entriesById.get(entryId);
         if (!entry || entry.disabled) continue;
         seen.add(entryId);
-        const scored = normalized && queryTokens.length ? scoreEntry(entry, book.tree, normalized, queryTokens) : { entry, score: 0, reasons: [] };
+        const scored = normalized && queryTokens.length ? scoreEntry(entry, book.tree, queryText, queryTokens, feedback) : { entry, score: 0, reasons: [] };
         selected.push({
           entry,
           score: scored.score > 0 ? scored.score : 0.5,
           reasons: uniqueStrings([...scored.reasons, "direct"]),
+          selectionRole: scored.selectionRole,
         });
         resolved = true;
         break;
@@ -1512,6 +2499,7 @@ function collectCandidatesForScopes(
         entry: fallback.entry,
         score: fallback.score > 0 ? fallback.score : 0.5,
         reasons: uniqueStrings([...fallback.reasons, "direct"]),
+        selectionRole: fallback.selectionRole,
       });
     }
   }
@@ -1686,6 +2674,7 @@ function chooseDeterministicScopes(
   deterministicById: Map<string, ScoredEntry>,
   config: CharacterRetrievalConfig,
 ): TraversalScope[] {
+  const scopePickLimit = getScopePickLimit(config);
   const choices = collectChildScopeChoices(currentScopes, deterministicById, config);
   const ranked = sortScopeChoices(choices).filter((choice) => choice.entryCount > 0);
   if (!ranked.length) return currentScopes;
@@ -1701,23 +2690,84 @@ function chooseDeterministicScopes(
     );
     if (overlaps) continue;
     selected.push(scope);
-    if (selected.length >= MAX_SCOPE_CHOICES) break;
+    if (selected.length >= scopePickLimit) break;
   }
 
   return selected.length ? selected : currentScopes;
 }
 
-function buildInitialScopePrompt(recentConversation: string, treeOverview: string): string {
+function getScopePickLimit(config: CharacterRetrievalConfig): number {
+  return clampInt(config.scopePickLimit ?? DEFAULT_SCOPE_PICK_LIMIT, 1, 24);
+}
+
+function limitScopeSelection(scopes: TraversalScope[], limit: number): TraversalScope[] {
+  return dedupeScopes(scopes).slice(0, Math.max(0, limit));
+}
+
+function getEntryPrimaryScopeFromBooks(
+  entry: ScoredEntry["entry"],
+  booksById: Map<string, RuntimeBook>,
+): TraversalScope | null {
+  const preferredBook = booksById.get(entry.worldBookId);
+  const candidateBooks = preferredBook
+    ? [preferredBook, ...Array.from(booksById.values()).filter((book) => book.summary.id !== preferredBook.summary.id)]
+    : Array.from(booksById.values());
+  for (const book of candidateBooks) {
+    const node = Object.values(book.tree.nodes).find((item) => item.entryIds.includes(entry.entryId));
+    if (node) return { book, nodeId: node.id };
+    if (book.tree.unassignedEntryIds.includes(entry.entryId)) return { book, nodeId: book.tree.rootId };
+  }
+  return null;
+}
+
+function isScopeFallbackSeedCandidate(candidate: ScoredEntry): boolean {
+  const reasons = candidate.reasons;
+  const nonStructuralReasons = reasons.filter(
+    (reason) => reason !== "branch" && reason !== "tag" && reason !== "group" && reason !== "constraint",
+  );
+  if (isConstraintOnlyCandidate(reasons)) return false;
+  if (!nonStructuralReasons.length) return false;
+  return (
+    hasPrimaryReason(reasons) ||
+    hasSceneSupportReason(reasons) ||
+    reasons.includes("active") ||
+    reasons.includes("background") ||
+    reasons.includes("related_support") ||
+    candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD
+  );
+}
+
+function chooseDeterministicEntryScopes(
+  recentConversation: string,
+  rootScopes: TraversalScope[],
+  deterministicById: Map<string, ScoredEntry>,
+  config: CharacterRetrievalConfig,
+): TraversalScope[] {
+  const deterministic = Array.from(deterministicById.values());
+  if (!deterministic.length) return chooseDeterministicScopes(rootScopes, deterministicById, config);
+
+  const booksById = new Map(rootScopes.map((scope) => [scope.book.summary.id, scope.book]));
+  const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes)
+    .filter((item) => isScopeFallbackSeedCandidate(item.candidate))
+    .slice(0, Math.min(getScopePickLimit(config), Math.max(1, config.maxResults)))
+    .map((item) => item.candidate);
+  const scopes = ranked
+    .map((candidate) => getEntryPrimaryScopeFromBooks(candidate.entry, booksById))
+    .filter((scope): scope is TraversalScope => !!scope);
+  return scopes.length ? limitScopeSelection(scopes, getScopePickLimit(config)) : [];
+}
+
+function buildInitialScopePrompt(recentConversation: string, treeOverview: string, scopePickLimit: number): string {
   return [
     'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
-    `Pick 1-${MAX_SCOPE_CHOICES} nodeIds maximum.`,
+    `Pick 1-${scopePickLimit} nodeIds maximum.`,
     "Rules:",
     "- Prefer specific leaves over broad branches.",
     "- Pick only nodeIds exactly as shown in the knowledge tree index.",
     "- If document selectors like doc:<bookId> are shown, you may pick them to narrow to a single lorebook before refining deeper.",
     "- Pick nodes whose content would be most useful for the next reply.",
     "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
-    "- If nothing seems relevant, return an empty nodeIds array.",
+    "- Return an empty nodeIds array only when the recent conversation has no retrievable lore need.",
     "",
     "KNOWLEDGE TREE INDEX:",
     treeOverview || "- none",
@@ -1739,7 +2789,7 @@ function buildChildScopePrompt(
     'Return ONLY JSON in this exact shape: {"action":"refine|retrieve","nodeIds":["node-id-1"],"reason":"brief explanation"}.',
     `Traversal step ${step + 1} of ${config.traversalStepLimit}.`,
     "Rules:",
-    `- Pick 1-${MAX_SCOPE_CHOICES} category nodeIds maximum from the choices below.`,
+    `- Pick 1-${getScopePickLimit(config)} category nodeIds maximum from the choices below.`,
     "- Use action \"refine\" when child categories should be opened before retrieval.",
     "- Use action \"retrieve\" when the chosen nodeIds are already specific enough to resolve entries.",
     "- Prefer specific leaves over broad branches.",
@@ -1810,13 +2860,14 @@ async function selectScopesSinglePass(
   fallbackPath: string[];
 }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = DEFAULT_SCOPE_PICK_LIMIT;
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected retrieval scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose scopes",
@@ -1824,7 +2875,7 @@ async function selectScopesSinglePass(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -1886,13 +2937,14 @@ async function chooseCollapsedScopes(
   trace: TraversalTraceStep[],
 ): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = getScopePickLimit(config);
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected retrieval scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose collapsed scopes",
@@ -1900,7 +2952,7 @@ async function chooseCollapsedScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -1911,15 +2963,15 @@ async function chooseCollapsedScopes(
       fallbackPath.push(
         response.error ??
           (requestedNodeIds.length
-            ? "Collapsed scope selection returned nodeIds that did not map to visible scopes; used top-level deterministic scope fallback."
-            : "Collapsed scope selection returned an empty nodeIds array; used top-level deterministic scope fallback."),
+            ? "Collapsed scope selection returned nodeIds that did not map to visible scopes; used deterministic entry-scope fallback."
+            : "Collapsed scope selection returned an empty nodeIds array; used deterministic entry-scope fallback."),
       );
-      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+      scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
       selectionReason = fallbackPath[fallbackPath.length - 1];
     }
   } else {
-    fallbackPath.push("Collapsed scope selection skipped the controller and used top-level deterministic scope fallback.");
-    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+    fallbackPath.push("Collapsed scope selection skipped the controller and used deterministic entry-scope fallback.");
+    scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
     selectionReason = fallbackPath[fallbackPath.length - 1];
   }
 
@@ -1950,7 +3002,7 @@ async function chooseCollapsedScopes(
         const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds)
           ? refinement.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
           : [];
-        refinedScopes = resolveScopeChoices(requestedNodeIds, books);
+        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
         refinedReason =
           typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim()
             ? refinement.parsed.reason.trim()
@@ -2002,13 +3054,14 @@ async function chooseTraversalScopes(
   trace: TraversalTraceStep[],
 ): Promise<{ scopes: TraversalScope[]; fallbackPath: string[]; selectionReason: string }> {
   const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
+  const scopePickLimit = getScopePickLimit(config);
   const fallbackPath: string[] = [];
   let scopes: TraversalScope[] = [];
   let selectionReason = "Controller selected traversal scopes.";
 
   if (allowController) {
     const response = await runControllerJson(
-      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes)),
+      buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit),
       controller,
       RETRIEVAL_SCOPE_SYSTEM_PROMPT,
       "Choose traversal scopes",
@@ -2016,7 +3069,7 @@ async function chooseTraversalScopes(
     const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
       ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    scopes = resolveScopeChoices(requestedNodeIds, books);
+    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
     const controllerReason =
       typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
         ? response.parsed.reason.trim()
@@ -2027,15 +3080,15 @@ async function chooseTraversalScopes(
       fallbackPath.push(
         response.error ??
           (requestedNodeIds.length
-            ? "Traversal scope selection returned nodeIds that did not map to visible scopes; used top-level deterministic scope fallback."
-            : "Traversal scope selection returned an empty nodeIds array; used top-level deterministic scope fallback."),
+            ? "Traversal scope selection returned nodeIds that did not map to visible scopes; used deterministic entry-scope fallback."
+            : "Traversal scope selection returned an empty nodeIds array; used deterministic entry-scope fallback."),
       );
-      scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+      scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
       selectionReason = fallbackPath[fallbackPath.length - 1];
     }
   } else {
-    fallbackPath.push("Traversal scope selection skipped the controller and used top-level deterministic scope fallback.");
-    scopes = chooseDeterministicScopes(rootScopes, deterministicById, config);
+    fallbackPath.push("Traversal scope selection skipped the controller and used deterministic entry-scope fallback.");
+    scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
     selectionReason = fallbackPath[fallbackPath.length - 1];
   }
 
@@ -2070,7 +3123,7 @@ async function chooseTraversalScopes(
       const requestedNodeIds = Array.isArray(response.parsed?.nodeIds)
         ? response.parsed.nodeIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         : [];
-      nextScopes = resolveScopeChoices(requestedNodeIds, books);
+      nextScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
       nextReason =
         typeof response.parsed?.reason === "string" && response.parsed.reason.trim()
           ? response.parsed.reason.trim()
@@ -2147,10 +3200,41 @@ async function selectEntriesForScopes(
   trace: TraversalTraceStep[],
   maxDynamicEntries: number,
   excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): Promise<EntrySelectionResult> {
   const fallbackPath: string[] = [];
   let activeScopes = dedupeScopes(scopes);
+  const selectedScopeCoreScopes = dedupeScopes(scopes);
   let selectionReason: string | null = null;
+  const booksById = new Map(activeScopes.map((scope) => [scope.book.summary.id, scope.book]));
+  const sceneAnchors = buildDirectMentionCandidates(
+    recentConversation,
+    Array.from(deterministicById.values()),
+    activeScopes,
+    Math.min(SCENE_ANCHOR_LIMIT, maxDynamicEntries),
+  ).map((candidate) => ({
+    ...candidate,
+    reasons: uniqueStrings([...candidate.reasons, "active_anchor"]),
+  }));
+  if (sceneAnchors.length) {
+    const anchorScopes = sceneAnchors
+      .map((anchor) => {
+        const book = booksById.get(anchor.entry.worldBookId);
+        if (!book) return null;
+        const path = getEntryCategoryPath(book.tree, anchor.entry.entryId);
+        const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
+        return { book, nodeId };
+      })
+      .filter((scope): scope is TraversalScope => !!scope);
+    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes], getScopePickLimit(config));
+    pushTrace(
+      trace,
+      "retrieve",
+      "Seed active anchors",
+      `Seeded ${sceneAnchors.length} directly mentioned active anchor candidate(s) from the current scene before selecting scoped support entries.`,
+      { entryCount: sceneAnchors.length },
+    );
+  }
 
   const rawCandidates = collectCandidatesForScopes(
     recentConversation,
@@ -2159,10 +3243,61 @@ async function selectEntriesForScopes(
     deterministicById,
     !config.selectiveRetrieval,
     excludedEntryIds,
+    feedback,
   );
-  const rankedCandidates = rankSelectionCandidates(recentConversation, rawCandidates, activeScopes);
+  const rawCandidateById = new Map(rawCandidates.map((item) => [item.entry.entryId, item]));
+  const supportSeeds = sceneAnchors.length
+    ? sceneAnchors
+    : rawCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
+  for (const anchor of sceneAnchors) {
+    const existing = rawCandidateById.get(anchor.entry.entryId);
+    rawCandidateById.set(
+      anchor.entry.entryId,
+      existing
+        ? {
+            ...existing,
+            score: Math.max(existing.score, anchor.score),
+            reasons: uniqueStrings([...existing.reasons, ...anchor.reasons]),
+            selectionRole: mergeSelectionRole(existing.selectionRole, anchor.selectionRole),
+          }
+        : anchor,
+    );
+  }
+  const relatedSupport = buildRelatedSupportCandidates(
+    supportSeeds,
+    Array.from(booksById.values()),
+    excludedEntryIds,
+    new Set(supportSeeds.map((candidate) => candidate.entry.entryId)),
+    feedback,
+    Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - sceneAnchors.length)),
+  );
+  if (relatedSupport.length) {
+    for (const candidate of relatedSupport) {
+      rawCandidateById.set(candidate.entry.entryId, candidate);
+    }
+    const relatedScopes = relatedSupport
+      .map((candidate) => {
+        const book = booksById.get(candidate.entry.worldBookId);
+        if (!book) return null;
+        const path = getEntryCategoryPath(book.tree, candidate.entry.entryId);
+        const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
+        return { book, nodeId };
+      })
+      .filter((scope): scope is TraversalScope => !!scope);
+    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes], getScopePickLimit(config));
+    pushTrace(
+      trace,
+      "retrieve",
+      "Expand related support",
+      `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`,
+      { entryCount: relatedSupport.length },
+    );
+  }
+  const mergedRawCandidates = Array.from(rawCandidateById.values());
+  const rankedCandidates = rankSelectionCandidates(recentConversation, mergedRawCandidates, activeScopes);
   const candidates = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-  const manifests = buildScopedManifests(candidates, activeScopes);
+  const filteredEligibleCandidates = filterDynamicInjectionCandidates(candidates);
+  let manifests: ScopedManifest[] = [];
 
   if (!candidates.length) {
     pushTrace(trace, "fallback", "No scoped entries", "The chosen scopes did not resolve any candidate entries.");
@@ -2170,7 +3305,7 @@ async function selectEntriesForScopes(
       scopes: activeScopes,
       selected: [],
       candidates,
-      manifests,
+      manifests: [],
       fallbackPath: [...fallbackPath, "Chosen scopes did not resolve any candidate entries."],
       selectionReason,
     };
@@ -2179,27 +3314,104 @@ async function selectEntriesForScopes(
   let selected: ScoredEntry[];
   if (config.selectiveRetrieval) {
     const beforeCalls = controller.callCount;
-    selected = await maybeSelectEntries(
-      recentConversation,
-      candidates,
-      config,
-      controller,
-      allowController,
-      activeScopes,
-      maxDynamicEntries,
+    const rankedSceneAnchors = buildDeterministicSelection(
+      rankSelectionCandidates(recentConversation, sceneAnchors, activeScopes),
+      Math.min(maxDynamicEntries, sceneAnchors.length),
     );
+    const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
+    const protectedScopeCore = selectProtectedScopeCore(
+      candidates,
+      recentConversation,
+      selectedScopeCoreScopes,
+      Math.max(0, maxDynamicEntries - rankedSceneAnchors.length),
+      sceneAnchorIds,
+    );
+    const protectedScopeCoreIds = new Set(protectedScopeCore.map((item) => item.entry.entryId));
+    const eligibleCandidates = mergeScoredEntryLists(filteredEligibleCandidates, protectedScopeCore);
+    manifests = buildScopedManifests(eligibleCandidates, activeScopes);
+    const supportCandidates = eligibleCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
+    const protectedRelatedSupport = selectProtectedRelatedSupport(
+      supportCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId)),
+      Math.min(
+        PROTECTED_RELATED_SUPPORT_LIMIT,
+        Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length),
+      ),
+    );
+    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
+    const sceneSupportCandidates = supportCandidates.filter(
+      (item) => !protectedScopeCoreIds.has(item.entry.entryId) && !protectedRelatedIds.has(item.entry.entryId),
+    );
+    const protectedSceneSupport = selectProtectedSceneSupport(
+      sceneSupportCandidates,
+      recentConversation,
+      activeScopes,
+      Math.min(
+        PROTECTED_SCENE_SUPPORT_LIMIT,
+        Math.max(
+          0,
+          maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length,
+        ),
+      ),
+    );
+    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
+    const remainingSupportSlots = Math.max(
+      0,
+      maxDynamicEntries -
+        rankedSceneAnchors.length -
+        protectedScopeCore.length -
+        protectedRelatedSupport.length -
+        protectedSceneSupport.length,
+    );
+    const supportSelectionLimit = config.selectiveRetrieval
+      ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
+      : remainingSupportSlots;
+    const supportSelected =
+      supportSelectionLimit > 0
+        ? await maybeSelectEntries(
+            recentConversation,
+            optionalSupportCandidates,
+            config,
+            controller,
+            allowController,
+            activeScopes,
+            supportSelectionLimit,
+          )
+        : [];
+    selected = [
+      ...rankedSceneAnchors,
+      ...protectedScopeCore,
+      ...protectedRelatedSupport,
+      ...protectedSceneSupport,
+      ...supportSelected,
+    ].slice(0, maxDynamicEntries);
     if (controller.callCount === beforeCalls && !allowController) {
       fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
     }
+    const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
+    const selectedScopeCoreCount = selected.filter((item) => protectedScopeCoreIds.has(item.entry.entryId)).length;
+    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
+    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
+    const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s),` : ",";
+    const scopeCoreSummary = selectedScopeCoreCount
+      ? ` with ${selectedScopeCoreCount} protected selected-scope core candidate(s),`
+      : "";
+    const relatedSummary = selectedRelatedSupportCount
+      ? ` with ${selectedRelatedSupportCount} protected related support candidate(s),`
+      : "";
+    const sceneSupportSummary = selectedSceneSupportCount
+      ? ` with ${selectedSceneSupportCount} protected scene support candidate(s),`
+      : "";
     pushTrace(
       trace,
       "manifest_select",
       "Select manifest entries",
-      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s), and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`,
+      `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary}${scopeCoreSummary}${relatedSummary}${sceneSupportSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`,
       { entryCount: selected.length },
     );
   } else {
-    selected = candidates;
+    manifests = buildScopedManifests(filteredEligibleCandidates, activeScopes);
+    selected = filteredEligibleCandidates;
     pushTrace(
       trace,
       "retrieve",
@@ -2216,6 +3428,7 @@ function rescoreEntries(
   queryText: string,
   candidates: ScoredEntry[],
   booksById: Map<string, RuntimeBook>,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): ScoredEntry[] {
   const normalized = normalizeSearchText(queryText);
   const queryTokens = tokenize(queryText);
@@ -2225,7 +3438,7 @@ function rescoreEntries(
     .map((candidate) => {
       const book = booksById.get(candidate.entry.worldBookId);
       if (!book) return null;
-      return scoreEntry(candidate.entry, book.tree, normalized, queryTokens);
+      return scoreEntry(candidate.entry, book.tree, queryText, queryTokens, feedback);
     })
     .filter((item): item is ScoredEntry => !!item && item.score > 0)
     .sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
@@ -2265,7 +3478,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
 
     const indent = "  ".repeat(depth);
     const type = node.childIds.length ? "branch" : "leaf";
-    lines.push(`${indent}[${node.id}] ${node.label || "Unnamed"} [${type}] (${getScopedEntryIds(book, node.id, true).length} entries)`);
+    lines.push(
+      `${indent}- choiceId=${makeCategoryChoiceId(book.summary.id, node.id)}; label=${node.label || "Unnamed"}; type=${type}; descendantEntries=${getScopedEntryIds(book, node.id, true).length}`,
+    );
     if (node.summary?.trim()) {
       lines.push(`${indent}  ${truncateText(node.summary.trim(), 180)}`);
     }
@@ -2285,7 +3500,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
 
     if (scope.nodeId === scope.book.tree.rootId) {
       if (multiBook) {
-        lines.push(`[${makeDocumentChoiceId(scope.book.summary.id)}] ${scope.book.summary.name} (${scope.book.cache.entries.length} entries total)`);
+        lines.push(
+          `- choiceId=${makeDocumentChoiceId(scope.book.summary.id)}; label=${scope.book.summary.name}; type=document; descendantEntries=${scope.book.cache.entries.length}`,
+        );
       } else {
         lines.push(`Lorebook: ${scope.book.summary.name}`);
       }
@@ -2297,7 +3514,9 @@ function buildFullTraversalTreeOverview(scopes: TraversalScope[]): string {
         lines.push(`  ${rootSummary}`);
       }
       if (scope.book.tree.unassignedEntryIds.length) {
-        lines.push(`  [${scope.book.tree.rootId}] ROOT [leaf] (${scope.book.tree.unassignedEntryIds.length} entries)`);
+        lines.push(
+          `  - choiceId=${makeCategoryChoiceId(scope.book.summary.id, scope.book.tree.rootId)}; label=ROOT; type=leaf; descendantEntries=${scope.book.tree.unassignedEntryIds.length}`,
+        );
       }
       for (const childId of scopeNode.childIds) {
         pushNode(scope.book, childId, 0);
@@ -2405,11 +3624,35 @@ function buildSearchTraversalFrontier(
   };
 }
 
+function buildCandidatePoolPromptSummary(candidatePool: ScoredEntry[]): string[] {
+  if (!candidatePool.length) return ["Accumulated candidate pool: 0 dynamic candidates."];
+  const topCandidates = [...candidatePool]
+    .sort(
+      (left, right) =>
+        Number(right.reasons.includes("active_anchor")) - Number(left.reasons.includes("active_anchor")) ||
+        right.score - left.score ||
+        left.entry.label.localeCompare(right.entry.label),
+    )
+    .slice(0, 8);
+  return [
+    `Accumulated candidate pool: ${candidatePool.length} dynamic candidate${candidatePool.length === 1 ? "" : "s"}.`,
+    "Top pooled candidates:",
+    ...topCandidates.map(
+      (item) =>
+        `- ${item.entry.label} (${item.entry.worldBookName}); score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(
+          item.entry.summary || getEntryBody(item.entry),
+          120,
+        )}`,
+    ),
+  ];
+}
+
 function buildTraversalPrompt(
   queryText: string,
   frontier: TraversalFrontier,
   step: number,
   config: CharacterRetrievalConfig,
+  candidatePool: ScoredEntry[] = [],
 ): string {
   if (frontier.mode === "search") {
     return [
@@ -2419,10 +3662,13 @@ function buildTraversalPrompt(
       "- Choose from the global search results below to resolve the best lore entries for the next response.",
       "Rules:",
       "- Use only choiceIds exactly as shown below.",
-      "- Use action retrieve to select one or more shown entry results for final manifest selection.",
+      "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
+      "- Use action retrieve to add one or more shown entry results to the traversal candidate pool, then continue exploring.",
       '- Use action search to replace the current search frontier with a new global keyword search across all readable managed lorebooks. Include a short "query" string when you do this.',
-      "- Use action finish only when the current global search frontier already identifies the right entries and no narrower retrieve choice is needed.",
-      "- Pick 1-5 choiceIds maximum when using retrieve.",
+      "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
+      "- The candidate pool is additive. Retrieve only missing context; finish once the pool contains enough candidates for final entry selection.",
+      "- Treat directly mentioned active anchors already in the candidate pool as relevant; use search retrieval to add missing named entities or support lore.",
+      `- Pick 1-${getScopePickLimit(config)} choiceIds maximum when using retrieve.`,
       "- Do not invent new choiceIds or entry IDs.",
       `- Stay within ${config.traversalStepLimit} total steps.`,
       "",
@@ -2430,6 +3676,8 @@ function buildTraversalPrompt(
       `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
       `Current frontier: global search${frontier.searchQuery ? ` for "${frontier.searchQuery}"` : ""}`,
       `Global matches available: ${frontier.totalResults ?? frontier.searchResults.length}`,
+      "",
+      ...buildCandidatePoolPromptSummary(candidatePool),
       "",
       "Search result choices:",
       ...(frontier.searchResults.length
@@ -2450,16 +3698,22 @@ function buildTraversalPrompt(
     "Task:",
     "- Pick the most relevant traversal choices from the tree to retrieve for the next response.",
     "Rules:",
-    "- Pick 1-5 choiceIds maximum and prefer specific branches over broad branches.",
+    `- Pick 1-${getScopePickLimit(config)} choiceIds maximum and prefer specific branches over broad branches.`,
+    "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
     hasFullTreeOverview
       ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index."
       : "- Choose choiceIds only from the category list shown below.",
     "- Use action navigate when a shown category or document root still needs to be opened before retrieval.",
-    "- Use action retrieve when one or more shown categories are specific enough to resolve entries now.",
+    "- Use action retrieve to add one or more shown categories to the traversal candidate pool, then continue exploring.",
+    "- Do not use retrieve with empty choiceIds from a broad or root tree frontier; navigate to specific shown categories or search first.",
+    "- Use retrieve on broad parent categories only when you truly need a manifest from the whole branch; otherwise navigate to specific child categories.",
+    "- The candidate pool is additive. Avoid retrieving child scopes that are already covered by a retrieved parent unless they add missing specificity.",
     '- Use action search to run a global keyword search across all readable managed lorebooks when the shown tree choices do not clearly expose the needed concept. Include a short "query" string when you do this.',
-    "- Use action finish only when the current scope is already specific enough to resolve entries without choosing another node.",
+    "- Use action finish when the candidate pool is ready for final manifest selection. Include choiceIds if unretrieved shown categories should be added before finishing.",
     "- Do not pick entries directly from this tree frontier. Exact entry selection happens later after scope retrieval or search.",
     "- Pick tree choices whose content would be most useful for the next response.",
+    "- Preserve directly mentioned active anchors already in the candidate pool; retrieve additional branches for missing named entities or support lore.",
+    "- Do not replace active cast, place, object, or faction entries with abstract mechanics; mechanics should supplement the active anchors.",
     "- Consider world info, rules, places, systems, organizations, incidents, abilities, or factions when they matter to the scene, not just named people.",
     "- Do not stop at Characters if other categories better explain powers, organizations, command response, locations, vehicles, rules, or ongoing incidents.",
     `- Stay within ${config.traversalStepLimit} total steps.`,
@@ -2467,6 +3721,8 @@ function buildTraversalPrompt(
     buildPromptContext(queryText),
     `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
     `Current scope: ${frontier.scopeLabel || "All selected books"}`,
+    "",
+    ...buildCandidatePoolPromptSummary(candidatePool),
     "",
     hasFullTreeOverview ? "Full tree index:" : "Category choices:",
     ...(hasFullTreeOverview
@@ -2499,6 +3755,7 @@ async function selectTraversalEntries(
   trace: TraversalTraceStep[],
   maxDynamicEntries: number,
   excludedEntryIds: ReadonlySet<string> = EMPTY_ENTRY_ID_SET,
+  feedback?: DynamicRetrievalFeedbackSnapshot,
 ): Promise<TraversalSelectionResult> {
   const deterministic = Array.from(deterministicById.values());
   const booksById = new Map(books.map((book) => [book.summary.id, book]));
@@ -2506,8 +3763,335 @@ async function selectTraversalEntries(
   let activeSelectionQuery = queryText;
   let searchFrontier: TraversalSearchFrontier | null = null;
   const searchEvents: RetrievalSearchEvent[] = [];
-  const steps = [`Traversal continued from ${scopes.length} chosen scope(s).`];
+  const steps = [`Traversal started from ${scopes.length} root scope(s).`];
   let selectionReason: string | null = null;
+  let usedSearchFrontier = false;
+  const candidatePoolById = new Map<string, ScoredEntry>();
+  const sceneAnchorsById = new Map<string, ScoredEntry>();
+  let retrievedScopes: TraversalScope[] = [];
+
+  const getCandidatePool = (): ScoredEntry[] => Array.from(candidatePoolById.values());
+  const getCollapsedFallbackSelection = (): ScoredEntry[] => {
+    const limit = config.selectiveRetrieval ? Math.min(maxDynamicEntries, SELECTIVE_FALLBACK_LIMIT) : maxDynamicEntries;
+    return buildDeterministicSelection(
+      rankSelectionCandidates(queryText, deterministic, retrievedScopes.length ? retrievedScopes : scopes),
+      limit,
+    );
+  };
+
+  const mergeCandidate = (candidate: ScoredEntry): void => {
+    const existing = candidatePoolById.get(candidate.entry.entryId);
+    if (!existing) {
+      candidatePoolById.set(candidate.entry.entryId, candidate);
+      return;
+    }
+    candidatePoolById.set(candidate.entry.entryId, {
+      ...existing,
+      score: Math.max(existing.score, candidate.score),
+      reasons: uniqueStrings([...existing.reasons, ...candidate.reasons]),
+      selectionRole: mergeSelectionRole(existing.selectionRole, candidate.selectionRole),
+    });
+  };
+
+  const getEntryPrimaryScope = (entry: ScoredEntry["entry"]): TraversalScope | null => {
+    const book = booksById.get(entry.worldBookId);
+    if (!book) return null;
+    const path = getEntryCategoryPath(book.tree, entry.entryId);
+    const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
+    return { book, nodeId };
+  };
+
+  const addCandidatesToPool = (candidates: ScoredEntry[], candidateScopes: TraversalScope[]): void => {
+    for (const candidate of candidates) mergeCandidate(candidate);
+    if (candidateScopes.length) {
+      retrievedScopes = dedupeScopes([...retrievedScopes, ...candidateScopes]);
+    }
+  };
+
+  const addSearchCandidatesToPool = (candidates: ScoredEntry[]): void => {
+    const candidateScopes = candidates
+      .map((candidate) => getEntryPrimaryScope(candidate.entry))
+      .filter((scope): scope is TraversalScope => !!scope);
+    addCandidatesToPool(candidates, candidateScopes);
+  };
+
+  const resolveDirectEntryChoices = (choiceIds: string[]): ScoredEntry[] => {
+    const byId = new Map(deterministicById);
+    for (const [entryId, candidate] of candidatePoolById) byId.set(entryId, candidate);
+    const entryIds = uniqueStrings(
+      choiceIds
+        .flatMap(expandChoiceIdVariants)
+        .map((choiceId) => parseEntryChoiceId(choiceId) ?? choiceId)
+        .filter((entryId) => byId.has(entryId)),
+    );
+    return collectEntriesByIds(entryIds, byId);
+  };
+
+  const seedSceneAnchors = (): void => {
+    const anchors = buildDirectMentionCandidates(
+      queryText,
+      deterministic,
+      [],
+      Math.min(SCENE_ANCHOR_LIMIT, maxDynamicEntries),
+    ).map((candidate) => ({
+      ...candidate,
+      reasons: uniqueStrings([...candidate.reasons, "active_anchor"]),
+    }));
+    if (!anchors.length) return;
+
+    for (const anchor of anchors) {
+      sceneAnchorsById.set(anchor.entry.entryId, anchor);
+      mergeCandidate(anchor);
+    }
+    pushTrace(
+      trace,
+      "retrieve",
+      "Seed active anchors",
+      `Seeded ${anchors.length} directly mentioned active anchor candidate(s) from the current scene into the traversal pool before exploring support lore.`,
+      { entryCount: anchors.length },
+    );
+    steps.push(`Traversal seeded ${anchors.length} directly mentioned active anchor candidate(s).`);
+  };
+
+  const isBroadScopeSet = (targetScopes: TraversalScope[]): boolean =>
+    targetScopes.some((scope) => {
+      const node = scope.book.tree.nodes[scope.nodeId];
+      if (!node) return false;
+      const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
+      return node.childIds.length > 0 || descendantCount > Math.max(maxDynamicEntries, config.maxResults, 8);
+    });
+
+  const navigateBroadImplicitRetrieve = (reason: string, durationMs: number | null): boolean => {
+    const nextScopes = chooseDeterministicScopes(scopes, deterministicById, config);
+    if (!nextScopes.length || areSameScopes(scopes, nextScopes)) return false;
+    scopes = nextScopes;
+    searchFrontier = null;
+    selectionReason = reason;
+    pushTrace(
+      trace,
+      "navigate",
+      "Avoid broad retrieve",
+      `${reason} The controller requested the current broad scope without choiceIds, so Lore Recall opened ${nextScopes.length} narrower branch(es) instead of pooling the entire scope.`,
+      {
+        bookId: nextScopes[0]?.book.summary.id ?? null,
+        nodeId: nextScopes[0]?.nodeId ?? null,
+        durationMs,
+      },
+    );
+    steps.push(`Traversal avoided broad current-scope retrieval and opened ${nextScopes.length} narrower branch(es).`);
+    return true;
+  };
+
+  const buildFinalCandidateSet = (): ScoredEntry[] => {
+    const pooled = getCandidatePool();
+    if (!pooled.length) return [];
+    const directMentionCandidates = buildDirectMentionCandidates(
+      queryText,
+      pooled,
+      retrievedScopes,
+      Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries),
+    );
+    const directMentionById = new Map(directMentionCandidates.map((item) => [item.entry.entryId, item]));
+    const combined = pooled.map((item) => directMentionById.get(item.entry.entryId) ?? item);
+    const ranked = rankSelectionCandidates(queryText, combined, retrievedScopes);
+    const limit = Math.min(maxDynamicEntries, combined.length);
+    return buildDeterministicSelection(ranked, limit);
+  };
+
+  const finalizeAccumulatedSelection = async (
+    reason: string,
+    label: string,
+    durationMs: number | null,
+  ): Promise<TraversalSelectionResult> => {
+    let pooledCandidates = getCandidatePool();
+    const scopeCoreScopes = dedupeScopes(retrievedScopes.length ? retrievedScopes : scopes);
+    const scopeCoreSourceCandidates = pooledCandidates;
+    const supportSeeds = sceneAnchorsById.size
+      ? Array.from(sceneAnchorsById.values())
+      : pooledCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
+    const relatedSupport = buildRelatedSupportCandidates(
+      supportSeeds,
+      books,
+      excludedEntryIds,
+      new Set(supportSeeds.map((candidate) => candidate.entry.entryId)),
+      feedback,
+      Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - supportSeeds.length)),
+    );
+    if (relatedSupport.length) {
+      addSearchCandidatesToPool(relatedSupport);
+      pooledCandidates = getCandidatePool();
+      pushTrace(
+        trace,
+        "retrieve",
+        "Expand related support",
+        `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`,
+        { entryCount: relatedSupport.length, durationMs },
+      );
+      steps.push(`Traversal expanded ${relatedSupport.length} related support candidate(s) from selected entry content.`);
+    }
+    const finalScopes = dedupeScopes(retrievedScopes);
+    const rankedSceneAnchors = buildDeterministicSelection(
+      rankSelectionCandidates(queryText, Array.from(sceneAnchorsById.values()), finalScopes),
+      Math.min(maxDynamicEntries, sceneAnchorsById.size),
+    );
+    const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
+    const protectedScopeCore = selectProtectedScopeCore(
+      scopeCoreSourceCandidates,
+      queryText,
+      scopeCoreScopes,
+      Math.max(0, maxDynamicEntries - rankedSceneAnchors.length),
+      sceneAnchorIds,
+    );
+    const protectedScopeCoreIds = new Set(protectedScopeCore.map((item) => item.entry.entryId));
+    const manifestCandidates = mergeScoredEntryLists(buildFinalCandidateSet(), protectedScopeCore);
+    const supportManifestCandidates = manifestCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
+    const protectedRelatedSupport = selectProtectedRelatedSupport(
+      supportManifestCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId)),
+      Math.min(
+        PROTECTED_RELATED_SUPPORT_LIMIT,
+        Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length),
+      ),
+    );
+    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
+    const sceneSupportCandidates = supportManifestCandidates.filter(
+      (item) => !protectedScopeCoreIds.has(item.entry.entryId) && !protectedRelatedIds.has(item.entry.entryId),
+    );
+    const protectedSceneSupport = selectProtectedSceneSupport(
+      sceneSupportCandidates,
+      queryText,
+      finalScopes,
+      Math.min(
+        PROTECTED_SCENE_SUPPORT_LIMIT,
+        Math.max(
+          0,
+          maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length,
+        ),
+      ),
+    );
+    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
+    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
+    const finalCandidatePool = [
+      ...rankedSceneAnchors,
+      ...protectedScopeCore,
+      ...protectedRelatedSupport,
+      ...protectedSceneSupport,
+      ...optionalSupportCandidates.slice(
+        0,
+        Math.max(
+          0,
+          maxDynamicEntries -
+            rankedSceneAnchors.length -
+            protectedScopeCore.length -
+            protectedRelatedSupport.length -
+            protectedSceneSupport.length,
+        ),
+      ),
+    ];
+    const manifests = buildScopedManifests(finalCandidatePool, finalScopes);
+
+    if (!pooledCandidates.length || !finalCandidatePool.length) {
+      pushTrace(
+        trace,
+        "finish",
+        label,
+        `${reason} Exploration finished without accumulated dynamic candidates.`,
+        { entryCount: 0, durationMs },
+      );
+      return {
+        scopes: finalScopes.length ? finalScopes : scopes,
+        selected: [],
+        candidates: pooledCandidates,
+        manifests,
+        retrievedScopes: finalScopes,
+        fallbackReason: null,
+        selectionReason: reason,
+        usedSearchFrontier,
+        searchEvents,
+        steps: [...steps, "Traversal finished with no accumulated dynamic candidates."],
+        trace,
+      };
+    }
+
+    const remainingSupportSlots = Math.max(
+      0,
+      maxDynamicEntries -
+        rankedSceneAnchors.length -
+        protectedScopeCore.length -
+        protectedRelatedSupport.length -
+        protectedSceneSupport.length,
+    );
+    const supportSelectionLimit = config.selectiveRetrieval
+      ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT)
+      : remainingSupportSlots;
+    const selectedSupport =
+      config.selectiveRetrieval && supportSelectionLimit > 0
+        ? await maybeSelectEntries(
+            queryText,
+            optionalSupportCandidates,
+            config,
+            controller,
+            allowController,
+            finalScopes,
+            supportSelectionLimit,
+          )
+        : config.selectiveRetrieval
+          ? []
+          : optionalSupportCandidates.slice(0, supportSelectionLimit);
+    const selected = [
+      ...rankedSceneAnchors,
+      ...protectedScopeCore,
+      ...protectedRelatedSupport,
+      ...protectedSceneSupport,
+      ...selectedSupport,
+    ].slice(0, maxDynamicEntries);
+    const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
+    const selectedScopeCoreCount = selected.filter((item) => protectedScopeCoreIds.has(item.entry.entryId)).length;
+    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
+    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
+    const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s)` : "";
+    const scopeCoreSummary = selectedScopeCoreCount
+      ? `${anchorSummary ? " and" : ", including"} ${selectedScopeCoreCount} protected selected-scope core candidate(s)`
+      : "";
+    const relatedSummary = selectedRelatedSupportCount
+      ? `${anchorSummary || scopeCoreSummary ? " and" : ", including"} ${selectedRelatedSupportCount} protected related support candidate(s)`
+      : "";
+    const sceneSupportSummary = selectedSceneSupportCount
+      ? `${anchorSummary || scopeCoreSummary || relatedSummary ? " and" : ", including"} ${selectedSceneSupportCount} protected scene support candidate(s)`
+      : "";
+
+    pushTrace(
+      trace,
+      "finish",
+      label,
+      `${reason} Exploration accumulated ${pooledCandidates.length} dynamic candidate(s) across ${Math.max(finalScopes.length, 1)} retrieved scope(s).`,
+      { entryCount: pooledCandidates.length, durationMs },
+    );
+    pushTrace(
+      trace,
+      "manifest_select",
+      "Select accumulated entries",
+      `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary}${scopeCoreSummary}${relatedSummary}${sceneSupportSummary} from ${pooledCandidates.length} pooled candidate(s).`,
+      { entryCount: selected.length },
+    );
+
+    return {
+      scopes: finalScopes.length ? finalScopes : scopes,
+      selected,
+      candidates: pooledCandidates,
+      manifests,
+      retrievedScopes: finalScopes,
+      fallbackReason: null,
+      selectionReason: reason,
+      usedSearchFrontier,
+      searchEvents,
+      steps: [
+        ...steps,
+        `Traversal accumulated ${pooledCandidates.length} pulled candidate(s).`,
+        `Final manifest selection kept ${selected.length} dynamic entry candidate(s).`,
+      ],
+      trace,
+    };
+  };
 
   if (!deterministic.length) {
     pushTrace(trace, "fallback", "No traversal candidates", "Traversal found no scored entries, so nothing was injected.");
@@ -2526,6 +4110,8 @@ async function selectTraversalEntries(
     };
   }
 
+  seedSceneAnchors();
+
   if (!allowController) {
     const fallbackSelection = await selectEntriesForScopes(
       queryText,
@@ -2537,6 +4123,7 @@ async function selectTraversalEntries(
       trace,
       maxDynamicEntries,
       excludedEntryIds,
+      feedback,
     );
     pushTrace(
       trace,
@@ -2567,18 +4154,22 @@ async function selectTraversalEntries(
 
     if (frontier.mode === "tree" && !frontier.categories.length) {
       const autoSelected = collectCandidatesForScopes(
-        activeSelectionQuery,
+        queryText,
         scopes,
         [],
         deterministicById,
         false,
         excludedEntryIds,
+        feedback,
       );
       if (!autoSelected.length) {
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection("Traversal reached an empty frontier after retrieving candidates.", "Finish traversal", null);
+        }
         pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -2590,37 +4181,26 @@ async function selectTraversalEntries(
           trace,
         };
       }
-      const finalAutoSelected = config.selectiveRetrieval
-        ? await maybeSelectEntries(activeSelectionQuery, autoSelected, config, controller, allowController, scopes, maxDynamicEntries)
-        : autoSelected;
-      const manifests = buildScopedManifests(autoSelected, scopes);
+      addCandidatesToPool(autoSelected, scopes);
       pushTrace(
         trace,
         "retrieve",
         "Retrieve current scope",
-        `Current scope had no deeper categories, so Lore Recall resolved ${finalAutoSelected.length} entry candidate(s) from the current node scope.`,
-        { entryCount: finalAutoSelected.length },
+        `Current scope had no deeper categories, so Lore Recall added ${autoSelected.length} entry candidate(s) to the traversal pool.`,
+        { entryCount: autoSelected.length },
       );
-      return {
-        scopes,
-        selected: finalAutoSelected,
-        candidates: autoSelected,
-        manifests,
-        retrievedScopes: scopes,
-        fallbackReason: null,
-        selectionReason,
-        usedSearchFrontier: false,
-        searchEvents,
-        steps: [...steps, `Traversal selected ${finalAutoSelected.length} entry candidate(s).`],
-        trace,
-      };
+      steps.push(`Traversal added ${autoSelected.length} candidate(s) from the current scope.`);
+      return finalizeAccumulatedSelection("Traversal reached a leaf frontier.", "Finish traversal", null);
     }
 
     if (frontier.mode === "search" && !frontier.searchResults.length) {
+      if (getCandidatePool().length) {
+        return finalizeAccumulatedSelection("Global search had no more results after retrieval.", "Finish traversal", null);
+      }
       pushTrace(trace, "fallback", "Empty search frontier", "Global search did not expose any frontier choices, so collapsed retrieval was used.");
       return {
         scopes,
-        selected: deterministic.slice(0, maxDynamicEntries),
+        selected: getCollapsedFallbackSelection(),
         candidates: [],
         manifests: [],
         retrievedScopes: [],
@@ -2634,23 +4214,26 @@ async function selectTraversalEntries(
     }
 
     const response = await runControllerJson(
-      buildTraversalPrompt(activeSelectionQuery, frontier, step, config),
+      buildTraversalPrompt(activeSelectionQuery, frontier, step, config, getCandidatePool()),
       controller,
       RETRIEVAL_TRAVERSAL_SYSTEM_PROMPT,
       "Traverse retrieval tree",
     );
     const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
     if (!response.parsed) {
+      if (getCandidatePool().length) {
+        return finalizeAccumulatedSelection(`${fallbackReason} Finalizing accumulated traversal candidates.`, "Finish traversal", response.durationMs);
+      }
       pushTrace(trace, "fallback", "Controller failed", fallbackReason);
       return {
         scopes,
-        selected: deterministic.slice(0, maxDynamicEntries),
+        selected: getCollapsedFallbackSelection(),
         candidates: [],
         manifests: [],
         retrievedScopes: [],
         fallbackReason: `${fallbackReason} Collapsed retrieval was used instead.`,
         selectionReason,
-        usedSearchFrontier: !!searchFrontier,
+        usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
         searchEvents,
         steps: [...steps, "Collapsed fallback used because traversal controller output was invalid."],
         trace,
@@ -2670,10 +4253,13 @@ async function selectTraversalEntries(
 
     if (action === "navigate") {
       if (frontier.mode !== "tree") {
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection("Controller tried to navigate from a search-result frontier after accumulating candidates.", "Finish traversal", response.durationMs);
+        }
         pushTrace(trace, "fallback", "Invalid navigate", "Controller tried to navigate from a search-result frontier.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -2685,19 +4271,26 @@ async function selectTraversalEntries(
           trace,
         };
       }
-      const nextScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
+      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
 
       if (!nextScopes.length) {
-        pushTrace(trace, "fallback", "Invalid navigate", "Controller picked no valid traversal branches.");
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(
+            `Controller picked no valid traversal branches after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`,
+            "Finish traversal",
+            response.durationMs,
+          );
+        }
+        pushTrace(trace, "fallback", "Invalid navigate", `Controller picked no valid traversal branches. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`);
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
           fallbackReason: "Traversal controller chose no valid branches, so collapsed retrieval was used instead.",
           selectionReason,
-          usedSearchFrontier: !!searchFrontier,
+          usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
           searchEvents,
           steps: [...steps, "Collapsed fallback used because no valid traversal branch was selected."],
           trace,
@@ -2725,13 +4318,16 @@ async function selectTraversalEntries(
         typeof response.parsed.query === "string" && response.parsed.query.trim()
           ? response.parsed.query.trim()
           : activeSelectionQuery;
-      const rescored = scoreEntries(searchQuery, books, excludedEntryIds);
+      const rescored = scoreEntries(searchQuery, books, excludedEntryIds, feedback);
       const frontierResults = rescored.slice(0, Math.max(TRAVERSAL_SEARCH_LIMIT, maxDynamicEntries * 3));
       if (!frontierResults.length) {
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(`Search "${searchQuery}" found no additional results.`, "Finish traversal", response.durationMs);
+        }
         pushTrace(trace, "fallback", "Search found nothing", `Search "${searchQuery}" found no global traversal matches.`);
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
@@ -2745,6 +4341,7 @@ async function selectTraversalEntries(
       }
       searchFrontier = { query: searchQuery, results: frontierResults };
       activeSelectionQuery = searchQuery;
+      usedSearchFrontier = true;
       const previewMatches = buildPreviewNodes(frontierResults.slice(0, Math.min(frontierResults.length, 8)), booksById);
       const searchSummary = `${reason} Global search matched ${rescored.length} entry result${rescored.length === 1 ? "" : "s"} across ${books.length} readable managed book${books.length === 1 ? "" : "s"}.`;
       searchEvents.push({
@@ -2788,15 +4385,27 @@ async function selectTraversalEntries(
     if (action === "retrieve" || action === "finish") {
       if (frontier.mode === "search") {
         const frontierById = new Map(searchFrontier?.results.map((item) => [item.entry.entryId, item]) ?? []);
-        const requestedEntryIds = uniqueStrings(choiceIds.map(parseEntryChoiceId).filter((value): value is string => !!value));
+        const requestedEntryIds = uniqueStrings(
+          choiceIds
+            .flatMap(expandChoiceIdVariants)
+            .map(parseEntryChoiceId)
+            .filter((value): value is string => !!value),
+        );
         const selectedCandidates = requestedEntryIds.length
           ? collectEntriesByIds(requestedEntryIds, frontierById)
           : searchFrontier?.results ?? [];
         if (!selectedCandidates.length) {
+          if (getCandidatePool().length) {
+            return finalizeAccumulatedSelection(
+              `${reason} Search-result choices did not resolve after accumulating candidates.`,
+              "Finish global search",
+              response.durationMs,
+            );
+          }
           pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal search frontier did not resolve any entry results.");
           return {
             scopes,
-            selected: deterministic.slice(0, maxDynamicEntries),
+            selected: getCollapsedFallbackSelection(),
             candidates: [],
             manifests: [],
             retrievedScopes: [],
@@ -2809,110 +4418,186 @@ async function selectTraversalEntries(
           };
         }
 
-        const finalSelected = config.selectiveRetrieval
-          ? await maybeSelectEntries(activeSelectionQuery, selectedCandidates, config, controller, allowController, [], maxDynamicEntries)
-          : selectedCandidates;
-
+        addSearchCandidatesToPool(selectedCandidates);
         selectionReason = reason;
         pushTrace(
           trace,
-          action === "finish" ? "finish" : "retrieve",
-          action === "finish" ? "Finish global search" : "Retrieve search results",
-          `${reason} Resolved ${finalSelected.length} final dynamic entry candidate(s) from the global search frontier.`,
-          { entryCount: finalSelected.length, durationMs: response.durationMs },
+          "retrieve",
+          action === "finish" ? "Retrieve search results before finish" : "Retrieve search results",
+          `${reason} Added ${selectedCandidates.length} search result candidate(s) to the traversal pool.`,
+          { entryCount: selectedCandidates.length, durationMs: response.durationMs },
         );
+        steps.push(`Traversal added ${selectedCandidates.length} candidate(s) from global search.`);
 
+        searchFrontier = null;
+        activeSelectionQuery = queryText;
+        if (action === "finish") {
+          return finalizeAccumulatedSelection(reason, "Finish global search", response.durationMs);
+        }
+        continue;
+      }
+
+      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
+      if (choiceIds.length > 0 && !requestedScopes.length) {
+        const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
+        if (directChoiceCandidates.length) {
+          addSearchCandidatesToPool(directChoiceCandidates);
+          pushTrace(
+            trace,
+            "retrieve",
+            "Recover direct entry choices",
+            `${reason} The controller returned entry IDs while on a tree frontier, so Lore Recall recovered ${directChoiceCandidates.length} matching entry candidate(s) instead of falling back.`,
+            { entryCount: directChoiceCandidates.length, durationMs: response.durationMs },
+          );
+          steps.push(`Traversal recovered ${directChoiceCandidates.length} direct entry candidate(s) from tree-frontier choiceIds.`);
+          if (action === "finish") {
+            return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+          }
+          continue;
+        }
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(
+            `${reason} Tree choiceIds did not resolve after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`,
+            "Finish traversal",
+            response.durationMs,
+          );
+        }
+        pushTrace(
+          trace,
+          "fallback",
+          "Retrieve resolved no choices",
+          `Traversal controller chose tree choiceIds that did not resolve to any category: ${formatChoiceIdList(choiceIds)}.`,
+        );
         return {
           scopes,
-          selected: finalSelected,
-          candidates: selectedCandidates,
+          selected: getCollapsedFallbackSelection(),
+          candidates: [],
           manifests: [],
-          retrievedScopes: scopes,
-          fallbackReason: null,
+          retrievedScopes: [],
+          fallbackReason: "Traversal controller chose unknown tree choiceIds, so collapsed retrieval was used instead.",
           selectionReason,
-          usedSearchFrontier: true,
+          usedSearchFrontier,
           searchEvents,
-          steps: [...steps, `Traversal selected ${finalSelected.length} entry candidate(s) from global search.`],
+          steps: [...steps, "Collapsed fallback used because traversal tree choiceIds did not resolve."],
           trace,
         };
       }
-
-      const requestedScopes = resolveTraversalChoiceScopes(choiceIds, booksById);
-      const retrievedScopes = action === "finish" ? scopes : requestedScopes.length ? requestedScopes : scopes;
-      const selectedCandidates = collectCandidatesForScopes(activeSelectionQuery, retrievedScopes, [], deterministicById, false, excludedEntryIds);
+      const implicitCurrentScopeRetrieve = !requestedScopes.length && choiceIds.length === 0;
+      if (implicitCurrentScopeRetrieve && isBroadScopeSet(scopes)) {
+        if (action === "finish" && getCandidatePool().length) {
+          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        }
+        if (navigateBroadImplicitRetrieve(reason, response.durationMs)) {
+          continue;
+        }
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+        }
+        pushTrace(trace, "fallback", "Avoid broad retrieve", "Traversal controller requested the current broad scope without choiceIds, and no narrower branch was available.");
+        return {
+          scopes,
+          selected: getCollapsedFallbackSelection(),
+          candidates: [],
+          manifests: [],
+          retrievedScopes: [],
+          fallbackReason: "Traversal controller requested an implicit broad retrieve, so collapsed retrieval was used instead.",
+          selectionReason,
+          usedSearchFrontier,
+          searchEvents,
+          steps: [...steps, "Collapsed fallback used because traversal requested an implicit broad retrieve."],
+          trace,
+        };
+      }
+      const scopesToRetrieve =
+        requestedScopes.length
+          ? requestedScopes
+          : action === "finish" && getCandidatePool().length
+            ? []
+            : scopes;
+      const selectedCandidates = scopesToRetrieve.length
+        ? collectCandidatesForScopes(queryText, scopesToRetrieve, [], deterministicById, false, excludedEntryIds, feedback)
+        : [];
 
       if (!selectedCandidates.length) {
+        if (getCandidatePool().length) {
+          return finalizeAccumulatedSelection(
+            `${reason} Selected tree choices resolved no new entries after accumulating candidates.`,
+            "Finish traversal",
+            response.durationMs,
+          );
+        }
         pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal did not resolve any entries from the selected choices.");
         return {
           scopes,
-          selected: deterministic.slice(0, maxDynamicEntries),
+          selected: getCollapsedFallbackSelection(),
           candidates: [],
           manifests: [],
           retrievedScopes: [],
           fallbackReason: "Traversal controller returned no usable entries, so collapsed retrieval was used instead.",
           selectionReason,
-          usedSearchFrontier: false,
+          usedSearchFrontier,
           searchEvents,
           steps: [...steps, "Collapsed fallback used because traversal did not resolve any entries."],
           trace,
         };
       }
 
-      const finalSelected = config.selectiveRetrieval
-        ? await maybeSelectEntries(activeSelectionQuery, selectedCandidates, config, controller, allowController, retrievedScopes, maxDynamicEntries)
-        : selectedCandidates;
-      const manifests = buildScopedManifests(selectedCandidates, retrievedScopes);
+      addCandidatesToPool(selectedCandidates, scopesToRetrieve);
       selectionReason = reason;
 
       pushTrace(
         trace,
-        action === "finish" ? "finish" : "retrieve",
-        action === "finish" ? "Finish traversal" : "Retrieve entries",
-        `${reason} Resolved ${finalSelected.length} entry candidate(s) from ${Math.max(retrievedScopes.length, 1)} retrieval scope(s).`,
-        { entryCount: finalSelected.length, durationMs: response.durationMs },
+        "retrieve",
+        action === "finish" ? "Retrieve entries before finish" : "Retrieve entries",
+        `${reason} Added ${selectedCandidates.length} entry candidate(s) from ${Math.max(scopesToRetrieve.length, 1)} retrieval scope(s) to the traversal pool.`,
+        { entryCount: selectedCandidates.length, durationMs: response.durationMs },
       );
+      steps.push(`Traversal added ${selectedCandidates.length} candidate(s) from ${Math.max(scopesToRetrieve.length, 1)} scope(s).`);
 
-      return {
-        scopes: retrievedScopes,
-        selected: finalSelected,
-        candidates: selectedCandidates,
-        manifests,
-        retrievedScopes,
-        fallbackReason: null,
-        selectionReason,
-        usedSearchFrontier: false,
-        searchEvents,
-        steps: [...steps, `Traversal selected ${finalSelected.length} entry candidate(s).`],
-        trace,
-      };
+      if (scopesToRetrieve.length) scopes = scopesToRetrieve;
+      if (action === "finish") {
+        return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
+      }
+      continue;
     }
 
+    if (getCandidatePool().length) {
+      return finalizeAccumulatedSelection(`Traversal controller returned unsupported action "${action || "empty"}" after accumulating candidates.`, "Finish traversal", response.durationMs);
+    }
     pushTrace(trace, "fallback", "Unknown action", `Traversal controller returned unsupported action "${action || "empty"}".`);
     return {
       scopes,
-      selected: deterministic.slice(0, maxDynamicEntries),
+      selected: getCollapsedFallbackSelection(),
       candidates: [],
       manifests: [],
       retrievedScopes: [],
       fallbackReason: "Traversal controller returned an unsupported action, so collapsed retrieval was used instead.",
       selectionReason,
-      usedSearchFrontier: !!searchFrontier,
+      usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
       searchEvents,
       steps: [...steps, "Collapsed fallback used because traversal controller returned an unsupported action."],
       trace,
     };
   }
 
+  if (getCandidatePool().length) {
+    return finalizeAccumulatedSelection(
+      `Traversal hit the ${config.traversalStepLimit}-step limit after accumulating candidates.`,
+      "Finish traversal",
+      null,
+    );
+  }
+
   pushTrace(trace, "fallback", "Step limit reached", `Traversal hit the ${config.traversalStepLimit}-step limit and fell back to collapsed retrieval.`);
   return {
     scopes,
-    selected: deterministic.slice(0, maxDynamicEntries),
+    selected: getCollapsedFallbackSelection(),
     candidates: [],
     manifests: [],
     retrievedScopes: [],
     fallbackReason: `Traversal exhausted its ${config.traversalStepLimit}-step limit, so collapsed retrieval was used instead.`,
     selectionReason,
-    usedSearchFrontier: !!searchFrontier,
+    usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
     searchEvents,
     steps: [...steps, "Collapsed fallback used because traversal exceeded the configured step limit."],
     trace,
@@ -2930,7 +4615,7 @@ function buildPreviewNodes(selected: ScoredEntry[], booksById: Map<string, Runti
       breadcrumb: book ? getEntryBreadcrumb(item.entry, book.tree) : item.entry.label,
       score: Number(item.score.toFixed(2)),
       reasons: item.reasons,
-      previewText: truncateText(getEntryBody(item.entry), 240),
+      previewText: truncateText(getEntryInjectionBody(item.entry), 240),
       selectionRole: item.selectionRole,
     };
   });
@@ -2973,8 +4658,9 @@ function buildInjectionText(
       `${included.length + 1}. ${[...pathLabels, item.entry.label].join(" > ")}`,
       `Book: ${item.entry.worldBookName}`,
       item.entry.aliases.length ? `Aliases: ${item.entry.aliases.join(", ")}` : "",
-      branchSummary ? `Branch summary: ${branchSummary}` : "",
-      getEntryBody(item.entry),
+      branchSummary ? `Category summary: ${branchSummary}` : "",
+      "Entry content:",
+      getEntryInjectionBody(item.entry),
     ]
       .filter(Boolean)
       .join("\n");
@@ -3061,7 +4747,7 @@ export async function buildRetrievalPreview(
   } else {
     steps.push(`No native constant entries were prepared; ${remainingDynamicSlots} dynamic slot(s) are available.`);
   }
-  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds);
+  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds, options.dynamicFeedback);
   const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
   let selectedScopes: TraversalScope[] = [];
   let pulledCandidates: ScoredEntry[] = [];
@@ -3080,14 +4766,33 @@ export async function buildRetrievalPreview(
     const scopeSelectionStartedAt = Date.now();
     const scopeSelection =
       config.searchMode === "traversal"
-        ? await chooseTraversalScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace)
+        ? {
+            scopes: chosenBooks.map((book) => ({ book, nodeId: book.tree.rootId })),
+            fallbackPath: [] as string[],
+            selectionReason: "Exploratory traversal starts from selected book roots.",
+          }
         : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
     const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
     const initiallySelectedScopes = scopeSelection.scopes;
     selectedScopes = scopeSelection.scopes;
     selectionReason = scopeSelection.selectionReason;
     fallbackPath.push(...scopeSelection.fallbackPath);
-    steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+    if (config.searchMode === "traversal") {
+      pushTrace(
+        trace,
+        "choose_scope",
+        "Start exploratory traversal",
+        `${selectionReason} Started from ${selectedScopes.length} root scope(s): ${buildTraceScopeSummary(selectedScopes)}.`,
+        {
+          bookId: selectedScopes[0]?.book.summary.id ?? null,
+          nodeId: selectedScopes[0]?.nodeId ?? null,
+          entryCount: selectedScopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
+        },
+      );
+      steps.push(`Exploratory traversal started from ${selectedScopes.length} root scope(s).`);
+    } else {
+      steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
+    }
 
     const initialSelectionReasons = new Map(
       selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
@@ -3126,6 +4831,7 @@ export async function buildRetrievalPreview(
             trace,
             maxDynamicEntries,
             reservedEntryIds,
+            options.dynamicFeedback,
           )
         : await selectEntriesForScopes(
             recentConversation,
@@ -3137,6 +4843,7 @@ export async function buildRetrievalPreview(
             trace,
             maxDynamicEntries,
             reservedEntryIds,
+            options.dynamicFeedback,
           );
     entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
     selectedScopes = entrySelection.scopes;
@@ -3160,7 +4867,7 @@ export async function buildRetrievalPreview(
     }
     steps.push(
       usedSearchFrontier
-        ? `Resolved ${pulledCandidates.length} pulled entry candidate(s) from the global search frontier.`
+        ? `Resolved ${pulledCandidates.length} pulled entry candidate(s), including global search contribution(s).`
         : `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`,
     );
     steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
@@ -3168,14 +4875,19 @@ export async function buildRetrievalPreview(
       const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
       const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map(), refinedReasons);
       if (refinedScopePreviews.length) {
+        const scopeEventLabel = config.searchMode === "traversal" ? "Retrieved scopes" : "Refined scopes";
+        const scopeEventSummary =
+          config.searchMode === "traversal"
+            ? `Traversal accumulated candidates from ${refinedScopePreviews.length} retrieved scope(s).`
+            : `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`;
         emitProgress(reportProgress, {
           type: "item",
           item: createFeedItem(
             "scope",
-            "Refined scopes",
-            `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`,
+            scopeEventLabel,
+            scopeEventSummary,
             {
-              phase: "refine_scope",
+              phase: config.searchMode === "traversal" ? "retrieve" : "refine_scope",
               count: refinedScopePreviews.length,
               scopes: refinedScopePreviews,
               details: selectionReason ? [selectionReason] : undefined,
@@ -3196,7 +4908,7 @@ export async function buildRetrievalPreview(
         "pulled",
         "Pulled candidates",
         usedSearchFrontier
-          ? `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from the global search frontier.`
+          ? `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"}, including global search contribution(s).`
           : `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from ${Math.max(selectedScopes.length, 1)} scope(s).`,
         {
           phase: "retrieve",
@@ -3229,8 +4941,8 @@ export async function buildRetrievalPreview(
         "manifest",
         "Manifest selection",
         usedSearchFrontier
-          ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} global search result${pulledNodes.length === 1 ? "" : "s"}.`
-          : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} from ${pulledNodes.length} scoped manifest entr${pulledNodes.length === 1 ? "y" : "ies"}.`,
+          ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal and search manifest selection.`
+          : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal manifest selection.`,
         {
           phase: "manifest_select",
           count: manifestSelectedEntries.length,

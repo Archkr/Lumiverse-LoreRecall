@@ -33,6 +33,7 @@ export const DEFAULT_CHARACTER_CONFIG: CharacterRetrievalConfig = {
   maxResults: 6,
   maxTraversalDepth: 3,
   traversalStepLimit: 5,
+  scopePickLimit: 5,
   tokenBudget: 6,
   rerankEnabled: false,
   selectiveRetrieval: true,
@@ -254,6 +255,11 @@ export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfi
       typeof next.traversalStepLimit === "number"
         ? next.traversalStepLimit
         : DEFAULT_CHARACTER_CONFIG.traversalStepLimit,
+      1,
+      24,
+    ),
+    scopePickLimit: clampInt(
+      typeof next.scopePickLimit === "number" ? next.scopePickLimit : DEFAULT_CHARACTER_CONFIG.scopePickLimit,
       1,
       24,
     ),

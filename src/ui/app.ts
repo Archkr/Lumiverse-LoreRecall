@@ -49,7 +49,7 @@ import {
 } from "./helpers";
 import { LORE_RECALL_CSS } from "./styles";
 
-/* The Lore Recall brand mark - refined tree-graph in amber for the drawer tab. */
+/* The Lore Recall brand mark - refined tree-graph using the host theme color. */
 const TREE_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="5.5" r="1.8"/><circle cx="5" cy="18.5" r="1.8"/><circle cx="19" cy="12" r="1.8"/><path d="M6.7 5.5h6a4 4 0 0 1 4 4v0.5"/><path d="M6.7 18.5h6a4 4 0 0 0 4-4v-0.5"/></svg>`;
 
 /* Single icon set. 16x16 viewBox, currentColor, stroke 1.6. Use via innerHTML. */
@@ -151,7 +151,6 @@ export function setup(ctx: SpindleFrontendContext) {
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
   let drawerFeedFilter: DrawerFeedFilter = "all";
-  const drawerSessionExpansion = new Map<string, boolean>();
   let sourceFilter = "";
   let workspaceSearch = "";
   let workspaceSection: WorkspaceSection = "sources";
@@ -887,6 +886,54 @@ export function setup(ctx: SpindleFrontendContext) {
     );
   }
 
+  function buildOperationReport(operation: OperationUpdate): string {
+    return JSON.stringify(
+      {
+        capturedAt: Date.now(),
+        activeChatId: currentState?.activeChatId ?? null,
+        activeCharacterId: currentState?.activeCharacterId ?? null,
+        activeCharacterName: currentState?.activeCharacterName ?? null,
+        operation: {
+          id: operation.id,
+          kind: operation.kind,
+          status: operation.status,
+          title: operation.title,
+          message: operation.message,
+          percent: operation.percent,
+          current: operation.current,
+          total: operation.total,
+          phase: operation.phase ?? null,
+          bookId: operation.bookId ?? null,
+          bookName: operation.bookName ?? null,
+          chunkCurrent: operation.chunkCurrent ?? null,
+          chunkTotal: operation.chunkTotal ?? null,
+          retryable: operation.retryable,
+          finishedAt: operation.finishedAt ?? null,
+          scope: operation.scope ?? null,
+        },
+        issues: (operation.issues ?? []).map((issue, index) => ({
+          index: index + 1,
+          severity: issue.severity,
+          message: issue.message,
+          phase: issue.phase ?? null,
+          bookId: issue.bookId ?? null,
+          bookName: issue.bookName ?? null,
+          debugPayload: issue.debugPayload ?? null,
+        })),
+      },
+      null,
+      2,
+    );
+  }
+
+  function copyOperationReport(operation: OperationUpdate): void {
+    void copyTextToClipboard(
+      buildOperationReport(operation),
+      "Operation report copied",
+      "Send that report back here and we can inspect the operation directly.",
+    );
+  }
+
   function copyOperationDebugPayload(operation: OperationUpdate): void {
     const payload = getOperationDebugPayload(operation);
     if (!payload) {
@@ -1063,11 +1110,14 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     const debugPayload = getOperationDebugPayload(operation);
-    if (debugPayload && !compact) {
+    if (!compact) {
       const actions = createElement("div", "lore-cluster");
-      actions.appendChild(
-        createButton("Copy debug payload", "lore-btn-link", () => copyOperationDebugPayload(operation)),
-      );
+      actions.appendChild(createButton("Copy report", "lore-btn-link", () => copyOperationReport(operation)));
+      if (debugPayload) {
+        actions.appendChild(
+          createButton("Copy debug payload", "lore-btn-link", () => copyOperationDebugPayload(operation)),
+        );
+      }
       wrap.appendChild(actions);
     }
     return wrap;
@@ -1351,8 +1401,10 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function itemMatchesFeedFilter(item: RetrievalFeedItem, filter: DrawerFeedFilter): boolean {
-    if (filter === "all") return true;
-    return item.kind === filter;
+    if (filter === "issue") return item.kind === "issue" || item.tone === "warn" || item.tone === "error";
+    if (filter === "entries") return item.kind === "pulled" || item.kind === "manifest" || item.kind === "injected";
+    if (filter === "steps") return item.kind === "scope" || item.kind === "search" || item.kind === "reserved" || item.kind === "trace";
+    return item.kind !== "trace" && item.kind !== "reserved";
   }
 
   function getFeedItemGlyph(item: RetrievalFeedItem): string {
@@ -1376,18 +1428,25 @@ export function setup(ctx: SpindleFrontendContext) {
     }
   }
 
-  function getFeedMetaBits(item: RetrievalFeedItem): string[] {
-    const bits: string[] = [];
-    if (item.kind === "search" && item.searchQuery) {
-      bits.push(item.searchGlobal ? "global search" : "search");
-      bits.push(`query "${item.searchQuery}"`);
-    } else if (item.phase && item.phase !== "session") {
-      bits.push(item.phase.replace(/_/g, " "));
+  function getFeedItemVerb(item: RetrievalFeedItem): string {
+    switch (item.kind) {
+      case "scope":
+        return "Scope";
+      case "search":
+        return "Search";
+      case "manifest":
+        return "Manifest";
+      case "reserved":
+        return "Constants";
+      case "pulled":
+        return "Pulled";
+      case "injected":
+        return "Injected";
+      case "issue":
+        return "Issue";
+      default:
+        return item.phase === "controller" ? "Controller" : "Step";
     }
-    if (typeof item.count === "number") {
-      bits.push(item.kind === "search" ? `${item.count} match${item.count === 1 ? "" : "es"}` : `${item.count}`);
-    }
-    return bits;
   }
 
   function getFeedItemTone(item: RetrievalFeedItem): NoticeTone {
@@ -1454,15 +1513,12 @@ export function setup(ctx: SpindleFrontendContext) {
     return Math.max(0, end - session.startedAt);
   }
 
-  function isSessionExpanded(session: RetrievalSession, index: number): boolean {
-    const saved = drawerSessionExpansion.get(session.id);
-    if (typeof saved === "boolean") return saved;
-    return session.status === "running" || index === 0;
-  }
-
   function formatSelectionRoleLabel(role: PreviewNode["selectionRole"]): string {
     if (!role) return "entry";
     const labels: Record<NonNullable<PreviewNode["selectionRole"]>, string> = {
+      active_anchor: "active anchor",
+      background_mention: "background mention",
+      support_context: "support context",
       recent_mention: "recent mention",
       context_mention: "context mention",
       label_match: "label match",
@@ -1475,141 +1531,81 @@ export function setup(ctx: SpindleFrontendContext) {
     return labels[role] ?? role.replace(/_/g, " ");
   }
 
-  function getSelectionRoleTone(role: PreviewNode["selectionRole"]): "good" | "neutral" {
-    switch (role) {
-      case "recent_mention":
-      case "context_mention":
-      case "label_match":
-      case "alias_match":
-        return "good";
-      default:
-        return "neutral";
-    }
+  function getFeedItemMetaText(item: RetrievalFeedItem): string {
+    const parts: string[] = [];
+    const duration = formatDurationShort(item.durationMs);
+    if (duration) parts.push(duration);
+    if (item.kind === "search" && item.searchQuery) parts.push(`q: ${clipText(item.searchQuery, 32)}`);
+    parts.push(formatTimeOnly(item.timestamp));
+    return parts.join(" / ");
   }
 
-  function createFeedChipRow(labels: string[], limit = 3): HTMLElement | null {
-    if (!labels.length) return null;
-    const wrap = createElement("div", "lore-feed-chip-row");
-    const shown = labels.slice(0, limit);
-    for (const label of shown) {
-      wrap.appendChild(createTag(clipText(label, 30), "accent"));
-    }
-    if (labels.length > shown.length) {
-      wrap.appendChild(createTag(`+${labels.length - shown.length} more`));
-    }
-    return wrap;
+  function getFeedDetailLabel(item: RetrievalFeedItem): string | null {
+    const entryCount = item.entries?.length ?? 0;
+    if (entryCount) return `View ${entryCount} entr${entryCount === 1 ? "y" : "ies"}`;
+    const scopeCount = item.scopes?.length ?? 0;
+    if (scopeCount) return `View ${scopeCount} scope${scopeCount === 1 ? "" : "s"}`;
+    const noteCount = item.details?.length ?? 0;
+    if (noteCount) return `View ${noteCount} note${noteCount === 1 ? "" : "s"}`;
+    return null;
   }
 
-  function renderFeedScopeCards(scopes: PreviewScope[]): HTMLElement {
-    const list = createElement("div", "lore-feed-scope-list");
-    for (const scope of scopes) {
-      const card = createElement("div", "lore-feed-detail-row");
-      const body = createElement("div", "lore-feed-detail-main");
-      const head = createElement("div", "lore-feed-detail-head");
-      head.append(
-        createElement("div", "lore-feed-card-title", scope.label),
-        createTag(`${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`, "accent"),
-      );
-      body.append(
-        head,
-        createElement("div", "lore-feed-card-meta", `${scope.worldBookName} · ${scope.breadcrumb || "Root"}`),
-      );
-      if (scope.summary?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(scope.summary, 180)));
-      }
-      if (scope.selectionReason?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", `Why: ${clipText(scope.selectionReason, 180)}`));
-      }
-      card.appendChild(body);
-      list.appendChild(card);
+  function renderFeedEntryDetail(entry: PreviewNode): HTMLElement {
+    const row = createElement("div", "lore-feed-detail-item");
+    const title = createElement("div", "lore-feed-detail-item-title", entry.label);
+    const meta = [
+      entry.worldBookName,
+      entry.breadcrumb || "Root",
+      formatSelectionRoleLabel(entry.selectionRole),
+    ].filter(Boolean);
+    row.append(title, createElement("div", "lore-feed-detail-item-meta", meta.join(" / ")));
+    if (entry.previewText?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(entry.previewText, 180)));
     }
-    return list;
+    if (entry.reasons?.length) {
+      const reasons = createElement("div", "lore-feed-detail-reasons");
+      for (const reason of entry.reasons.slice(0, 4)) reasons.appendChild(createTag(reason));
+      if (entry.reasons.length > 4) reasons.appendChild(createTag(`+${entry.reasons.length - 4} more`));
+      row.appendChild(reasons);
+    }
+    return row;
   }
 
-  function renderFeedEntryRows(entries: PreviewNode[]): HTMLElement {
-    const list = createElement("div", "lore-feed-entry-list");
-    for (const entry of entries) {
-      const row = createElement("div", "lore-feed-detail-row");
-      const body = createElement("div", "lore-feed-detail-main");
-      const head = createElement("div", "lore-feed-detail-head");
-      head.append(
-        createElement("div", "lore-feed-card-title", entry.label),
-        createTag(formatSelectionRoleLabel(entry.selectionRole), getSelectionRoleTone(entry.selectionRole)),
-      );
-      body.append(
-        head,
-        createElement("div", "lore-feed-card-meta", `${entry.worldBookName} · ${entry.breadcrumb || "Root"}`),
-      );
-      if (entry.previewText?.trim()) {
-        body.appendChild(createElement("div", "lore-feed-card-summary", clipText(entry.previewText, 180)));
-      }
-      if (entry.reasons?.length) {
-        const reasons = createElement("div", "lore-feed-chip-row");
-        for (const reason of entry.reasons.slice(0, 3)) {
-          reasons.appendChild(createTag(reason));
-        }
-        if (entry.reasons.length > 3) {
-          reasons.appendChild(createTag(`+${entry.reasons.length - 3} more`));
-        }
-        body.appendChild(reasons);
-      }
-      row.appendChild(body);
-      list.appendChild(row);
+  function renderFeedScopeDetail(scope: PreviewScope): HTMLElement {
+    const row = createElement("div", "lore-feed-detail-item");
+    row.append(
+      createElement("div", "lore-feed-detail-item-title", scope.label),
+      createElement(
+        "div",
+        "lore-feed-detail-item-meta",
+        `${scope.worldBookName} / ${scope.breadcrumb || "Root"} / ${scope.descendantEntryCount} entr${scope.descendantEntryCount === 1 ? "y" : "ies"}`,
+      ),
+    );
+    if (scope.selectionReason?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.selectionReason, 180)));
+    } else if (scope.summary?.trim()) {
+      row.appendChild(createElement("div", "lore-feed-detail-item-preview", clipText(scope.summary, 180)));
     }
-    return list;
+    return row;
   }
 
   function renderFeedItemDetails(item: RetrievalFeedItem): HTMLElement | null {
-    const hasScopes = !!item.scopes?.length;
-    const hasEntries = !!item.entries?.length;
-    const hasDetails = !!item.details?.length;
-    if (!hasScopes && !hasEntries && !hasDetails) return null;
+    const label = getFeedDetailLabel(item);
+    if (!label) return null;
 
-    const details = createElement("details", "lore-feed-details") as HTMLDetailsElement;
-    const summary = createElement("summary", "lore-feed-details-summary");
-    summary.appendChild(createElement("span", "lore-feed-details-toggle", "Details"));
+    const details = createElement("details", "lore-feed-item-details") as HTMLDetailsElement;
+    const summary = createElement("summary", "lore-feed-item-details-summary");
+    summary.append(
+      makeIconSpan("caret", "lore-feed-item-details-caret"),
+      createElement("span", "lore-feed-item-details-label", label),
+      createElement("span", "lore-feed-item-details-meta", getFeedItemMetaText(item)),
+    );
 
-    const chips = createElement("div", "lore-feed-chip-row");
-    if (hasScopes) {
-      const row = createFeedChipRow(item.scopes!.map((scope) => scope.label));
-      if (row) chips.appendChild(row);
-    }
-    if (hasEntries) {
-      const row = createFeedChipRow(item.entries!.map((entry) => entry.label));
-      if (row) chips.appendChild(row);
-    }
-    if (hasDetails) {
-      chips.appendChild(createTag(`${item.details!.length} note${item.details!.length === 1 ? "" : "s"}`));
-    }
-    if (chips.childElementCount) summary.appendChild(chips);
-
-    const body = createElement("div", "lore-feed-details-body");
-    if (hasScopes) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.append(
-        createElement("div", "lore-feed-detail-title", `Scopes (${item.scopes!.length})`),
-        renderFeedScopeCards(item.scopes!),
-      );
-      body.appendChild(group);
-    }
-    if (hasEntries) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.append(
-        createElement("div", "lore-feed-detail-title", `${item.kind === "search" ? "Matches" : "Entries"} (${item.entries!.length})`),
-        renderFeedEntryRows(item.entries!),
-      );
-      body.appendChild(group);
-    }
-    if (hasDetails) {
-      const group = createElement("div", "lore-feed-detail-group");
-      group.appendChild(createElement("div", "lore-feed-detail-title", "Notes"));
-      const notes = createElement("div", "lore-stack");
-      notes.style.gap = "6px";
-      for (const detail of item.details!) {
-        notes.appendChild(createElement("div", "lore-feed-note", detail));
-      }
-      group.appendChild(notes);
-      body.appendChild(group);
+    const body = createElement("div", "lore-feed-item-details-body");
+    for (const scope of item.scopes ?? []) body.appendChild(renderFeedScopeDetail(scope));
+    for (const entry of item.entries ?? []) body.appendChild(renderFeedEntryDetail(entry));
+    for (const note of item.details ?? []) {
+      body.appendChild(createElement("div", "lore-feed-detail-note", note));
     }
 
     details.append(summary, body);
@@ -1617,229 +1613,45 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function renderFeedItem(item: RetrievalFeedItem): HTMLElement {
-    const row = createElement("div", `lore-feed-item ${getFeedItemTone(item)}`);
+    const row = createElement("div", `lore-feed-item lore-feed-item-${item.kind} ${getFeedItemTone(item)}`);
     const icon = createElement("div", "lore-feed-item-icon");
     icon.innerHTML = getFeedItemGlyph(item);
     const body = createElement("div", "lore-feed-item-body");
-    const top = createElement("div", "lore-feed-item-top");
-    const stamps = createElement("div", "lore-feed-item-stamps");
-    if (typeof item.durationMs === "number" && item.durationMs >= 0) {
-      stamps.appendChild(createTag(formatDurationShort(item.durationMs)));
-    }
-    stamps.appendChild(createElement("div", "lore-feed-item-time", formatTimeOnly(item.timestamp)));
-    top.append(
-      createElement("div", "lore-feed-item-label", item.label),
-      stamps,
+    const text = createElement("div", "lore-feed-item-row");
+    text.append(
+      createElement("span", "lore-feed-item-verb", getFeedItemVerb(item)),
+      createElement("span", "lore-feed-item-summary", clipText(item.summary || item.label, 150)),
     );
-    body.append(
-      top,
-      createElement("div", "lore-feed-item-summary", item.summary),
-    );
-    const metaBits = getFeedMetaBits(item);
-    if (metaBits.length) {
-      const meta = createElement("div", "lore-feed-item-meta", metaBits.join(" • "));
-      body.appendChild(meta);
-    }
+    body.appendChild(text);
     const details = renderFeedItemDetails(item);
-    if (details) body.appendChild(details);
+    if (details) {
+      body.appendChild(details);
+    } else {
+      body.appendChild(createElement("div", "lore-feed-item-meta", getFeedItemMetaText(item)));
+    }
     row.append(icon, body);
     return row;
   }
 
-  function getSessionFlowCounts(session: RetrievalSession): {
-    scopes: number;
-    manifest: number;
-    pulled: number;
-    injected: number;
-  } {
-    const last: Record<string, number | undefined> = {};
-    const occurrences: Record<string, number> = {};
-    for (const item of session.items) {
-      occurrences[item.kind] = (occurrences[item.kind] ?? 0) + 1;
-      if (typeof item.count === "number" && Number.isFinite(item.count)) {
-        last[item.kind] = item.count;
-      }
-    }
-    const pick = (kind: string): number => last[kind] ?? occurrences[kind] ?? 0;
-    return {
-      scopes: pick("scope"),
-      manifest: pick("manifest"),
-      pulled: pick("pulled"),
-      injected: pick("injected"),
-    };
-  }
-
-  function getSessionTopInjected(session: RetrievalSession): PreviewNode | null {
-    for (let i = session.items.length - 1; i >= 0; i -= 1) {
-      const item = session.items[i];
-      if (item.kind === "injected" && item.entries?.length) return item.entries[0];
-    }
-    for (const item of session.items) {
-      if (item.kind === "injected" && item.entries?.length) return item.entries[0];
-    }
-    return null;
-  }
-
-  function renderFlowLine(session: RetrievalSession): HTMLElement {
-    const counts = getSessionFlowCounts(session);
-    const wrap = createElement("div", "lore-flow-line");
-    const steps: Array<[string, string, number]> = [
-      ["scope", "scope", counts.scopes],
-      ["manifest", "manifest", counts.manifest],
-      ["pulled", "pulled", counts.pulled],
-      ["injected", "injected", counts.injected],
-    ];
-    steps.forEach(([kind, label, value], i) => {
-      if (i > 0) wrap.appendChild(createElement("span", "lore-flow-line-arrow", "→"));
-      const cell = createElement("span", `lore-flow-line-cell ${kind}${value === 0 ? " empty" : ""}`);
-      cell.append(
-        createElement("span", "lore-flow-line-num", String(value)),
-        createElement("span", "lore-flow-line-label", label),
-      );
-      wrap.appendChild(cell);
-    });
-    return wrap;
-  }
-
-  function renderFeedSession(session: RetrievalSession, index: number): HTMLElement | null {
-    const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
-    if (drawerFeedFilter !== "all" && !visibleItems.length) return null;
-    const expanded = isSessionExpanded(session, index);
-    const elapsedMs = getSessionElapsedMs(session);
+  function renderFeedSessionMarker(session: RetrievalSession, visibleItemCount: number): HTMLElement {
     const isRunning = session.status === "running";
-    const counts = getSessionFlowCounts(session);
-    const hasFlow = counts.scopes + counts.manifest + counts.pulled + counts.injected > 0;
-    const topInjected = getSessionTopInjected(session);
-
-    const wrap = createElement("article", `lore-feed-session ${getSessionTone(session)}${isRunning ? " live" : ""}${expanded ? " expanded" : " collapsed"}`);
-
-    // ---- Card head (stacked rows) ----
-    const head = createElement("button", "lore-feed-session-head lore-feed-session-toggle") as HTMLButtonElement;
-    head.type = "button";
-    head.setAttribute("aria-expanded", expanded ? "true" : "false");
-    head.setAttribute("aria-label", `${getSessionStatusLabel(session)} ${session.mode} retrieval session`);
-    head.addEventListener("click", () => {
-      drawerSessionExpansion.set(session.id, !expanded);
-      render();
-    });
-
-    // Row 1: mode title + elapsed + caret
-    const topRow = createElement("div", "lore-feed-session-row top");
-    topRow.appendChild(
-      createElement(
-        "div",
-        "lore-feed-session-mode",
-        session.mode === "traversal" ? "Traversal" : "Collapsed",
-      ),
-    );
-    const trailing = createElement("div", "lore-feed-session-trailing");
-    if (typeof elapsedMs === "number") {
-      trailing.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
-    }
-    trailing.appendChild(makeIconSpan("caret", "lore-feed-session-caret"));
-    topRow.appendChild(trailing);
-    head.appendChild(topRow);
-
-    // Row 2: status + compact meta
-    const midRow = createElement("div", "lore-feed-session-row");
-    const status = createStatus(
+    const elapsedMs = getSessionElapsedMs(session);
+    const marker = createElement("div", `lore-feed-session-marker ${getSessionTone(session)}${isRunning ? " live" : ""}`);
+    marker.appendChild(createElement("span", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    const meta = [
       getSessionStatusLabel(session),
-      isRunning ? "accent" : session.status === "completed" ? "on" : "warn",
-    );
-    if (isRunning) status.classList.add("live");
-    midRow.appendChild(status);
-    const stampBits: string[] = [formatCapturedAt(session.startedAt)];
-    stampBits.push(session.controllerUsed ? "controller" : "deterministic");
-    if (session.fallbackReason && session.status !== "failed") stampBits.push("fallback");
-    midRow.appendChild(createElement("div", "lore-feed-session-stamps", stampBits.join(" · ")));
-    head.appendChild(midRow);
-
-    // Row 3: flow line - compact one-line summary
-    if (hasFlow) head.appendChild(renderFlowLine(session));
-
-    wrap.appendChild(head);
-
-    // ---- Body (top-injected preview + fallback + events toggle) ----
-    const body = createElement("div", "lore-feed-session-body");
-
-    if (topInjected) {
-      const top = createElement("div", "lore-feed-session-top-injected");
-      top.append(
-        createElement("div", "lore-feed-session-top-injected-kicker", "Top injected"),
-        createElement(
-          "div",
-          "lore-feed-session-top-injected-label",
-          topInjected.label || "Untitled entry",
-        ),
-        createElement(
-          "div",
-          "lore-feed-session-top-injected-meta",
-          [topInjected.worldBookName, topInjected.breadcrumb || "Root"].filter(Boolean).join(" · "),
-        ),
-      );
-      body.appendChild(top);
+      formatTimeOnly(session.startedAt),
+      session.controllerUsed ? "controller" : "deterministic",
+      `${visibleItemCount} event${visibleItemCount === 1 ? "" : "s"}`,
+    ];
+    if (session.fallbackReason) meta.push("fallback");
+    marker.appendChild(createElement("span", "lore-feed-session-stamps", meta.join(" / ")));
+    if (typeof elapsedMs === "number") {
+      marker.appendChild(createElement("span", "lore-feed-session-elapsed", formatDurationShort(elapsedMs)));
     }
-
-    if (session.fallbackReason) {
-      body.appendChild(
-        createBanner(
-          session.status === "failed" ? "error" : "warn",
-          session.status === "failed" ? "Retrieval failed" : "Fallback path active",
-          session.fallbackReason,
-        ),
-      );
-    }
-
-    const toggleLabel = createElement("div", "lore-feed-session-toggle-label");
-    toggleLabel.appendChild(makeIconSpan("caret", "caret"));
-    toggleLabel.appendChild(
-      createElement(
-        "span",
-        "",
-        expanded
-          ? `Hide ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`
-          : `Show ${visibleItems.length} event${visibleItems.length === 1 ? "" : "s"}`,
-      ),
-    );
-    toggleLabel.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      drawerSessionExpansion.set(session.id, !expanded);
-      render();
-    });
-    body.appendChild(toggleLabel);
-
-    if (body.childElementCount) wrap.appendChild(body);
-
-    // ---- Events list (collapsible) ----
-    const items = createElement("div", "lore-feed-session-items");
-    items.hidden = !expanded;
-    for (const item of visibleItems) {
-      items.appendChild(renderFeedItem(item));
-    }
-    wrap.appendChild(items);
-    return wrap;
+    return marker;
   }
 
-  function renderFeedTimeline(session: RetrievalSession): HTMLElement {
-    const rail = createElement("div", "lore-feed-session-timeline");
-    rail.setAttribute("aria-hidden", "true");
-    const items = session.items;
-    if (!items.length) return rail;
-    const start = session.startedAt && Number.isFinite(session.startedAt) ? session.startedAt : items[0].timestamp;
-    const endRaw = session.endedAt && Number.isFinite(session.endedAt) ? session.endedAt : items[items.length - 1].timestamp ?? Date.now();
-    const span = Math.max(endRaw - start, 1);
-    for (const item of items) {
-      const t = typeof item.timestamp === "number" && Number.isFinite(item.timestamp) ? item.timestamp : start;
-      const offset = Math.max(0, Math.min(1, (t - start) / span));
-      const marker = createElement("span", `lore-feed-session-timeline-marker ${getFeedItemTone(item)}`);
-      marker.style.left = `calc(${(offset * 100).toFixed(2)}% - 1.5px)`;
-      const label = item.label || item.kind;
-      marker.title = `${label} · ${formatTimeOnly(t)}`;
-      rail.appendChild(marker);
-    }
-    return rail;
-  }
 
   function renderHealthStrip(state: FrontendState): HTMLElement | null {
     const diagnostics = state.diagnosticsResults ?? [];
@@ -1870,47 +1682,58 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function renderRetrievalFeedSection(state: FrontendState): HTMLElement {
-    const section = createElement("section", "lore-section");
+    const section = createElement("section", "lore-section lore-feed-section");
+    const sessions = state.retrievalFeed?.sessions ?? [];
+    const visibleEventCount = sessions.reduce(
+      (total, session) => total + session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter)).length,
+      0,
+    );
+
+    const head = createElement("div", "lore-feed-panel-header");
+    const title = createElement("div", "lore-feed-panel-title");
+    title.append(makeIconSpan("feed"), createElement("span", "", "Retrieval feed"));
+    if (visibleEventCount > 0) {
+      title.appendChild(createElement("span", "lore-feed-panel-count", String(visibleEventCount)));
+    }
+    head.appendChild(title);
     const actions = createElement("div", "lore-cluster");
     if (state.preview) {
-      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyPreviewDebugReport(state.preview!)));
+      const copyButton = createButton("Copy", "lore-feed-panel-btn", () => copyPreviewDebugReport(state.preview!));
+      copyButton.title = "Copy retrieval report";
+      copyButton.prepend(makeIconSpan("copy"));
+      actions.appendChild(copyButton);
     }
-    section.appendChild(createSectionHead("Retrieval feed", "Live rolling retrieval history for this chat.", actions));
+    head.appendChild(actions);
+    section.appendChild(head);
 
-    const filters = createElement("div", "lore-cluster lore-feed-filters");
-    const filterDefs: ReadonlyArray<readonly [DrawerFeedFilter, string, string | null]> = [
-      ["all", "All", null],
-      ["scope", "Scopes", "scope"],
-      ["search", "Search", "feedSearch"],
-      ["manifest", "Manifest", "manifest"],
-      ["reserved", "Reserved", "reserved"],
-      ["pulled", "Pulled", "pulled"],
-      ["injected", "Injected", "injected"],
-      ["issue", "Issues", "issue"],
+    const filters = createElement("div", "lore-feed-tabs");
+    const filterDefs: ReadonlyArray<readonly [DrawerFeedFilter, string]> = [
+      ["all", "All"],
+      ["entries", "Entries"],
+      ["steps", "Steps"],
+      ["issue", "Issues"],
     ];
-    for (const [value, label, iconName] of filterDefs) {
-      const chip = createElement(
+    for (const [value, label] of filterDefs) {
+      const tab = createElement(
         "button",
-        `lore-chip${drawerFeedFilter === value ? " active" : ""}`,
+        `lore-feed-tab${drawerFeedFilter === value ? " active" : ""}`,
+        label,
       ) as HTMLButtonElement;
-      chip.type = "button";
-      if (iconName) chip.appendChild(makeIconSpan(iconName));
-      chip.appendChild(createElement("span", "", label));
-      chip.addEventListener("click", () => {
+      tab.type = "button";
+      tab.addEventListener("click", () => {
         drawerFeedFilter = value;
         render();
       });
-      filters.appendChild(chip);
+      filters.appendChild(tab);
     }
     section.appendChild(filters);
 
-    const feed = createElement("div", "lore-feed");
-    const sessions = state.retrievalFeed?.sessions ?? [];
+    const feed = createElement("div", "lore-feed lore-feed-stream");
     if (!sessions.length) {
       feed.appendChild(
         createEmpty(
           "No retrieval activity yet",
-          "Send a message to watch Lore Recall stream scope choice, global search, manifest selection, pulled entries, injection, and fallback events here.",
+          "Send a message to watch a compact stream of retrieval activity for this chat.",
           null,
           "feed",
         ),
@@ -1920,12 +1743,16 @@ export function setup(ctx: SpindleFrontendContext) {
     }
 
     let rendered = 0;
-    sessions.forEach((session, index) => {
-      const sessionNode = renderFeedSession(session, index);
-      if (!sessionNode) return;
-      feed.appendChild(sessionNode);
+    for (const session of sessions) {
+      const visibleItems = session.items.filter((item) => itemMatchesFeedFilter(item, drawerFeedFilter));
+      if (!visibleItems.length && !(drawerFeedFilter === "all" && session.status === "running")) continue;
+      feed.appendChild(renderFeedSessionMarker(session, visibleItems.length));
       rendered += 1;
-    });
+      for (const item of visibleItems) {
+        feed.appendChild(renderFeedItem(item));
+        rendered += 1;
+      }
+    }
 
     if (!rendered) {
       feed.appendChild(createEmpty("No matching events", "Change the filter to see the full live retrieval history."));
@@ -1984,6 +1811,7 @@ export function setup(ctx: SpindleFrontendContext) {
         continue;
       }
       const actions = createElement("div", "lore-cluster");
+      actions.appendChild(createButton("Copy report", "lore-btn lore-btn-sm", () => copyOperationReport(operation)));
       if (getOperationDebugPayload(operation)) {
         actions.appendChild(
           createButton("Copy debug", "lore-btn lore-btn-sm", () => copyOperationDebugPayload(operation)),
@@ -3059,6 +2887,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ["maxResults", "Pull limit"],
       ["maxTraversalDepth", "Traversal depth"],
       ["traversalStepLimit", "Traversal step limit"],
+      ["scopePickLimit", "Scope pick limit"],
       ["tokenBudget", "Inject limit"],
       ["contextMessages", "Context messages"],
     ] as const) {
@@ -3074,7 +2903,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Pull limit is the maximum number of scoped candidates Lore Recall keeps after retrieval. Inject limit caps dynamic entries; constant entries are injected separately.",
+        "Scope pick limit caps how many scopes the controller may choose in one step. Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately.",
       ),
     );
 
@@ -3093,7 +2922,7 @@ export function setup(ctx: SpindleFrontendContext) {
     switches.appendChild(switchRow);
     switches.appendChild(
       createFieldNote(
-        "Selective retrieval off injects from the chosen scopes and lets injection-time caps trim the result. Selective retrieval on makes the controller choose the final injected entry IDs from the chosen-scope manifests.",
+        "Selective retrieval off injects from the retrieved candidate pool and lets caps trim the result. Selective retrieval on makes the controller choose the exact final entry IDs, including sparse or empty dynamic sets.",
       ),
     );
     form.appendChild(switches);

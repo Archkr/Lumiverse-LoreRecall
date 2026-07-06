@@ -1,6 +1,6 @@
 import type { BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
 
-export type DrawerFeedFilter = "all" | "scope" | "search" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
+export type DrawerFeedFilter = "all" | "entries" | "steps" | "issue";
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }
@@ -96,17 +96,8 @@ export function getEntryBreadcrumb(tree: BookTreeIndex, entry: ManagedBookEntryV
 export function filterBooks(state: FrontendState | null, filterText: string): string[] {
   if (!state) return [];
   const query = filterText.trim().toLowerCase();
-  const ids = new Set<string>([
-    ...Object.keys(state.bookConfigs),
-    ...state.suggestedBookIds,
-    ...(state.characterConfig?.managedBookIds ?? []),
-  ]);
-  const base = state.allWorldBooks.filter((book) => ids.size === 0 || ids.has(book.id) || !query);
-  return base
-    .filter((book) => {
-      if (!query) return true;
-      return `${book.name} ${book.description}`.toLowerCase().includes(query);
-    })
+  return state.allWorldBooks
+    .filter((book) => !query || `${book.name} ${book.description}`.toLowerCase().includes(query))
     .map((book) => book.id);
 }
 

@@ -45,9 +45,9 @@ Build a structured index of your world once. Let the right entries surface at th
 |---|---|
 | **Character-scoped sources** | Each character has its own managed lorebook list. Retrieval pulls only from those. |
 | **Tree organization** | Hierarchical index per book, built from metadata or by an LLM. |
-| **Two retrieval modes** | `Collapsed` for one-pass scope picks. `Traversal` for branch-by-branch drilling. |
+| **Two retrieval modes** | `Collapsed` for one-pass scope picks. `Traversal` for exploratory navigate/search/retrieve passes. |
 | **Reserved constants** | Native `constant` entries always inject. Dynamic budget fills the rest. |
-| **Selective retrieval** | Controller picks the final injected entry IDs from chosen scopes. |
+| **Selective retrieval** | Controller picks the final injected entry IDs from the accumulated candidate pool. |
 | **Live retrieval feed** | Scope, search, manifest, pulled, injected, and issue events stream as they happen. |
 | **Editable tree workspace** | Move, rename, retag, regenerate summaries, bulk-flag whole branches. |
 | **Per-book permissions** | `Read + write`, `Read only`, and `Write only` modes. |
@@ -184,11 +184,14 @@ Clone the repo, then either:
 | `Collapsed depth` | Tree depth shown to the controller in collapsed mode |
 | `Traversal depth` | Max tree depth the controller can drill into |
 | `Traversal step limit` | Max controller drill calls per turn |
-| `Pull limit` | Max scoped candidates kept after retrieval |
+| `Scope pick limit` | Max scopes the controller can choose in one step |
+| `Pull limit` | Max pooled candidates exposed to final manifest selection |
 | `Inject limit` | Max entries written into the prompt |
 | `Context messages` | How many recent chat messages become retrieval context |
-| `Rerank top candidates` | Reorder candidates before the final cutoff |
-| `Selective retrieval` | Controller picks exact entry IDs from chosen scopes |
+| `Rerank top candidates` | Reorder pooled candidates before final manifest selection |
+| `Selective retrieval` | Controller picks exact entry IDs from the candidate pool |
+
+In `Traversal` mode, retrieval is additive. The controller can navigate into a branch, retrieve its entries into a temporary pool, run a global search, retrieve more entries, and then finish with one final manifest selection. A valid sparse selection is respected: if the controller chooses one dynamic entry, Lore Recall injects one dynamic entry; if it chooses none, only constants are injected.
 
 </details>
 
@@ -250,13 +253,14 @@ Live sessions get a subtle pulse and an amber outer edge so you can see retrieva
 | `Search mode` | `Collapsed` | `Collapsed` is faster; `Traversal` is more exploratory |
 | `Multi-book mode` | `Unified` | `Unified` merges all managed books; `Per book` lets the controller pick |
 | `Collapsed depth` | 2 | Tree depth shown to the controller in collapsed mode |
-| `Pull limit` | 6 | Max scoped candidates after retrieval |
+| `Pull limit` | 6 | Max pooled candidates exposed to final manifest selection |
 | `Traversal depth` | 3 | Max tree depth in traversal mode |
 | `Traversal step limit` | 5 | Max controller drill-down calls per turn |
+| `Scope pick limit` | 5 | Max scopes the controller can choose in one step |
 | `Inject limit` | 6 | Max entries injected into the prompt |
 | `Context messages` | 10 | Recent chat messages used as retrieval context |
-| `Rerank top candidates` | Off | Reorder before final cutoff |
-| `Selective retrieval` | On | Controller picks exact entry IDs from chosen scopes |
+| `Rerank top candidates` | Off | Reorder candidates before final manifest selection |
+| `Selective retrieval` | On | Controller picks exact entry IDs from the accumulated candidate pool |
 
 </details>
 
@@ -304,7 +308,7 @@ Live sessions get a subtle pulse and an amber outer edge so you can see retrieva
 
 > **Read-only managed books are a real workflow.** Use `Read only` permission for community lorebooks you want to retrieve from but never edit. Lore Recall blocks rebuild and rewrite operations cleanly.
 
-> **Selective retrieval on is the better default.** It lets the controller make the final call about *which* entries inject, rather than just *which scopes* survive. Turn it off only if you want a pure scope-then-cap behavior.
+> **Selective retrieval on is the better default.** It lets the controller make the final call about *which* entries inject from the accumulated traversal pool. Sparse valid selections are intentional, not automatically backfilled.
 
 ---
 
