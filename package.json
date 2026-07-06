@@ -1,6 +1,6 @@
 {
   "name": "lumiverse-lore-recall",
-  "version": "1.0.0-TESTING",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
