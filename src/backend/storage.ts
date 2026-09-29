@@ -23,6 +23,7 @@ import {
   truncateText,
   uniqueStrings,
 } from "../shared";
+import { ensureRootCategories } from "../categories";
 import type {
   BookRetrievalConfig,
   BookStatus,
@@ -387,17 +388,17 @@ export async function loadTreeIndex(bookId: string, entries: IndexedEntry[], use
   const validEntryIds = new Set(entries.map((entry) => entry.entryId));
   const issues = inspectTreeIssues(rawTree, validEntryIds);
 
-  let tree = ensureTreeIndexShape(rawTree as any, bookId, Array.from(validEntryIds));
+  let tree = ensureRootCategories(ensureTreeIndexShape(rawTree as any, bookId, Array.from(validEntryIds)));
   if (!treeHasContent(tree)) {
     const migrated = migrateLegacyTree(bookId, entries);
     if (migrated) {
-      tree = ensureTreeIndexShape(migrated, bookId, Array.from(validEntryIds));
+      tree = ensureRootCategories(ensureTreeIndexShape(migrated, bookId, Array.from(validEntryIds)));
     } else {
-      tree = createEmptyTreeIndex(bookId);
-      tree.unassignedEntryIds = entries.map((entry) => entry.entryId);
+      tree = ensureRootCategories(createEmptyTreeIndex(bookId));
+      tree.nodes[tree.nodes[tree.rootId].childIds.at(-1)!].entryIds = entries.map((entry) => entry.entryId);
     }
     await spindle.userStorage.setJson(path, tree, { indent: 2, userId });
-  } else if ((rawTree as any)?.version !== TREE_VERSION || issues.staleEntryRefs || issues.staleNodeRefs) {
+  } else if ((rawTree as any)?.version !== TREE_VERSION || issues.staleEntryRefs || issues.staleNodeRefs || JSON.stringify(rawTree) !== JSON.stringify(tree)) {
     await spindle.userStorage.setJson(path, tree, { indent: 2, userId });
   }
 
@@ -405,7 +406,7 @@ export async function loadTreeIndex(bookId: string, entries: IndexedEntry[], use
 }
 
 export async function saveTreeIndex(bookId: string, tree: any, entryIds: string[], userId: string): Promise<void> {
-  await spindle.userStorage.setJson(getTreePath(bookId), ensureTreeIndexShape(tree, bookId, entryIds), {
+  await spindle.userStorage.setJson(getTreePath(bookId), ensureRootCategories(ensureTreeIndexShape(tree, bookId, entryIds)), {
     indent: 2,
     userId,
   });

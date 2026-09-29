@@ -21,6 +21,8 @@ import {
   runControllerJson as runSharedControllerJson,
 } from "./controller-json";
 import { isReadableBook } from "./storage";
+import { ROOT_CATEGORIES, rootCategoryForEntry, type RootCategory } from "../categories";
+import { filterWithJev } from "./jev";
 
 interface RetrievalPreviewOptions {
   allowController?: boolean;
@@ -465,7 +467,7 @@ function tokenize(value: string): string[] {
 function isRetrievalChatHistoryMessage(message: ChatLikeMessage, messages: ChatLikeMessage[]): boolean {
   if ((message.role !== "assistant" && message.role !== "user") || !message.content.trim()) return false;
   const hasHistoryFlags = messages.some((item) => typeof item.__isChatHistory === "boolean");
-  return hasHistoryFlags ? message.__isChatHistory === true : message.role === "assistant";
+  return hasHistoryFlags ? message.__isChatHistory === true || message.role === "user" : true;
 }
 
 function buildQueryText(messages: ChatLikeMessage[], contextMessages: number): string {
@@ -4685,410 +4687,143 @@ export async function buildRetrievalPreview(
   userId: string,
   options: RetrievalPreviewOptions = {},
 ): Promise<RetrievalPreview | null> {
-  const allowController = options.allowController !== false;
+  return buildCategoryRetrievalPreview(messages, settings, config, books, userId, options);
+}
+
+async function buildCategoryRetrievalPreview(
+  messages: ChatLikeMessage[], settings: GlobalLoreRecallSettings, config: CharacterRetrievalConfig,
+  books: RuntimeBook[], userId: string, options: RetrievalPreviewOptions,
+): Promise<RetrievalPreview | null> {
   const queryText = buildQueryText(messages, config.contextMessages);
   const recentConversation = buildRecentConversation(messages, config.contextMessages) || queryText;
   if (!queryText.trim()) return null;
-
-  const readableBooks = books.filter((book) => isReadableBook(book.config));
+  const readableBooks = books.filter((book) => book.config.enabled && isReadableBook(book.config));
   if (!readableBooks.length) return null;
-
-  const reportProgress = options.reportProgress;
+  const report = options.reportProgress;
   const startedAt = options.capturedAt ?? Date.now();
-  emitProgress(reportProgress, {
-    type: "start",
-    mode: config.searchMode,
-    timestamp: startedAt,
-    label: "Start retrieval",
-    summary: `Started ${config.searchMode} retrieval across ${readableBooks.length} readable book(s).`,
-    details: [`Recent conversation: ${truncateText(recentConversation, 260)}`],
-  });
-
-  const controller: ControllerSession = {
-    settings,
-    userId,
-    connectionId: resolveControllerConnectionId(settings, options.connectionId),
-    controllerUsed: false,
-    deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
-    callCount: 0,
-    reportProgress,
+  emitProgress(report, { type: "start", mode: "collapsed", timestamp: startedAt,
+    label: "Start retrieval", summary: `Reviewing ${readableBooks.length} managed book(s).` });
+  const allEntries = readableBooks.flatMap((book) => book.cache.entries
+    .filter((entry) => !entry.disabled && !entry.constant)
+    .map((entry) => ({ entry, category: rootCategoryForEntry(book.tree, entry.entryId) })));
+  const constants = collectReservedConstantEntries(readableBooks);
+  const reservedConstantNodes = buildPreviewNodes(constants, new Map(readableBooks.map((book) => [book.summary.id, book])));
+  const issues: string[] = [];
+  let controllerUsed = false;
+  const controllerAllowed = options.allowController !== false;
+  const connectionId = resolveControllerConnectionId(settings, options.connectionId);
+  const modelDeadline = Date.now() + 155_000;
+  const runModel = async (prompt: string): Promise<Record<string, unknown> | null> => {
+    if (!controllerAllowed) return null;
+    const remainingMs = modelDeadline - Date.now();
+    if (remainingMs < 1000) { issues.push("Model selection ran out of time; remaining batches were skipped."); return null; }
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30_000));
+    try {
+      const response = await runSharedControllerJson(prompt, settings, userId,
+        { connectionId, temperatureOverride: 0.1, signal: abort.signal });
+      if (!response.parsed) throw new Error("Model returned no valid JSON.");
+      controllerUsed = true;
+      return response.parsed;
+    } catch (error) {
+      issues.push(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally { clearTimeout(timer); }
   };
-  const chooseBooksStartedAt = Date.now();
-  const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
-  const chooseBooksDurationMs = Date.now() - chooseBooksStartedAt;
-  const chosenBooks = chosenBooksResult.books;
-  const steps = [
-    `${books.length} managed book(s) loaded.`,
-    `${chosenBooks.length} readable book(s) selected for search in ${chooseBooksDurationMs} ms.`,
-  ];
+  const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
+  const categoryResult = categoriesPresent.length ? await runModel([
+    "Choose every top-level lore category relevant to the next reply. Return only JSON: {\"categories\":[\"Characters\"]}.",
+    "Use only the category names listed. An empty array is valid.",
+    buildPromptContext(recentConversation),
+    "Categories:",
+    ...categoriesPresent.map((category) => {
+      const group = allEntries.filter((item) => item.category === category);
+      return `- ${category}: ${group.length} entries; examples: ${group.slice(0, 8).map((item) => item.entry.label).join(", ")}`;
+    }),
+  ].join("\n")) : { categories: [] };
+  const rawCategories = categoryResult?.categories;
+  const routedCategories: RootCategory[] = Array.isArray(rawCategories) && rawCategories.every((value) => typeof value === "string" && categoriesPresent.includes(value as RootCategory))
+    ? [...new Set(rawCategories as RootCategory[])] : [];
+  if (categoriesPresent.length && controllerAllowed && (!Array.isArray(rawCategories) || rawCategories.some((value) => typeof value !== "string" || !categoriesPresent.includes(value as RootCategory)))) {
+    issues.push("Category routing returned an invalid categories array.");
+  }
+  emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories",
+    routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.",
+    { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
+  const routed = allEntries.filter((item) => routedCategories.includes(item.category));
+  const batches: typeof routed[] = [];
+  let batch: typeof routed = [];
+  let chars = 0;
+  for (const item of routed) {
+    const cost = Math.min(700, item.entry.summary.length + item.entry.previewText.length + 180);
+    if (batch.length && (chars + cost > 18000 || batch.length >= 60)) { batches.push(batch); batch = []; chars = 0; }
+    batch.push(item); chars += cost;
+  }
+  if (batch.length) batches.push(batch);
+  const selectedEntries: ScoredEntry[] = [];
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const candidates = batches[batchIndex];
+    const result = await runModel([
+      "Select ALL lore entries relevant to the next reply. Return only JSON: {\"entryIds\":[\"id\"]}.",
+      "Use only IDs from this batch. An empty array is valid. Do not impose a count limit.",
+      buildPromptContext(recentConversation),
+      `Batch ${batchIndex + 1} of ${batches.length}:`,
+      ...candidates.map(({ entry, category }) => `- id=${JSON.stringify(entry.entryId)}; category=${category}; book=${entry.worldBookName}; label=${entry.label}; aliases=${entry.aliases.join(", ")}; keys=${entry.key.join(", ")}; summary=${truncateText(entry.summary, 240)}; preview=${truncateText(entry.previewText, 300)}`),
+    ].join("\n"));
+    if (!result || !Array.isArray(result.entryIds) || !result.entryIds.every((id) => typeof id === "string")) {
+      issues.push(`Selection batch ${batchIndex + 1} returned no usable entryIds array.`);
+      continue;
+    }
+    const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
+    const requested = [...new Set(result.entryIds as string[])];
+    const invalid = requested.filter((id) => !byId.has(id));
+    if (invalid.length) {
+      issues.push(`Selection batch ${batchIndex + 1} returned ${invalid.length} unknown ID(s).`);
+      continue;
+    }
+    for (const id of requested) selectedEntries.push({ entry: byId.get(id)!, score: 0, reasons: ["model_selected"] });
+  }
   const booksById = new Map(readableBooks.map((book) => [book.summary.id, book]));
-  const trace = createTraceBuffer(reportProgress);
-  trace.push(...chosenBooksResult.trace);
-  const reservedConstants = collectReservedConstantEntries(chosenBooks);
-  const reservedConstantCount = reservedConstants.length;
-  const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
-  const configuredInjectCap = clampInt(config.tokenBudget, 1, 64);
-  const remainingDynamicSlots = configuredInjectCap;
-  const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
-  const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
-  if (reservedConstantCount) {
-    const reservedSummary = `Prepared ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} for always-on injection; dynamic retrieval still has ${remainingDynamicSlots} slot(s).`;
-    steps.push(reservedSummary);
-    pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("reserved", "Reserved constants", reservedSummary, {
-        phase: "inject",
-        count: reservedConstantCount,
-        entries: reservedConstantNodes,
-        tone: "info",
-      }),
-    });
-  } else {
-    steps.push(`No native constant entries were prepared; ${remainingDynamicSlots} dynamic slot(s) are available.`);
-  }
-  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds, options.dynamicFeedback);
-  const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
-  let selectedScopes: TraversalScope[] = [];
-  let pulledCandidates: ScoredEntry[] = [];
-  let selected: ScoredEntry[] = [];
-  let manifests: ScopedManifest[] = [];
-  let searchEvents: RetrievalSearchEvent[] = [];
-  let selectionReason = "";
-  let entrySelectionDurationMs: number | null = null;
-  let usedSearchFrontier = false;
-  const fallbackPath: string[] = [];
-
-  if (!deterministic.length) {
-    fallbackPath.push("Deterministic scoring found no matching dynamic entries.");
-    pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
-  } else {
-    const scopeSelectionStartedAt = Date.now();
-    const scopeSelection =
-      config.searchMode === "traversal"
-        ? {
-            scopes: chosenBooks.map((book) => ({ book, nodeId: book.tree.rootId })),
-            fallbackPath: [] as string[],
-            selectionReason: "Exploratory traversal starts from selected book roots.",
-          }
-        : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
-    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
-    const initiallySelectedScopes = scopeSelection.scopes;
-    selectedScopes = scopeSelection.scopes;
-    selectionReason = scopeSelection.selectionReason;
-    fallbackPath.push(...scopeSelection.fallbackPath);
-    if (config.searchMode === "traversal") {
-      pushTrace(
-        trace,
-        "choose_scope",
-        "Start exploratory traversal",
-        `${selectionReason} Started from ${selectedScopes.length} root scope(s): ${buildTraceScopeSummary(selectedScopes)}.`,
-        {
-          bookId: selectedScopes[0]?.book.summary.id ?? null,
-          nodeId: selectedScopes[0]?.nodeId ?? null,
-          entryCount: selectedScopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0),
-        },
-      );
-      steps.push(`Exploratory traversal started from ${selectedScopes.length} root scope(s).`);
-    } else {
-      steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
-    }
-
-    const initialSelectionReasons = new Map(
-      selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
-    );
-    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map(), initialSelectionReasons);
-    if (initialScopePreviews.length) {
-      emitProgress(reportProgress, {
-        type: "item",
-        item: createFeedItem(
-          "scope",
-          "Selected scopes",
-          `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`,
-          {
-            phase: "choose_scope",
-            count: initialScopePreviews.length,
-            scopes: initialScopePreviews,
-            details: selectionReason ? [selectionReason] : undefined,
-            tone: "info",
-            durationMs: scopeSelectionDurationMs,
-          },
-        ),
-      });
-    }
-
-    const entrySelectionStartedAt = Date.now();
-    const entrySelection =
-      config.searchMode === "traversal"
-        ? await selectTraversalEntries(
-            recentConversation,
-            chosenBooks,
-            selectedScopes,
-            config,
-            controller,
-            allowController,
-            deterministicById,
-            trace,
-            maxDynamicEntries,
-            reservedEntryIds,
-            options.dynamicFeedback,
-          )
-        : await selectEntriesForScopes(
-            recentConversation,
-            selectedScopes,
-            config,
-            controller,
-            allowController,
-            deterministicById,
-            trace,
-            maxDynamicEntries,
-            reservedEntryIds,
-            options.dynamicFeedback,
-          );
-    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
-    selectedScopes = entrySelection.scopes;
-    pulledCandidates = entrySelection.candidates;
-    selected = entrySelection.selected;
-    manifests = entrySelection.manifests;
-    if ("fallbackPath" in entrySelection && Array.isArray((entrySelection as EntrySelectionResult).fallbackPath)) {
-      fallbackPath.push(...(entrySelection as EntrySelectionResult).fallbackPath);
-    }
-    if ("fallbackReason" in entrySelection && entrySelection.fallbackReason) {
-      fallbackPath.push(entrySelection.fallbackReason);
-    }
-    if (Array.isArray(entrySelection.searchEvents) && entrySelection.searchEvents.length) {
-      searchEvents = entrySelection.searchEvents;
-    }
-    if (entrySelection.usedSearchFrontier) {
-      usedSearchFrontier = true;
-    }
-    if (entrySelection.selectionReason) {
-      selectionReason = entrySelection.selectionReason;
-    }
-    steps.push(
-      usedSearchFrontier
-        ? `Resolved ${pulledCandidates.length} pulled entry candidate(s), including global search contribution(s).`
-        : `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`,
-    );
-    steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
-    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
-      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map(), refinedReasons);
-      if (refinedScopePreviews.length) {
-        const scopeEventLabel = config.searchMode === "traversal" ? "Retrieved scopes" : "Refined scopes";
-        const scopeEventSummary =
-          config.searchMode === "traversal"
-            ? `Traversal accumulated candidates from ${refinedScopePreviews.length} retrieved scope(s).`
-            : `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`;
-        emitProgress(reportProgress, {
-          type: "item",
-          item: createFeedItem(
-            "scope",
-            scopeEventLabel,
-            scopeEventSummary,
-            {
-              phase: config.searchMode === "traversal" ? "retrieve" : "refine_scope",
-              count: refinedScopePreviews.length,
-              scopes: refinedScopePreviews,
-              details: selectionReason ? [selectionReason] : undefined,
-              tone: "info",
-              durationMs: scopeSelectionDurationMs,
-            },
-          ),
-        });
-      }
-    }
-  }
-
-  const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
-  if (pulledNodes.length) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem(
-        "pulled",
-        "Pulled candidates",
-        usedSearchFrontier
-          ? `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"}, including global search contribution(s).`
-          : `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from ${Math.max(selectedScopes.length, 1)} scope(s).`,
-        {
-          phase: "retrieve",
-          count: pulledNodes.length,
-          entries: pulledNodes,
-          tone: "info",
-          durationMs: entrySelectionDurationMs,
-        },
-      ),
-    });
-  }
-
-  const manifestCounts = new Map<string, number>(
-    manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]),
-  );
-  const selectionReasons = new Map<string, string>(
-    selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]),
-  );
-  const selectedScopePreviews = buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons);
-  const scopeManifestCounts = populateScopeManifestSelections(
-    buildPreviewScopeManifests(manifests),
-    selected,
-    selectedScopes,
-  );
-  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
-  if (config.selectiveRetrieval || manifests.length) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem(
-        "manifest",
-        "Manifest selection",
-        usedSearchFrontier
-          ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal and search manifest selection.`
-          : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal manifest selection.`,
-        {
-          phase: "manifest_select",
-          count: manifestSelectedEntries.length,
-          scopes: selectedScopePreviews,
-          entries: manifestSelectedEntries,
-          tone: "info",
-          durationMs: entrySelectionDurationMs,
-        },
-      ),
-    });
-  }
-
-  const maxInjectedEntries = remainingDynamicSlots;
-  if (config.selectiveRetrieval && selected.length > maxInjectedEntries) {
-    spindle.log.warn(
-      `Lore Recall selective retrieval exceeded the inject cap before prompt assembly (${selected.length} > ${maxInjectedEntries}); applying safety clamp.`,
-    );
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem(
-        "issue",
-        "Selective retrieval exceeded inject cap",
-        `Selective retrieval produced ${selected.length} entries before injection, so Lore Recall had to safety-clamp to ${maxInjectedEntries}.`,
-        {
-          phase: "inject",
-          tone: "warn",
-          details: [
-            `selected=${selected.length}`,
-            `injectCap=${maxInjectedEntries}`,
-          ],
-        },
-      ),
-    });
-  }
-
-  const injectionStartedAt = Date.now();
-  const selectedForInjection = [...reservedConstants, ...selected];
-  const injection = selectedForInjection.length
-    ? buildInjectionText(
-        selectedForInjection,
-        booksById,
-        reservedConstantCount + remainingDynamicSlots,
-        config.collapsedDepth,
-      )
-    : null;
-  const injectionDurationMs = Date.now() - injectionStartedAt;
-  const included = injection?.included ?? [];
-  const injectedNodes = buildPreviewNodes(included, booksById);
-  const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
-
-  if (injection?.included.length) {
-    const constantInjectionSuffix =
-      reservedConstantCount > 0
-        ? `, including ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}`
-        : "";
-    pushTrace(
-      trace,
-      "inject",
-      "Inject entries",
-      `Injected ${injection.included.length} entry reference(s) into the interceptor prompt${constantInjectionSuffix}.`,
-      { entryCount: injection.included.length, durationMs: injectionDurationMs },
-    );
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem(
-        "injected",
-        "Injected entries",
-        `Prepared ${injectedNodes.length} entr${injectedNodes.length === 1 ? "y" : "ies"} for prompt injection.`,
-        {
-          phase: "inject",
-          count: injectedNodes.length,
-          entries: injectedNodes,
-          tone: "success",
-          durationMs: injectionDurationMs,
-        },
-      ),
-    });
-  } else {
-    const skippedSummary =
-      reservedConstantCount > 0
-        ? `No entries were injected even though ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y was" : "ies were"} available.`
-        : "No retrieved entries were injected for this turn.";
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem(
-        "injected",
-        "Injection skipped",
-        skippedSummary,
-        {
-          phase: "inject",
-          count: 0,
-          tone: selected.length ? "warn" : reservedConstantCount > 0 ? "success" : "info",
-          durationMs: injectionDurationMs,
-        },
-      ),
-    });
-  }
-
-  const fallbackReason = buildFallbackReason(fallbackPath);
-  if (fallbackReason) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("issue", "Fallback path active", fallbackReason, {
-        phase: "fallback",
-        tone: "warn",
-        details: fallbackPath,
-      }),
-    });
-  }
-  const resolvedConnectionId = controller.controllerUsed ? controller.connectionId : null;
-  emitProgress(reportProgress, {
-    type: "finish",
-    timestamp: Date.now(),
-    status: fallbackReason ? "fallback" : "completed",
-    controllerUsed: controller.controllerUsed,
-    resolvedConnectionId,
-    fallbackReason,
-  });
-
+  const modelSelectedEntries = buildPreviewNodes(selectedEntries, booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("manifest", "Model picks",
+    `Selected ${selectedEntries.length} of ${routed.length} reviewed entries across ${batches.length} batch(es).`,
+    { phase: "manifest_select", count: selectedEntries.length, entries: modelSelectedEntries, tone: "info" }) });
+  const jev = await filterWithJev(selectedEntries.map((item) => item.entry), recentConversation, settings, userId);
+  if (jev.error) issues.push(jev.error);
+  const verdictById = new Map(jev.verdicts.map((verdict) => [verdict.entryId, verdict]));
+  const approved = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved !== false)
+    .sort((a, b) => (verdictById.get(b.entry.entryId)?.confidence ?? -1) - (verdictById.get(a.entry.entryId)?.confidence ?? -1));
+  const rejected = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved === false);
+  const jevApprovedEntries = buildPreviewNodes(approved, booksById);
+  const jevRejectedEntries = buildPreviewNodes(rejected, booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("trace", "JEV filter",
+    `Approved ${approved.length}; rejected ${rejected.length}; unanswered ${jev.verdicts.filter((v) => !v.answered).length}.`,
+    { phase: "manifest_select", count: approved.length, entries: jevApprovedEntries, tone: jev.error ? "warn" : "info" }) });
+  if (rejected.length) emitProgress(report, { type: "item", item: createFeedItem("manifest", "JEV rejected",
+    `JEV rejected ${rejected.length} model-selected entr${rejected.length === 1 ? "y" : "ies"}.`,
+    { phase: "manifest_select", count: rejected.length, entries: jevRejectedEntries, tone: "info" }) });
+  const dynamicLimit = Math.max(0, config.tokenBudget);
+  const selected = approved.slice(0, dynamicLimit);
+  const injection = buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12);
+  const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("injected", "Injected entries",
+    `Injected ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic).`,
+    { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
+  for (const issue of issues) emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue,
+    { phase: "fallback", tone: "warn" }) });
+  const fallbackReason = issues.length ? issues.join(" ") : null;
+  emitProgress(report, { type: "finish", timestamp: Date.now(), status: issues.length ? "fallback" : "completed",
+    controllerUsed, resolvedConnectionId: controllerUsed ? connectionId : null, fallbackReason });
   return {
-    mode: config.searchMode,
-    queryText,
-    recentConversation,
-    estimatedTokens: injection?.estimatedTokens ?? 0,
-    injectedText: injection?.text ?? "",
-    selectionSummary,
-    reservedConstantCount,
-    remainingDynamicSlots,
-    selectedScopes: selectedScopePreviews,
-    retrievedScopes: selectedScopePreviews,
-    scopeManifestCounts,
-    searchEvents,
-    reservedConstantNodes,
-    pulledNodes,
-    injectedNodes,
-    manifestSelectedEntries,
-    selectedNodes: selectedScopePreviews,
-    fallbackReason,
-    fallbackPath,
-    selectedBookIds: chosenBooks.map((book) => book.summary.id),
-    steps,
-    trace,
-    capturedAt: options.capturedAt ?? Date.now(),
-    isActual: options.isActual === true,
-    controllerUsed: controller.controllerUsed,
-    resolvedConnectionId,
+    mode: "collapsed", queryText, recentConversation, estimatedTokens: injection?.estimatedTokens ?? 0,
+    injectedText: injection?.text ?? "", selectionSummary: `${selected.length} dynamic, ${constants.length} constant`,
+    reservedConstantCount: constants.length, remainingDynamicSlots: dynamicLimit,
+    selectedScopes: [], retrievedScopes: [], scopeManifestCounts: [], searchEvents: [], selectedNodes: [],
+    reservedConstantNodes, pulledNodes: buildPreviewNodes(routed.map(({ entry }) => ({ entry, score: 0, reasons: ["routed"] })), booksById),
+    injectedNodes, manifestSelectedEntries: modelSelectedEntries, routedCategories, modelSelectedEntries,
+    jevApprovedEntries, jevRejectedEntries, fallbackReason, fallbackPath: issues,
+    selectedBookIds: readableBooks.map((book) => book.summary.id), steps: [], trace: [], capturedAt: startedAt,
+    isActual: options.isActual === true, controllerUsed, resolvedConnectionId: controllerUsed ? connectionId : null,
   };
 }
 

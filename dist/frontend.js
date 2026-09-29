@@ -8,7 +8,11 @@ var DEFAULT_GLOBAL_SETTINGS = {
   buildDetail: "lite",
   treeGranularity: 0,
   chunkTokens: 30000,
-  dedupMode: "none"
+  dedupMode: "none",
+  jevProvider: "typesafe",
+  jevModel: "",
+  jevTimeoutMs: 8000,
+  jevThreshold: 0.6
 };
 var DEFAULT_CHARACTER_CONFIG = {
   enabled: false,
@@ -101,7 +105,11 @@ function normalizeGlobalSettings(value) {
     buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
-    dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none"
+    dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none",
+    jevProvider: next.jevProvider === "openrouter" ? "openrouter" : "typesafe",
+    jevModel: typeof next.jevModel === "string" ? next.jevModel.trim() : "",
+    jevTimeoutMs: clampInt(next.jevTimeoutMs ?? DEFAULT_GLOBAL_SETTINGS.jevTimeoutMs, 1000, 60000),
+    jevThreshold: clampFloat(next.jevThreshold ?? DEFAULT_GLOBAL_SETTINGS.jevThreshold, 0, 1)
   };
 }
 function getEffectiveTreeGranularity(setting, entryCount = 0) {
@@ -267,11 +275,6 @@ function filterBooks(state, filterText) {
     return [];
   const query = filterText.trim().toLowerCase();
   return state.allWorldBooks.filter((book) => !query || `${book.name} ${book.description}`.toLowerCase().includes(query)).map((book) => book.id);
-}
-function formatMode(mode) {
-  if (!mode)
-    return "";
-  return mode.charAt(0).toUpperCase() + mode.slice(1).toLowerCase();
 }
 function formatBuildSource(source) {
   if (!source)
@@ -4419,21 +4422,23 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Last retrieval", "Most recent captured retrieval for this chat."));
     const meta = createElement("div", "lore-cluster");
-    meta.append(createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"), createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
+    meta.append(createTag("Category routing", "accent"), createTag(preview.controllerUsed ? "Model used" : "Model unavailable", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
     section.appendChild(meta);
     if (preview.fallbackReason) {
       section.appendChild(createBanner("warn", "Fallback used", preview.fallbackReason));
     }
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
-    searches.append(createElement("div", "lore-last-panel-title", "Search & scopes"), renderSearchActivity(preview) ?? createEmpty("No search activity"));
+    searches.append(createElement("div", "lore-last-panel-title", "Routed categories"), createElement("div", "lore-note-body", preview.routedCategories?.join(", ") || "No category selected"));
     const pulled = createElement("div", "lore-last-panel");
-    pulled.append(createElement("div", "lore-last-panel-title", "Pulled"), renderRetrievalEntries(getPreviewPulledNodes(preview), "pulled", "Nothing pulled", "No entries were pulled into the retrieval set for this turn."));
+    pulled.append(createElement("div", "lore-last-panel-title", "Model picks"), renderRetrievalEntries(preview.modelSelectedEntries ?? getPreviewPulledNodes(preview), "pulled", "No model picks", "The model selected no dynamic entries this turn."));
     const reserved = createElement("div", "lore-last-panel");
     reserved.append(createElement("div", "lore-last-panel-title", "Reserved constants"), renderRetrievalEntries(getPreviewReservedNodes(preview), "reserved", "No reserved constants", "No native constant entries were prepared for this retrieval."));
     const injected = createElement("div", "lore-last-panel");
     injected.append(createElement("div", "lore-last-panel-title", "Injected"), renderRetrievalEntries(getPreviewInjectedNodes(preview), "injected", "Nothing injected", "The turn completed without injecting any retrieved entries."));
-    grid.append(searches, reserved, pulled, injected);
+    const jevPanel = createElement("div", "lore-last-panel");
+    jevPanel.append(createElement("div", "lore-last-panel-title", "JEV approved"), renderRetrievalEntries(preview.jevApprovedEntries ?? [], "pulled", "No approvals", "No dynamic entries passed the JEV filter."), createElement("div", "lore-last-panel-title", `JEV rejected: ${preview.jevRejectedEntries?.length ?? 0}`), renderRetrievalEntries(preview.jevRejectedEntries ?? [], "pulled", "No rejections", "JEV did not reject any model picks."));
+    grid.append(searches, reserved, pulled, jevPanel, injected);
     section.appendChild(grid);
     return section;
   }
@@ -4661,11 +4666,11 @@ function setup(ctx) {
     const isRunning = session.status === "running";
     const elapsedMs = getSessionElapsedMs(session);
     const marker = createElement("div", `lore-feed-session-marker ${getSessionTone(session)}${isRunning ? " live" : ""}`);
-    marker.appendChild(createElement("span", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    marker.appendChild(createElement("span", "lore-feed-session-mode", "Category retrieval"));
     const meta = [
       getSessionStatusLabel(session),
       formatTimeOnly(session.startedAt),
-      session.controllerUsed ? "controller" : "deterministic",
+      session.controllerUsed ? "model" : "model unavailable",
       `${visibleItemCount} event${visibleItemCount === 1 ? "" : "s"}`
     ];
     if (session.fallbackReason)
@@ -4846,7 +4851,6 @@ function setup(ctx) {
     const managed = getManagedBookIds();
     const enabled = !!state?.characterConfig?.enabled;
     const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
-    const mode = state?.characterConfig?.searchMode ?? "collapsed";
     const head = createElement("div", "lore-page-head");
     const copy = createElement("div", "lore-stack");
     copy.style.gap = "0";
@@ -4881,7 +4885,7 @@ function setup(ctx) {
       m.append(createElement("div", "lore-metric-value", String(value)), createElement("div", "lore-metric-label", label));
       return m;
     };
-    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(formatMode(mode), "mode"), metric(injectLimit, "inject limit"));
+    metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric("Categories", "route"), metric(injectLimit, "inject limit"));
     shell.appendChild(metrics);
     const activeOperation = getActiveOperation();
     if (activeOperation) {
@@ -5202,7 +5206,7 @@ function setup(ctx) {
     if (!managed.length) {
       summary.appendChild(createEmpty("No managed books", "Manage at least one lorebook before building a tree.", null, "book"));
     } else if (needsBuild) {
-      summary.appendChild(createElement("div", "lore-hint", `${needsBuild} managed book${needsBuild === 1 ? "" : "s"} still need an initial build before retrieval can use them.`));
+      summary.appendChild(createElement("div", "lore-hint", `${needsBuild} managed book${needsBuild === 1 ? "" : "s"} can be organized with a tree build. Until then, entries route through Other.`));
     }
     wrap.append(summary, renderBuildTools(state), renderOverview(state));
     return wrap;
@@ -5506,7 +5510,7 @@ function setup(ctx) {
     metrics.append(metric(managed.length, managed.length === 1 ? "book" : "books"), metric(totals.categories, "categories"), metric(totals.entries, "entries"), metric(totals.unassigned, "unassigned"));
     section.appendChild(metrics);
     if (totals.missingTrees) {
-      section.appendChild(createElement("div", "lore-hint", `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree - build one to enable retrieval.`));
+      section.appendChild(createElement("div", "lore-hint", `${totals.missingTrees} book${totals.missingTrees === 1 ? " has" : "s have"} no organized tree. Entries can still route through Other.`));
     }
     return section;
   }
@@ -5557,43 +5561,15 @@ function setup(ctx) {
     }));
     section.appendChild(topRow);
     const form = createElement("div", "lore-form");
-    form.appendChild(createField("Search mode", createSelect(characterDraft.searchMode, [
-      ["collapsed", "Collapsed"],
-      ["traversal", "Traversal"]
-    ], (next) => {
-      characterDraft.searchMode = next;
-    })));
-    form.appendChild(createField("Multi-book mode", createSelect(characterDraft.multiBookMode, [
-      ["unified", "Unified"],
-      ["per_book", "Per book"]
-    ], (next) => {
-      characterDraft.multiBookMode = next;
-    })));
     for (const [key, label] of [
-      ["collapsedDepth", "Collapsed depth"],
-      ["maxResults", "Pull limit"],
-      ["maxTraversalDepth", "Traversal depth"],
-      ["traversalStepLimit", "Traversal step limit"],
-      ["scopePickLimit", "Scope pick limit"],
-      ["tokenBudget", "Inject limit"],
+      ["tokenBudget", "Dynamic entry cap"],
       ["contextMessages", "Context messages"]
     ]) {
       form.appendChild(createField(label, createNumberInput(characterDraft[key], (next) => {
         characterDraft[key] = Number.parseInt(String(next), 10) || 0;
       })));
     }
-    form.appendChild(createFieldNote("Scope pick limit caps how many scopes the controller may choose in one step. Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately."));
-    const switches = createElement("div", "lore-field-span");
-    const switchRow = createElement("div", "lore-cluster");
-    switchRow.style.gap = "20px";
-    switchRow.append(createSwitch("Rerank top candidates", characterDraft.rerankEnabled, (next) => {
-      characterDraft.rerankEnabled = next;
-    }), createSwitch("Selective retrieval", characterDraft.selectiveRetrieval, (next) => {
-      characterDraft.selectiveRetrieval = next;
-    }));
-    switches.appendChild(switchRow);
-    switches.appendChild(createFieldNote("Selective retrieval off injects from the retrieved candidate pool and lets caps trim the result. Selective retrieval on makes the controller choose the exact final entry IDs, including sparse or empty dynamic sets."));
-    form.appendChild(switches);
+    form.appendChild(createFieldNote("The model routes top-level categories and reviews every eligible entry in them. JEV filters its picks. The cap applies afterward; constants are separate."));
     section.appendChild(form);
     const actions = createElement("div", "lore-actions");
     actions.appendChild(createElement("span", "lore-actions-spacer"));
@@ -5679,6 +5655,44 @@ function setup(ctx) {
       globalDraft.controllerConnectionId = connectionSelect.value || null;
     });
     form.appendChild(createField("Controller connection", connectionSelect));
+    form.appendChild(createField("JEV provider", createSelect(globalDraft.jevProvider, [["typesafe", "TypeSafe"], ["openrouter", "OpenRouter"]], (next) => {
+      globalDraft.jevProvider = next;
+    })));
+    form.appendChild(createField("JEV model", createTextInput(globalDraft.jevModel, "Provider default", (next) => {
+      globalDraft.jevModel = next;
+    })));
+    form.appendChild(createField("JEV timeout (ms)", createNumberInput(globalDraft.jevTimeoutMs, (next) => {
+      globalDraft.jevTimeoutMs = next;
+    })));
+    const thresholdInput = createNumberInput(globalDraft.jevThreshold, (next) => {
+      globalDraft.jevThreshold = next;
+    });
+    thresholdInput.step = "0.01";
+    thresholdInput.min = "0";
+    thresholdInput.max = "1";
+    form.appendChild(createField("JEV approval threshold", thresholdInput));
+    const keyInput = createElement("input", "lore-input");
+    keyInput.type = "password";
+    keyInput.placeholder = state.jevKeyStored ? "JEV key stored" : "Enter API key";
+    form.appendChild(createField("JEV API key", keyInput));
+    const keyActions = createElement("div", "lore-actions");
+    keyActions.append(createButton("Save JEV key", "lore-btn lore-btn-sm", () => {
+      sendToBackend(ctx, {
+        type: "save_jev_key",
+        provider: globalDraft.jevProvider,
+        apiKey: keyInput.value,
+        chatId: state.activeChatId
+      });
+      keyInput.value = "";
+    }), createButton("Clear JEV key", "lore-btn lore-btn-sm", () => {
+      sendToBackend(ctx, {
+        type: "clear_jev_key",
+        provider: globalDraft.jevProvider,
+        chatId: state.activeChatId
+      });
+    }));
+    form.appendChild(keyActions);
+    form.appendChild(createFieldNote(state.jevKeyStored ? "JEV is ready. Explicit rejections are removed; unanswered entries pass through." : "Add a key to enable JEV filtering. Model picks pass through until then."));
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
       ["controllerMaxTokens", "Controller max tokens"],
@@ -5881,39 +5895,42 @@ function setup(ctx) {
       return panel;
     }
     if (selected.kind === "category") {
-      const draft2 = getCategoryDraft(bookId, selected.nodeId);
-      if (!draft2) {
+      const draft = getCategoryDraft(bookId, selected.nodeId);
+      if (!draft) {
         panel.appendChild(createEmpty("Gone", "That category is no longer available."));
         return panel;
       }
-      const head2 = createElement("div", "lore-editor-head");
-      head2.append(createElement("div", "lore-editor-kind", "Category"), createElement("div", "lore-editor-title", draft2.label || "Untitled category"), createBreadcrumb(getCategoryBreadcrumb(tree, selected.nodeId)?.split(" > ").filter(Boolean) ?? []));
-      panel.appendChild(head2);
+      const fixedRoot = tree.nodes[selected.nodeId]?.parentId === tree.rootId;
+      const head = createElement("div", "lore-editor-head");
+      head.append(createElement("div", "lore-editor-kind", "Category"), createElement("div", "lore-editor-title", draft.label || "Untitled category"), createBreadcrumb(getCategoryBreadcrumb(tree, selected.nodeId)?.split(" > ").filter(Boolean) ?? []));
+      panel.appendChild(head);
       if (lockMessage) {
         panel.appendChild(createBanner("warn", "Editing locked", lockMessage));
       }
-      const form2 = createElement("div", "lore-form");
-      form2.appendChild(createField("Label", createTextInput(draft2.label, "Category label", (next) => {
-        draft2.label = next;
-      })));
+      const form = createElement("div", "lore-form");
+      if (!fixedRoot)
+        form.appendChild(createField("Label", createTextInput(draft.label, "Category label", (next) => {
+          draft.label = next;
+        })));
       const parentOptions = getCategoryOptions(tree).filter((option) => option.value !== selected.nodeId && option.value !== "unassigned");
       const parentSelect = createElement("select", "lore-select");
       for (const option of parentOptions)
         parentSelect.appendChild(new Option(option.label, option.value));
-      parentSelect.value = draft2.parentId;
+      parentSelect.value = draft.parentId;
       parentSelect.addEventListener("change", () => {
-        draft2.parentId = parentSelect.value;
+        draft.parentId = parentSelect.value;
       });
-      form2.appendChild(createField("Parent", parentSelect));
-      form2.appendChild(createField("Summary", createTextarea(draft2.summary, "A short description of what this category covers.", (next) => {
-        draft2.summary = next;
+      if (!fixedRoot)
+        form.appendChild(createField("Parent", parentSelect));
+      form.appendChild(createField("Summary", createTextarea(draft.summary, "A short description of what this category covers.", (next) => {
+        draft.summary = next;
       }), true));
       const collapsedSwitch = createElement("div", "lore-field-span");
-      collapsedSwitch.appendChild(createSwitch("Collapsed branch", draft2.collapsed, (next) => {
-        draft2.collapsed = next;
+      collapsedSwitch.appendChild(createSwitch("Collapsed branch", draft.collapsed, (next) => {
+        draft.collapsed = next;
       }));
-      form2.appendChild(collapsedSwitch);
-      panel.appendChild(form2);
+      form.appendChild(collapsedSwitch);
+      panel.appendChild(form);
       const descendantEntryIds = uniqueStrings(getDescendantEntryIds(tree, selected.nodeId));
       const bulkActions = createElement("section", "lore-section");
       bulkActions.appendChild(createSectionHead("Bulk entry flags", `${descendantEntryIds.length} descendant entr${descendantEntryIds.length === 1 ? "y" : "ies"} in this category.`));
@@ -5942,9 +5959,9 @@ function setup(ctx) {
       bulkCluster.append(createButton("Set constant", "lore-btn lore-btn-sm", () => runBulkPatch("Set constant", { constant: true })), createButton("Clear constant", "lore-btn lore-btn-sm", () => runBulkPatch("Clear constant", { constant: false })), createButton("Disable all", "lore-btn lore-btn-sm", () => runBulkPatch("Disable all", { disabled: true })), createButton("Enable all", "lore-btn lore-btn-sm", () => runBulkPatch("Enable all", { disabled: false })), createButton("Set selective", "lore-btn lore-btn-sm", () => runBulkPatch("Set selective", { selective: true })), createButton("Clear selective", "lore-btn lore-btn-sm", () => runBulkPatch("Clear selective", { selective: false })));
       bulkActions.appendChild(bulkCluster);
       panel.appendChild(bulkActions);
-      const actions2 = createElement("div", "lore-actions");
-      actions2.classList.add("lore-editor-actions");
-      actions2.append(createButton("Create child", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
+      const actions = createElement("div", "lore-actions");
+      actions.classList.add("lore-editor-actions");
+      actions.append(createButton("Create child", "lore-btn lore-btn-sm", () => sendToBackend(ctx, {
         type: "create_category",
         bookId,
         parentId: selected.nodeId,
@@ -5955,14 +5972,14 @@ function setup(ctx) {
         bookId,
         nodeIds: [selected.nodeId],
         chatId: currentState?.activeChatId
-      })), createButton("Delete", "lore-btn lore-btn-danger lore-btn-sm", () => sendToBackend(ctx, {
+      })), ...!fixedRoot ? [createButton("Delete", "lore-btn lore-btn-danger lore-btn-sm", () => sendToBackend(ctx, {
         type: "delete_category",
         bookId,
         nodeId: selected.nodeId,
         chatId: currentState?.activeChatId,
         target: "unassigned"
-      })), createElement("span", "lore-actions-spacer"), createButton("Save category", "lore-btn lore-btn-primary lore-btn-sm", () => {
-        const validationError = validateCategoryDraft(draft2);
+      }))] : [], createElement("span", "lore-actions-spacer"), createButton("Save category", "lore-btn lore-btn-primary lore-btn-sm", () => {
+        const validationError = validateCategoryDraft(draft);
         if (validationError) {
           pushNotice({
             id: `category-validation:${Date.now()}`,
@@ -5978,18 +5995,19 @@ function setup(ctx) {
           bookId,
           nodeId: selected.nodeId,
           chatId: currentState?.activeChatId,
-          patch: { label: draft2.label, summary: draft2.summary, collapsed: draft2.collapsed }
+          patch: { label: draft.label, summary: draft.summary, collapsed: draft.collapsed }
         });
-        sendToBackend(ctx, {
-          type: "move_category",
-          bookId,
-          nodeId: selected.nodeId,
-          parentId: draft2.parentId === "root" ? null : draft2.parentId,
-          chatId: currentState?.activeChatId
-        });
-        flashSavedNotice(`Category "${draft2.label.trim() || "Untitled"}" saved`);
+        if (!fixedRoot && draft.parentId !== tree.nodes[selected.nodeId]?.parentId)
+          sendToBackend(ctx, {
+            type: "move_category",
+            bookId,
+            nodeId: selected.nodeId,
+            parentId: draft.parentId === "root" ? null : draft.parentId,
+            chatId: currentState?.activeChatId
+          });
+        flashSavedNotice(`Category "${draft.label.trim() || "Untitled"}" saved`);
       }));
-      panel.appendChild(actions2);
+      panel.appendChild(actions);
       if (editingLocked)
         disableInteractive(panel);
       return panel;
@@ -6034,10 +6052,10 @@ function setup(ctx) {
     form.appendChild(createField("Tags", createTextInput(joinCommaList(draft.tags), "Comma-separated, e.g. protagonist, noble", (next) => {
       draft.tags = splitCommaList(next);
     }), true));
-    form.appendChild(createField("Summary", createTextarea(draft.summary, "A short description used for ranking and traversal.", (next) => {
+    form.appendChild(createField("Summary", createTextarea(draft.summary, "A short description shown during model entry selection.", (next) => {
       draft.summary = next;
     }), true));
-    form.appendChild(createField("Collapsed text", createTextarea(draft.collapsedText, "The compact body injected during collapsed retrieval.", (next) => {
+    form.appendChild(createField("Collapsed text", createTextarea(draft.collapsedText, "Optional compact reference text kept for existing metadata workflows.", (next) => {
       draft.collapsedText = next;
     }, true), true));
     panel.appendChild(form);
@@ -6141,11 +6159,11 @@ function setup(ctx) {
       shell.appendChild(context);
     }
     if (!books.length) {
-      const body2 = createElement("div", "lore-modal-body empty");
-      const editor2 = createElement("div", "lore-modal-editor");
-      editor2.appendChild(createEmpty("No managed books", "Pick lorebooks in the settings workspace first, then build or edit their trees here.", createButton("Open extension settings", "lore-btn lore-btn-sm lore-btn-primary", () => openSettingsWorkspace()), "book"));
-      body2.appendChild(editor2);
-      shell.appendChild(body2);
+      const body = createElement("div", "lore-modal-body empty");
+      const editor = createElement("div", "lore-modal-editor");
+      editor.appendChild(createEmpty("No managed books", "Pick lorebooks in the settings workspace first, then build or edit their trees here.", createButton("Open extension settings", "lore-btn lore-btn-sm lore-btn-primary", () => openSettingsWorkspace()), "book"));
+      body.appendChild(editor);
+      shell.appendChild(body);
       workspaceModal.root.appendChild(shell);
       return;
     }

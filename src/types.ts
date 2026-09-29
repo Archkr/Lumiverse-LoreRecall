@@ -28,6 +28,10 @@ export interface GlobalLoreRecallSettings {
   treeGranularity: number;
   chunkTokens: number;
   dedupMode: DedupMode;
+  jevProvider: "typesafe" | "openrouter";
+  jevModel: string;
+  jevTimeoutMs: number;
+  jevThreshold: number;
 }
 
 export interface CharacterRetrievalConfig {
@@ -236,6 +240,10 @@ export interface RetrievalPreview {
   isActual: boolean;
   controllerUsed: boolean;
   resolvedConnectionId?: string | null;
+  routedCategories?: string[];
+  modelSelectedEntries?: PreviewNode[];
+  jevApprovedEntries?: PreviewNode[];
+  jevRejectedEntries?: PreviewNode[];
 }
 
 export type RetrievalFeedItemKind = "trace" | "scope" | "search" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
@@ -371,11 +379,14 @@ export interface FrontendState {
   suggestedBookIds: string[];
   retrievalFeed: RetrievalFeedState;
   preview: RetrievalPreview | null;
+  jevKeyStored?: boolean;
 }
 
 export type FrontendToBackend =
   | { type: "ready"; chatId?: string | null }
   | { type: "refresh"; chatId?: string | null }
+  | { type: "save_jev_key"; provider: "typesafe" | "openrouter"; apiKey: string; chatId?: string | null }
+  | { type: "clear_jev_key"; provider: "typesafe" | "openrouter"; chatId?: string | null }
   | {
       type: "save_global_settings";
       chatId?: string | null;

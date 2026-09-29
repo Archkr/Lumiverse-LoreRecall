@@ -23,6 +23,10 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalLoreRecallSettings = {
   treeGranularity: 0,
   chunkTokens: 30000,
   dedupMode: "none",
+  jevProvider: "typesafe",
+  jevModel: "",
+  jevTimeoutMs: 8000,
+  jevThreshold: 0.6,
 };
 
 export const DEFAULT_CHARACTER_CONFIG: CharacterRetrievalConfig = {
@@ -174,6 +178,10 @@ export function normalizeGlobalSettings(value?: Partial<GlobalLoreRecallSettings
       120000,
     ),
     dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none",
+    jevProvider: next.jevProvider === "openrouter" ? "openrouter" : "typesafe",
+    jevModel: typeof next.jevModel === "string" ? next.jevModel.trim() : "",
+    jevTimeoutMs: clampInt(next.jevTimeoutMs ?? DEFAULT_GLOBAL_SETTINGS.jevTimeoutMs, 1000, 60000),
+    jevThreshold: clampFloat(next.jevThreshold ?? DEFAULT_GLOBAL_SETTINGS.jevThreshold, 0, 1),
   };
 }
 

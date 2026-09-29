@@ -1343,8 +1343,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const meta = createElement("div", "lore-cluster");
     meta.append(
-      createTag(preview.mode === "traversal" ? "Traversal" : "Collapsed", "accent"),
-      createTag(preview.controllerUsed ? "Controller used" : "Deterministic fallback", preview.controllerUsed ? "good" : "warn"),
+      createTag("Category routing", "accent"),
+      createTag(preview.controllerUsed ? "Model used" : "Model unavailable", preview.controllerUsed ? "good" : "warn"),
       createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`),
       createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"),
       createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"),
@@ -1358,18 +1358,18 @@ export function setup(ctx: SpindleFrontendContext) {
     const grid = createElement("div", "lore-last-grid");
     const searches = createElement("div", "lore-last-panel");
     searches.append(
-      createElement("div", "lore-last-panel-title", "Search & scopes"),
-      renderSearchActivity(preview) ?? createEmpty("No search activity"),
+      createElement("div", "lore-last-panel-title", "Routed categories"),
+      createElement("div", "lore-note-body", preview.routedCategories?.join(", ") || "No category selected"),
     );
 
     const pulled = createElement("div", "lore-last-panel");
     pulled.append(
-      createElement("div", "lore-last-panel-title", "Pulled"),
+      createElement("div", "lore-last-panel-title", "Model picks"),
       renderRetrievalEntries(
-        getPreviewPulledNodes(preview),
+        preview.modelSelectedEntries ?? getPreviewPulledNodes(preview),
         "pulled",
-        "Nothing pulled",
-        "No entries were pulled into the retrieval set for this turn.",
+        "No model picks",
+        "The model selected no dynamic entries this turn.",
       ),
     );
 
@@ -1395,7 +1395,14 @@ export function setup(ctx: SpindleFrontendContext) {
       ),
     );
 
-    grid.append(searches, reserved, pulled, injected);
+    const jevPanel = createElement("div", "lore-last-panel");
+    jevPanel.append(
+      createElement("div", "lore-last-panel-title", "JEV approved"),
+      renderRetrievalEntries(preview.jevApprovedEntries ?? [], "pulled", "No approvals", "No dynamic entries passed the JEV filter."),
+      createElement("div", "lore-last-panel-title", `JEV rejected: ${preview.jevRejectedEntries?.length ?? 0}`),
+      renderRetrievalEntries(preview.jevRejectedEntries ?? [], "pulled", "No rejections", "JEV did not reject any model picks."),
+    );
+    grid.append(searches, reserved, pulled, jevPanel, injected);
     section.appendChild(grid);
     return section;
   }
@@ -1637,11 +1644,11 @@ export function setup(ctx: SpindleFrontendContext) {
     const isRunning = session.status === "running";
     const elapsedMs = getSessionElapsedMs(session);
     const marker = createElement("div", `lore-feed-session-marker ${getSessionTone(session)}${isRunning ? " live" : ""}`);
-    marker.appendChild(createElement("span", "lore-feed-session-mode", session.mode === "traversal" ? "Traversal" : "Collapsed"));
+    marker.appendChild(createElement("span", "lore-feed-session-mode", "Category retrieval"));
     const meta = [
       getSessionStatusLabel(session),
       formatTimeOnly(session.startedAt),
-      session.controllerUsed ? "controller" : "deterministic",
+      session.controllerUsed ? "model" : "model unavailable",
       `${visibleItemCount} event${visibleItemCount === 1 ? "" : "s"}`,
     ];
     if (session.fallbackReason) meta.push("fallback");
@@ -1868,7 +1875,6 @@ export function setup(ctx: SpindleFrontendContext) {
     const managed = getManagedBookIds();
     const enabled = !!state?.characterConfig?.enabled;
     const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
-    const mode = state?.characterConfig?.searchMode ?? "collapsed";
 
     // --- Brand block --------------------------------------------------
     const head = createElement("div", "lore-page-head");
@@ -1922,7 +1928,7 @@ export function setup(ctx: SpindleFrontendContext) {
     };
     metrics.append(
       metric(managed.length, managed.length === 1 ? "book" : "books"),
-      metric(formatMode(mode), "mode"),
+      metric("Categories", "route"),
       metric(injectLimit, "inject limit"),
     );
     shell.appendChild(metrics);
@@ -2360,7 +2366,7 @@ export function setup(ctx: SpindleFrontendContext) {
         createElement(
           "div",
           "lore-hint",
-          `${needsBuild} managed book${needsBuild === 1 ? "" : "s"} still need an initial build before retrieval can use them.`,
+          `${needsBuild} managed book${needsBuild === 1 ? "" : "s"} can be organized with a tree build. Until then, entries route through Other.`,
         ),
       );
     }
@@ -2776,7 +2782,7 @@ export function setup(ctx: SpindleFrontendContext) {
         createElement(
           "div",
           "lore-hint",
-          `${totals.missingTrees} book${totals.missingTrees === 1 ? " is" : "s are"} missing a tree - build one to enable retrieval.`, 
+          `${totals.missingTrees} book${totals.missingTrees === 1 ? " has" : "s have"} no organized tree. Entries can still route through Other.`,
         ),
       );
     }
@@ -2851,44 +2857,8 @@ export function setup(ctx: SpindleFrontendContext) {
     section.appendChild(topRow);
 
     const form = createElement("div", "lore-form");
-    form.appendChild(
-      createField(
-        "Search mode",
-        createSelect(
-          characterDraft.searchMode,
-          [
-            ["collapsed", "Collapsed"],
-            ["traversal", "Traversal"],
-          ],
-          (next) => {
-            characterDraft!.searchMode = next;
-          },
-        ),
-      ),
-    );
-    form.appendChild(
-      createField(
-        "Multi-book mode",
-        createSelect(
-          characterDraft.multiBookMode,
-          [
-            ["unified", "Unified"],
-            ["per_book", "Per book"],
-          ],
-          (next) => {
-            characterDraft!.multiBookMode = next;
-          },
-        ),
-      ),
-    );
-
     for (const [key, label] of [
-      ["collapsedDepth", "Collapsed depth"],
-      ["maxResults", "Pull limit"],
-      ["maxTraversalDepth", "Traversal depth"],
-      ["traversalStepLimit", "Traversal step limit"],
-      ["scopePickLimit", "Scope pick limit"],
-      ["tokenBudget", "Inject limit"],
+      ["tokenBudget", "Dynamic entry cap"],
       ["contextMessages", "Context messages"],
     ] as const) {
       form.appendChild(
@@ -2903,29 +2873,9 @@ export function setup(ctx: SpindleFrontendContext) {
 
     form.appendChild(
       createFieldNote(
-        "Scope pick limit caps how many scopes the controller may choose in one step. Pull limit caps the candidate pool exposed to final manifest selection. Inject limit caps dynamic entries; constant entries are injected separately.",
+        "The model routes top-level categories and reviews every eligible entry in them. JEV filters its picks. The cap applies afterward; constants are separate.",
       ),
     );
-
-    // Switches row
-    const switches = createElement("div", "lore-field-span");
-    const switchRow = createElement("div", "lore-cluster");
-    switchRow.style.gap = "20px";
-    switchRow.append(
-      createSwitch("Rerank top candidates", characterDraft.rerankEnabled, (next) => {
-        characterDraft!.rerankEnabled = next;
-      }),
-      createSwitch("Selective retrieval", characterDraft.selectiveRetrieval, (next) => {
-        characterDraft!.selectiveRetrieval = next;
-      }),
-    );
-    switches.appendChild(switchRow);
-    switches.appendChild(
-      createFieldNote(
-        "Selective retrieval off injects from the retrieved candidate pool and lets caps trim the result. Selective retrieval on makes the controller choose the exact final entry IDs, including sparse or empty dynamic sets.",
-      ),
-    );
-    form.appendChild(switches);
 
     section.appendChild(form);
 
@@ -3061,6 +3011,40 @@ export function setup(ctx: SpindleFrontendContext) {
       globalDraft!.controllerConnectionId = connectionSelect.value || null;
     });
     form.appendChild(createField("Controller connection", connectionSelect));
+
+    form.appendChild(createField("JEV provider", createSelect(globalDraft.jevProvider,
+      [["typesafe", "TypeSafe"], ["openrouter", "OpenRouter"]],
+      (next) => { globalDraft!.jevProvider = next; })));
+    form.appendChild(createField("JEV model", createTextInput(globalDraft.jevModel,
+      "Provider default", (next) => { globalDraft!.jevModel = next; })));
+    form.appendChild(createField("JEV timeout (ms)", createNumberInput(globalDraft.jevTimeoutMs,
+      (next) => { globalDraft!.jevTimeoutMs = next; })));
+    const thresholdInput = createNumberInput(globalDraft.jevThreshold,
+      (next) => { globalDraft!.jevThreshold = next; });
+    thresholdInput.step = "0.01";
+    thresholdInput.min = "0";
+    thresholdInput.max = "1";
+    form.appendChild(createField("JEV approval threshold", thresholdInput));
+    const keyInput = createElement("input", "lore-input") as HTMLInputElement;
+    keyInput.type = "password";
+    keyInput.placeholder = state.jevKeyStored ? "JEV key stored" : "Enter API key";
+    form.appendChild(createField("JEV API key", keyInput));
+    const keyActions = createElement("div", "lore-actions");
+    keyActions.append(
+      createButton("Save JEV key", "lore-btn lore-btn-sm", () => {
+        sendToBackend(ctx, { type: "save_jev_key", provider: globalDraft!.jevProvider,
+          apiKey: keyInput.value, chatId: state.activeChatId });
+        keyInput.value = "";
+      }),
+      createButton("Clear JEV key", "lore-btn lore-btn-sm", () => {
+        sendToBackend(ctx, { type: "clear_jev_key", provider: globalDraft!.jevProvider,
+          chatId: state.activeChatId });
+      }),
+    );
+    form.appendChild(keyActions);
+    form.appendChild(createFieldNote(state.jevKeyStored
+      ? "JEV is ready. Explicit rejections are removed; unanswered entries pass through."
+      : "Add a key to enable JEV filtering. Model picks pass through until then."));
 
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
@@ -3357,6 +3341,7 @@ export function setup(ctx: SpindleFrontendContext) {
         panel.appendChild(createEmpty("Gone", "That category is no longer available."));
         return panel;
       }
+      const fixedRoot = tree.nodes[selected.nodeId]?.parentId === tree.rootId;
 
       const head = createElement("div", "lore-editor-head");
       head.append(
@@ -3370,13 +3355,8 @@ export function setup(ctx: SpindleFrontendContext) {
       }
 
       const form = createElement("div", "lore-form");
-      form.appendChild(
-        createField(
-          "Label",
-          createTextInput(draft.label, "Category label", (next) => {
-            draft.label = next;
-          }),
-        ),
+      if (!fixedRoot) form.appendChild(
+        createField("Label", createTextInput(draft.label, "Category label", (next) => { draft.label = next; })),
       );
       const parentOptions = getCategoryOptions(tree).filter(
         (option) => option.value !== selected.nodeId && option.value !== "unassigned",
@@ -3387,7 +3367,7 @@ export function setup(ctx: SpindleFrontendContext) {
       parentSelect.addEventListener("change", () => {
         draft.parentId = parentSelect.value;
       });
-      form.appendChild(createField("Parent", parentSelect));
+      if (!fixedRoot) form.appendChild(createField("Parent", parentSelect));
       form.appendChild(
         createField(
           "Summary",
@@ -3470,7 +3450,7 @@ export function setup(ctx: SpindleFrontendContext) {
             chatId: currentState?.activeChatId,
           }),
         ),
-        createButton("Delete", "lore-btn lore-btn-danger lore-btn-sm", () =>
+        ...(!fixedRoot ? [createButton("Delete", "lore-btn lore-btn-danger lore-btn-sm", () =>
           sendToBackend(ctx, {
             type: "delete_category",
             bookId,
@@ -3478,7 +3458,7 @@ export function setup(ctx: SpindleFrontendContext) {
             chatId: currentState?.activeChatId,
             target: "unassigned",
           }),
-        ),
+        )] : []),
         createElement("span", "lore-actions-spacer"),
         createButton("Save category", "lore-btn lore-btn-primary lore-btn-sm", () => {
           const validationError = validateCategoryDraft(draft);
@@ -3499,10 +3479,8 @@ export function setup(ctx: SpindleFrontendContext) {
             chatId: currentState?.activeChatId,
             patch: { label: draft.label, summary: draft.summary, collapsed: draft.collapsed },
           });
-          sendToBackend(ctx, {
-            type: "move_category",
-            bookId,
-            nodeId: selected.nodeId,
+          if (!fixedRoot && draft.parentId !== tree.nodes[selected.nodeId]?.parentId) sendToBackend(ctx, {
+            type: "move_category", bookId, nodeId: selected.nodeId,
             parentId: draft.parentId === "root" ? null : draft.parentId,
             chatId: currentState?.activeChatId,
           });
@@ -3588,7 +3566,7 @@ export function setup(ctx: SpindleFrontendContext) {
         "Summary",
         createTextarea(
           draft.summary,
-          "A short description used for ranking and traversal.",
+          "A short description shown during model entry selection.",
           (next) => {
             draft.summary = next;
           },
@@ -3601,7 +3579,7 @@ export function setup(ctx: SpindleFrontendContext) {
         "Collapsed text",
         createTextarea(
           draft.collapsedText,
-          "The compact body injected during collapsed retrieval.",
+          "Optional compact reference text kept for existing metadata workflows.",
           (next) => {
             draft.collapsedText = next;
           },

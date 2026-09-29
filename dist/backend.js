@@ -12,7 +12,11 @@ var DEFAULT_GLOBAL_SETTINGS = {
   buildDetail: "lite",
   treeGranularity: 0,
   chunkTokens: 30000,
-  dedupMode: "none"
+  dedupMode: "none",
+  jevProvider: "typesafe",
+  jevModel: "",
+  jevTimeoutMs: 8000,
+  jevThreshold: 0.6
 };
 var DEFAULT_CHARACTER_CONFIG = {
   enabled: false,
@@ -111,7 +115,11 @@ function normalizeGlobalSettings(value) {
     buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
-    dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none"
+    dedupMode: next.dedupMode === "lexical" || next.dedupMode === "llm" ? next.dedupMode : "none",
+    jevProvider: next.jevProvider === "openrouter" ? "openrouter" : "typesafe",
+    jevModel: typeof next.jevModel === "string" ? next.jevModel.trim() : "",
+    jevTimeoutMs: clampInt(next.jevTimeoutMs ?? DEFAULT_GLOBAL_SETTINGS.jevTimeoutMs, 1000, 60000),
+    jevThreshold: clampFloat(next.jevThreshold ?? DEFAULT_GLOBAL_SETTINGS.jevThreshold, 0, 1)
   };
 }
 function getEffectiveTreeGranularity(setting, entryCount = 0) {
@@ -354,17 +362,6 @@ function assignEntryToTarget(tree, entryId, target) {
   }
   node.entryIds.push(entryId);
 }
-function getNodeDepth(tree, nodeId) {
-  let depth = 0;
-  let cursor = tree.nodes[nodeId];
-  const visited = new Set;
-  while (cursor && cursor.parentId && cursor.parentId !== cursor.id && !visited.has(cursor.id)) {
-    visited.add(cursor.id);
-    depth += 1;
-    cursor = tree.nodes[cursor.parentId];
-  }
-  return depth;
-}
 function getNodePath(tree, nodeId) {
   const path = [];
   const visited = new Set;
@@ -589,6 +586,68 @@ async function runControllerJson(prompt, settings, userId, options = {}) {
   if (normalized)
     return { parsed: normalized, ...base };
   return { parsed: null, ...base };
+}
+
+// src/categories.ts
+var ROOT_CATEGORIES = ["Characters", "Locations", "Items", "Factions", "Events", "Worldbuilding", "Other"];
+var HINTS = {
+  Characters: /character|person|people|cast|npc|protagonist|relationship|family/i,
+  Locations: /location|place|region|city|town|land|map|geograph/i,
+  Items: /item|object|artifact|equipment|weapon|tool|inventory/i,
+  Factions: /faction|organization|group|guild|house|clan|government/i,
+  Events: /event|history|timeline|era|incident|war|battle/i,
+  Worldbuilding: /world|lore|magic|system|rule|culture|religion|species|setting/i
+};
+function classifyCategory(label) {
+  const matches = Object.keys(HINTS).filter((root) => HINTS[root].test(label));
+  return matches.length === 1 ? matches[0] : "Other";
+}
+function ensureRootCategories(tree) {
+  const root = tree.nodes[tree.rootId];
+  if (!root)
+    return tree;
+  const existing = [...root.childIds];
+  const fixedIds = new Map;
+  for (const label of ROOT_CATEGORIES)
+    fixedIds.set(label, ensureCategoryPath(tree, [label], "system"));
+  for (const id of existing) {
+    const node = tree.nodes[id];
+    if (!node || Array.from(fixedIds.values()).includes(id))
+      continue;
+    const target = fixedIds.get(classifyCategory(`${node.label} ${node.summary}`));
+    root.childIds = root.childIds.filter((childId) => childId !== id);
+    node.parentId = target;
+    if (!tree.nodes[target].childIds.includes(id))
+      tree.nodes[target].childIds.push(id);
+  }
+  const other = tree.nodes[fixedIds.get("Other")];
+  other.entryIds = [...new Set([...other.entryIds, ...root.entryIds, ...tree.unassignedEntryIds])];
+  root.entryIds = [];
+  tree.unassignedEntryIds = [];
+  root.childIds = ROOT_CATEGORIES.map((label) => fixedIds.get(label));
+  return tree;
+}
+function rootCategoryForEntry(tree, entryId) {
+  for (const label of ROOT_CATEGORIES) {
+    const rootId = tree.nodes[tree.rootId]?.childIds.find((id) => tree.nodes[id]?.label === label);
+    if (!rootId)
+      continue;
+    const queue = [rootId];
+    const visited = new Set;
+    while (queue.length) {
+      const id = queue.shift();
+      if (visited.has(id))
+        continue;
+      visited.add(id);
+      const node = tree.nodes[id];
+      if (!node)
+        continue;
+      if (node.entryIds.includes(entryId))
+        return label;
+      queue.push(...node.childIds);
+    }
+  }
+  return "Other";
 }
 
 // src/backend/runtime.ts
@@ -921,23 +980,23 @@ async function loadTreeIndex(bookId, entries, userId) {
   const rawTree = await spindle.userStorage.getJson(path, { fallback: null, userId });
   const validEntryIds = new Set(entries.map((entry) => entry.entryId));
   const issues = inspectTreeIssues(rawTree, validEntryIds);
-  let tree = ensureTreeIndexShape(rawTree, bookId, Array.from(validEntryIds));
+  let tree = ensureRootCategories(ensureTreeIndexShape(rawTree, bookId, Array.from(validEntryIds)));
   if (!treeHasContent(tree)) {
     const migrated = migrateLegacyTree(bookId, entries);
     if (migrated) {
-      tree = ensureTreeIndexShape(migrated, bookId, Array.from(validEntryIds));
+      tree = ensureRootCategories(ensureTreeIndexShape(migrated, bookId, Array.from(validEntryIds)));
     } else {
-      tree = createEmptyTreeIndex(bookId);
-      tree.unassignedEntryIds = entries.map((entry) => entry.entryId);
+      tree = ensureRootCategories(createEmptyTreeIndex(bookId));
+      tree.nodes[tree.nodes[tree.rootId].childIds.at(-1)].entryIds = entries.map((entry) => entry.entryId);
     }
     await spindle.userStorage.setJson(path, tree, { indent: 2, userId });
-  } else if (rawTree?.version !== TREE_VERSION || issues.staleEntryRefs || issues.staleNodeRefs) {
+  } else if (rawTree?.version !== TREE_VERSION || issues.staleEntryRefs || issues.staleNodeRefs || JSON.stringify(rawTree) !== JSON.stringify(tree)) {
     await spindle.userStorage.setJson(path, tree, { indent: 2, userId });
   }
   return { tree, ...issues };
 }
 async function saveTreeIndex(bookId, tree, entryIds, userId) {
-  await spindle.userStorage.setJson(getTreePath(bookId), ensureTreeIndexShape(tree, bookId, entryIds), {
+  await spindle.userStorage.setJson(getTreePath(bookId), ensureRootCategories(ensureTreeIndexShape(tree, bookId, entryIds)), {
     indent: 2,
     userId
   });
@@ -1015,40 +1074,141 @@ function canEditBook(config) {
   return config.permission !== "read_only";
 }
 
+// src/backend/jev.ts
+var PROVIDERS = {
+  typesafe: { url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" },
+  openrouter: { url: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.13" }
+};
+function secretSlot(provider) {
+  return `lore-recall-jev.${provider}`;
+}
+function enclave() {
+  return spindle.enclave;
+}
+async function hasJevKey(provider, userId) {
+  return !!await readJevKey(provider, userId);
+}
+async function readJevKey(provider, userId) {
+  try {
+    const key = await enclave()?.get(secretSlot(provider), userId);
+    return typeof key === "string" && key.trim() ? key.trim() : null;
+  } catch {
+    return null;
+  }
+}
+async function saveJevKey(provider, key, userId) {
+  if (!key.trim())
+    throw new Error("Enter a JEV API key.");
+  if (typeof enclave()?.put !== "function")
+    throw new Error("Encrypted secret storage is unavailable.");
+  await enclave().put(secretSlot(provider), key.trim(), userId);
+}
+async function clearJevKey(provider, userId) {
+  if (typeof enclave()?.delete !== "function")
+    throw new Error("Encrypted secret storage is unavailable.");
+  await enclave().delete(secretSlot(provider), userId);
+}
+async function filterWithJev(entries, conversation, settings, userId) {
+  if (!entries.length)
+    return { verdicts: [], error: null };
+  const key = await readJevKey(settings.jevProvider, userId);
+  const cors = typeof spindle === "undefined" ? null : spindle.cors;
+  const fallback = (error) => ({
+    verdicts: entries.map((entry) => ({ entryId: entry.entryId, approved: true, confidence: null, answered: false })),
+    error
+  });
+  if (!key)
+    return fallback("JEV key is not configured; model picks passed through.");
+  if (typeof cors !== "function")
+    return fallback("JEV network permission is unavailable; model picks passed through.");
+  const verdicts = [];
+  const provider = PROVIDERS[settings.jevProvider];
+  const deadline = Date.now() + 20000;
+  for (let offset = 0;offset < entries.length; offset += 32) {
+    if (deadline - Date.now() < 1000) {
+      return { verdicts: [...verdicts, ...entries.slice(offset).map((entry) => ({
+        entryId: entry.entryId,
+        approved: true,
+        confidence: null,
+        answered: false
+      }))], error: "JEV ran out of time; remaining model picks passed through." };
+    }
+    const batch = entries.slice(offset, offset + 32);
+    const questions = Object.fromEntries(batch.map((entry, index) => [
+      `entry_${index}`,
+      {
+        type: "noul",
+        instructions: `Should the lore entry identified by entry_${index} be available for the very next reply? Answer yes only when it materially helps the current scene.`,
+        criteria: { true: "Useful for the next reply", false: "Irrelevant or only background context" }
+      }
+    ]));
+    const state = {
+      conversation: conversation.slice(-12000),
+      entries: batch.map((entry, index) => ({
+        id: `entry_${index}`,
+        label: entry.label,
+        book: entry.worldBookName,
+        aliases: entry.aliases,
+        keys: entry.key,
+        summary: entry.summary.slice(0, 400),
+        preview: entry.previewText.slice(0, 350)
+      }))
+    };
+    let timer = null;
+    try {
+      const response = await Promise.race([
+        cors.call(spindle, provider.url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ model: settings.jevModel || provider.model, state, questions })
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("JEV timed out.")), Math.min(settings.jevTimeoutMs, deadline - Date.now()));
+        })
+      ]);
+      if (timer)
+        clearTimeout(timer);
+      const envelope = typeof response === "string" ? { status: 200, body: response } : response;
+      if (envelope?.status && (envelope.status < 200 || envelope.status >= 300))
+        throw new Error(`JEV HTTP ${envelope.status}.`);
+      const payload = JSON.parse(envelope?.body ?? envelope?.text ?? "{}");
+      if (!payload.answers || typeof payload.answers !== "object")
+        throw new Error("JEV returned no answers.");
+      for (let index = 0;index < batch.length; index++) {
+        const answer = payload.answers[`entry_${index}`];
+        const value = answer?.type === "noul" ? Number(answer.noul) : NaN;
+        const answered = Number.isFinite(value) && value >= 0 && value <= 1;
+        verdicts.push({
+          entryId: batch[index].entryId,
+          approved: !answered || value >= settings.jevThreshold,
+          confidence: answered ? value : null,
+          answered
+        });
+      }
+    } catch (error) {
+      if (timer)
+        clearTimeout(timer);
+      for (const entry of batch)
+        verdicts.push({ entryId: entry.entryId, approved: true, confidence: null, answered: false });
+      return { verdicts: [...verdicts, ...entries.slice(offset + batch.length).map((entry) => ({
+        entryId: entry.entryId,
+        approved: true,
+        confidence: null,
+        answered: false
+      }))], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  return { verdicts, error: null };
+}
+
 // src/backend/retrieval.ts
 var TRACE_REPORTER = Symbol("traceReporter");
-var CONTROLLER_TIMEOUT_MS = 45000;
-var CONTROLLER_TOTAL_BUDGET_MS = 175000;
-var CONTROLLER_MAX_CALLS = 12;
-var TRAVERSAL_CATEGORY_LIMIT = 24;
-var TRAVERSAL_SEARCH_LIMIT = 18;
-var TRAVERSAL_FULL_OVERVIEW_LIMIT = 1e4;
 var RECENT_MESSAGE_LIMIT = 700;
 var RECENT_SCENE_MESSAGE_LIMIT = 6000;
 var SCENE_MESSAGE_LOOKBACK = 4;
-var DEFAULT_SCOPE_PICK_LIMIT = 5;
-var DOCUMENT_CHOICE_PREFIX = "doc:";
 var EMPTY_ENTRY_ID_SET = new Set;
-var DIRECT_MENTION_SEED_LIMIT = 12;
-var SCENE_ANCHOR_LIMIT = 12;
-var SELECTIVE_FALLBACK_LIMIT = 8;
-var ACTIVE_ANCHOR_SCORE_THRESHOLD = 8;
-var BACKGROUND_MENTION_SCORE_THRESHOLD = 10;
-var SUPPORT_CONTEXT_SCORE_THRESHOLD = 14;
-var SCENE_SUPPORT_SCORE_THRESHOLD = 8;
-var RELATED_SUPPORT_SCORE_THRESHOLD = 10;
-var RELATED_SUPPORT_LIMIT = 16;
-var PROTECTED_RELATED_SUPPORT_LIMIT = 6;
-var PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT = 4;
-var PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT = 2;
-var PROTECTED_SCENE_SUPPORT_LIMIT = 2;
-var SCOPE_CORE_SMALL_CANDIDATE_LIMIT = 6;
-var SCOPE_CORE_REMAINING_SLOT_RATIO = 0.6;
-var SCOPE_CORE_CANDIDATE_RATIO = 0.6;
-var HIGH_CONFIDENCE_DYNAMIC_THRESHOLD = 12;
 var FEEDBACK_HOT_MS = 2 * 60 * 60 * 1000;
 var FEEDBACK_WARM_MS = 12 * 60 * 60 * 1000;
-var FEEDBACK_STALE_INJECTION_THRESHOLD = 3;
 var SCOPE_CORE_GENERIC_LABEL_TERMS = new Set([
   "accord",
   "accords",
@@ -1188,18 +1348,6 @@ var SEARCH_STOPWORDS = new Set([
   "you",
   "your"
 ]);
-var RETRIEVAL_SCOPE_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only node IDs exactly as shown in the provided knowledge tree. Use raw node IDs or doc:<bookId> selectors when shown. Return only the requested JSON with no commentary or markdown.";
-var RETRIEVAL_BOOK_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only lore book IDs from the provided list. Return only the requested JSON with no commentary or markdown.";
-var RETRIEVAL_MANIFEST_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only entry IDs from the provided scoped manifests. Return only the requested JSON with no commentary or markdown.";
-var RETRIEVAL_TRAVERSAL_SYSTEM_PROMPT = "You are a retrieval assistant. Choose only the shown action and choice IDs exactly as presented in the traversal frontier. Return only the requested JSON with no commentary or markdown.";
-function createTraceBuffer(reporter) {
-  const trace = [];
-  trace[TRACE_REPORTER] = reporter;
-  return trace;
-}
-function getTraceReporter(trace) {
-  return trace[TRACE_REPORTER];
-}
 function emitProgress(reporter, event) {
   if (!reporter)
     return;
@@ -1228,34 +1376,6 @@ function createFeedItem(kind, label, summary, options = {}) {
     durationMs: typeof options.durationMs === "number" ? options.durationMs : null
   };
 }
-function emitTraceFeedItem(trace, label, summary, options = {}) {
-  const reporter = getTraceReporter(trace);
-  if (!reporter)
-    return;
-  emitProgress(reporter, {
-    type: "item",
-    item: createFeedItem("trace", label, summary, options)
-  });
-}
-function pushTrace(trace, phase, label, summary, extra = {}) {
-  trace.push({
-    step: trace.length + 1,
-    phase,
-    label,
-    summary,
-    bookId: extra.bookId ?? null,
-    nodeId: extra.nodeId ?? null,
-    entryCount: extra.entryCount ?? null
-  });
-  if (phase === "fallback") {
-    emitTraceFeedItem(trace, label, summary, {
-      phase,
-      count: typeof extra.entryCount === "number" ? extra.entryCount : null,
-      tone: "warn",
-      durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null
-    });
-  }
-}
 function stripSearchMarkup(value) {
   return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -1269,7 +1389,7 @@ function isRetrievalChatHistoryMessage(message, messages) {
   if (message.role !== "assistant" && message.role !== "user" || !message.content.trim())
     return false;
   const hasHistoryFlags = messages.some((item) => typeof item.__isChatHistory === "boolean");
-  return hasHistoryFlags ? message.__isChatHistory === true : message.role === "assistant";
+  return hasHistoryFlags ? message.__isChatHistory === true || message.role === "user" : true;
 }
 function buildQueryText(messages, contextMessages) {
   const recentMessages = messages.filter((message) => isRetrievalChatHistoryMessage(message, messages)).slice(-contextMessages);
@@ -1358,265 +1478,6 @@ function buildPromptContext(recentConversation) {
   return `RECENT CONVERSATION:
 ${recentConversation}`;
 }
-function getTailText(value, maxLength) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength)
-    return normalized;
-  return normalized.slice(-maxLength).trim();
-}
-function isConstraintLine(text) {
-  const normalized = text.trim();
-  return /^(?:note|timeline|context|setting|canon|continuity)\s*:/i.test(normalized) || /\bstory\s+takes\s+place\b/i.test(normalized);
-}
-function isConstraintUserLine(text) {
-  return isConstraintLine(text);
-}
-function buildRetrievalTextSegments(recentConversation) {
-  const parsed = recentConversation.split(`
-`).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const match = /^(User|Assistant|Character):\s*(.*)$/i.exec(line);
-    return {
-      role: match?.[1]?.toLowerCase() ?? "",
-      text: match?.[2]?.trim() ?? line,
-      raw: line
-    };
-  });
-  const latestUserIndex = (() => {
-    for (let index = parsed.length - 1;index >= 0; index -= 1) {
-      if (parsed[index]?.role === "user" && !isConstraintUserLine(parsed[index].text))
-        return index;
-    }
-    return -1;
-  })();
-  const latestAssistantIndex = (() => {
-    for (let index = parsed.length - 1;index >= 0; index -= 1) {
-      const role = parsed[index]?.role;
-      if (role === "assistant" || role === "character")
-        return index;
-    }
-    return -1;
-  })();
-  const constraintLines = parsed.filter((item) => isConstraintLine(item.text)).map((item) => item.text);
-  const latestUserText = latestUserIndex >= 0 ? parsed[latestUserIndex].text : "";
-  const latestAssistantText = latestAssistantIndex >= 0 ? getTailText(parsed[latestAssistantIndex].text, 1400) : "";
-  const activeSceneText = parsed.filter((item) => !isConstraintLine(item.text)).map((item) => item.text).join(" ");
-  const fallbackText = parsed.length ? parsed.map((item) => item.text).join(" ") : recentConversation;
-  return {
-    fullText: normalizeSearchText(fallbackText),
-    latestUserText: normalizeSearchText(latestUserText),
-    latestAssistantText: normalizeSearchText(latestAssistantText),
-    activeText: normalizeSearchText(activeSceneText),
-    backgroundText: "",
-    constraintText: normalizeSearchText(constraintLines.join(" "))
-  };
-}
-function buildSceneSelectionSignals(recentConversation) {
-  const segments = buildRetrievalTextSegments(recentConversation);
-  return {
-    normalizedConversation: segments.fullText,
-    latestExchange: segments.activeText,
-    activeText: segments.activeText,
-    backgroundText: segments.backgroundText,
-    constraintText: segments.constraintText
-  };
-}
-function countPhraseOccurrences(haystack, phrase) {
-  if (!haystack || !phrase)
-    return 0;
-  const normalizedHaystack = ` ${normalizeSearchText(haystack)} `;
-  const normalizedPhrase = normalizeSearchText(phrase);
-  if (!normalizedPhrase)
-    return 0;
-  let count = 0;
-  let fromIndex = 0;
-  const needle = ` ${normalizedPhrase} `;
-  while (fromIndex < normalizedHaystack.length) {
-    const matchIndex = normalizedHaystack.indexOf(needle, fromIndex);
-    if (matchIndex === -1)
-      break;
-    count += 1;
-    fromIndex = matchIndex + needle.length;
-  }
-  return count;
-}
-function normalizeVariantList(values) {
-  return uniqueStrings(values).map((value) => normalizeSearchText(value)).filter((value) => value.length >= 3);
-}
-function inferSelectionSignal(entry, reasons, signals) {
-  const labelVariants = normalizeVariantList([entry.label]);
-  const aliasVariants = normalizeVariantList(entry.aliases);
-  const latestLabelMentions = labelVariants.reduce((total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.activeText, phrase)), 0);
-  const latestAliasMentions = aliasVariants.reduce((total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.activeText, phrase)), 0);
-  const overallLabelMentions = labelVariants.reduce((total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.normalizedConversation, phrase)), 0);
-  const overallAliasMentions = aliasVariants.reduce((total, phrase) => total + Math.min(1, countPhraseOccurrences(signals.normalizedConversation, phrase)), 0);
-  const latestMentionCount = latestLabelMentions + latestAliasMentions;
-  const overallMentionCount = overallLabelMentions + overallAliasMentions;
-  if (latestMentionCount > 0) {
-    return {
-      role: "active_anchor",
-      latestMentionCount,
-      overallMentionCount: Math.max(overallMentionCount, latestMentionCount)
-    };
-  }
-  if (overallMentionCount > 0) {
-    return {
-      role: "background_mention",
-      latestMentionCount,
-      overallMentionCount
-    };
-  }
-  if (reasons.some((reason) => reason === "label" || reason === "alias" || reason === "keyword")) {
-    return { role: "support_context", latestMentionCount, overallMentionCount };
-  }
-  if (reasons.some((reason) => reason === "branch" || reason === "summary" || reason === "content" || reason === "comment" || reason === "tag")) {
-    return { role: "support_context", latestMentionCount, overallMentionCount };
-  }
-  return { role: "score_fallback", latestMentionCount, overallMentionCount };
-}
-function rankSelectionCandidates(recentConversation, candidates, scopes) {
-  const signals = buildSceneSelectionSignals(recentConversation);
-  const roleWeight = {
-    active_anchor: 700,
-    background_mention: 420,
-    support_context: 300,
-    recent_mention: 640,
-    context_mention: 540,
-    label_match: 420,
-    alias_match: 380,
-    keyword_match: 320,
-    branch_match: 260,
-    content_match: 220,
-    score_fallback: 120
-  };
-  return candidates.map((candidate) => {
-    const scope = scopes.find((item) => getScopedEntryIds(item.book, item.nodeId, true).includes(candidate.entry.entryId));
-    const inferred = inferSelectionSignal(candidate.entry, candidate.reasons, signals);
-    const selectionRole = candidate.selectionRole ?? inferred.role;
-    let priority = roleWeight[selectionRole] + candidate.score * 10 + inferred.latestMentionCount * 45 + inferred.overallMentionCount * 20;
-    if (selectionRole === "background_mention")
-      priority -= 60;
-    if (selectionRole === "support_context")
-      priority -= 80;
-    if (candidate.reasons.includes("label"))
-      priority += 18;
-    if (candidate.reasons.includes("alias"))
-      priority += 12;
-    if (candidate.reasons.includes("keyword"))
-      priority += 8;
-    if (candidate.reasons.includes("branch"))
-      priority += 4;
-    return {
-      candidate: { ...candidate, selectionRole },
-      selectionRole,
-      priority,
-      scopeBreadcrumb: scope ? getScopeBreadcrumb(scope.book, scope.nodeId) : "Unscoped",
-      latestMentionCount: inferred.latestMentionCount,
-      overallMentionCount: inferred.overallMentionCount
-    };
-  }).sort((left, right) => right.priority - left.priority || right.candidate.score - left.candidate.score || left.candidate.entry.label.localeCompare(right.candidate.entry.label));
-}
-function buildDeterministicSelection(rankedCandidates, maxResults) {
-  if (!rankedCandidates.length || maxResults <= 0)
-    return [];
-  const eligibleRankedCandidates = rankedCandidates.filter((item) => isDynamicInjectionEligible(item.candidate));
-  const activeAnchors = eligibleRankedCandidates.filter((item) => item.selectionRole === "active_anchor" || item.selectionRole === "recent_mention");
-  const supportContext = eligibleRankedCandidates.filter((item) => item.selectionRole !== "active_anchor" && item.selectionRole !== "recent_mention").sort((left, right) => scoreDensity(right.candidate) - scoreDensity(left.candidate) || right.priority - left.priority || right.candidate.score - left.candidate.score || left.candidate.entry.label.localeCompare(right.candidate.entry.label));
-  return [...activeAnchors, ...supportContext].slice(0, maxResults).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-}
-function containsToken(normalizedText, token) {
-  return ` ${normalizedText} `.includes(` ${token} `);
-}
-function looksLikeNamedEntityLabel(label) {
-  const words = label.match(/[A-Za-z0-9']+/g) ?? [];
-  const meaningfulWords = words.filter((word) => !SEARCH_STOPWORDS.has(word.toLowerCase()));
-  if (!meaningfulWords.length || meaningfulWords.length > 4)
-    return false;
-  if (words.some((word) => SEARCH_STOPWORDS.has(word.toLowerCase())))
-    return false;
-  return meaningfulWords.every((word) => /^[A-Z0-9]/.test(word));
-}
-function entryHasDirectMentionSignal(entry, signals) {
-  if (isCompositeEntryLabel(entry.label) && !hasStrongCompositeEvidence(entry, {
-    fullText: signals.normalizedConversation,
-    latestUserText: "",
-    latestAssistantText: "",
-    activeText: signals.activeText,
-    backgroundText: signals.backgroundText,
-    constraintText: signals.constraintText
-  })) {
-    return false;
-  }
-  const exactPhraseMention = [entry.label, ...entry.aliases].map((value) => normalizeSearchText(value)).filter((value) => value.length >= 3).some((phrase) => countPhraseOccurrences(signals.activeText, phrase) > 0);
-  if (exactPhraseMention)
-    return true;
-  const mentionTokens = uniqueStrings([entry.label, ...entry.aliases].flatMap(tokenize)).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
-  const matchingTokens = mentionTokens.filter((token) => containsToken(signals.activeText, token));
-  if (!matchingTokens.length)
-    return false;
-  const rawLabel = entry.label.toLowerCase();
-  if (rawLabel.includes("'s") || rawLabel.includes("&"))
-    return false;
-  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 3 && !SEARCH_STOPWORDS.has(token));
-  if (labelTokens.some((token) => SCOPE_CORE_GENERIC_LABEL_TERMS.has(token)))
-    return false;
-  if (matchingTokens.length >= 2)
-    return true;
-  return labelTokens.length <= 2 && looksLikeNamedEntityLabel(entry.label) && matchingTokens.some((token) => labelTokens.includes(token));
-}
-function buildDirectMentionCandidates(recentConversation, candidates, scopes, limit = DIRECT_MENTION_SEED_LIMIT) {
-  if (!candidates.length || limit <= 0)
-    return [];
-  const signals = buildSceneSelectionSignals(recentConversation);
-  return rankSelectionCandidates(recentConversation, candidates, scopes).filter((item) => item.selectionRole === "active_anchor" || entryHasDirectMentionSignal(item.candidate.entry, signals)).slice(0, limit).map((item) => ({
-    ...item.candidate,
-    score: Math.max(item.candidate.score, ACTIVE_ANCHOR_SCORE_THRESHOLD),
-    reasons: uniqueStrings([...item.candidate.reasons, "mention"]),
-    selectionRole: "active_anchor"
-  }));
-}
-function mergeSelectionRole(existingRole, incomingRole) {
-  if (!existingRole)
-    return incomingRole;
-  if (!incomingRole)
-    return existingRole;
-  const priority = {
-    active_anchor: 5,
-    recent_mention: 5,
-    background_mention: 4,
-    context_mention: 4,
-    label_match: 3,
-    alias_match: 3,
-    keyword_match: 3,
-    support_context: 2,
-    content_match: 2,
-    branch_match: 1,
-    score_fallback: 0
-  };
-  return priority[incomingRole] > priority[existingRole] ? incomingRole : existingRole;
-}
-function mergeScoredEntry(existing, incoming) {
-  return {
-    ...existing,
-    score: Math.max(existing.score, incoming.score),
-    reasons: uniqueStrings([...existing.reasons, ...incoming.reasons]),
-    selectionRole: mergeSelectionRole(existing.selectionRole, incoming.selectionRole)
-  };
-}
-function mergeScoredEntryLists(...lists) {
-  const byId = new Map;
-  for (const list of lists) {
-    for (const item of list) {
-      const existing = byId.get(item.entry.entryId);
-      byId.set(item.entry.entryId, existing ? mergeScoredEntry(existing, item) : item);
-    }
-  }
-  return Array.from(byId.values());
-}
-function getDynamicEntryLimit(config, remainingDynamicSlots) {
-  if (remainingDynamicSlots <= 0)
-    return 0;
-  return clampInt(Math.min(config.maxResults, remainingDynamicSlots), 1, 32);
-}
 function collectReservedConstantEntries(books) {
   const reserved = [];
   const seen = new Set;
@@ -1634,22 +1495,6 @@ function collectReservedConstantEntries(books) {
     }
   }
   return reserved.sort((left, right) => left.entry.worldBookName.localeCompare(right.entry.worldBookName) || left.entry.label.localeCompare(right.entry.label));
-}
-function summarizeSelection(selection, reservedConstantCount = 0, remainingDynamicSlots) {
-  if (!selection.length) {
-    if (reservedConstantCount > 0) {
-      const free = typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap was ${Math.max(0, remainingDynamicSlots)} entr${remainingDynamicSlots === 1 ? "y" : "ies"}.` : "";
-      return `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"} and selected no dynamic entries.${free}`;
-    }
-    return "No entries selected.";
-  }
-  const mentionCount = selection.filter((item) => item.selectionRole === "active_anchor" || item.selectionRole === "background_mention" || item.selectionRole === "recent_mention" || item.selectionRole === "context_mention").length;
-  const reservedPrefix = reservedConstantCount > 0 ? `Prepared ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}; ` : "";
-  const freeSuffix = typeof remainingDynamicSlots === "number" ? ` Dynamic injection cap: ${Math.max(0, remainingDynamicSlots)}.` : "";
-  if (mentionCount > 0) {
-    return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s), led by active anchors and direct query mentions.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
-  }
-  return `${reservedPrefix}final selection contains ${selection.length} dynamic entry candidate(s) from final manifest selection.${freeSuffix}`.replace(/^f/, (match) => match.toUpperCase());
 }
 function getEntryBody(entry) {
   const collapsed = entry.collapsedText.trim();
@@ -1671,55 +1516,6 @@ function getEntryInjectionBody(entry) {
 function getEntryBreadcrumb(entry, tree) {
   const path = getEntryCategoryPath(tree, entry.entryId).map((node) => node.label).filter((label) => label && label !== "Root");
   return [...path, entry.label].join(" > ");
-}
-function countTokenMatches(queryTokens, targetTokens) {
-  if (!queryTokens.length || !targetTokens.length)
-    return 0;
-  const targetSet = new Set(targetTokens);
-  let count = 0;
-  for (const token of new Set(queryTokens)) {
-    if (targetSet.has(token))
-      count += 1;
-  }
-  return count;
-}
-function countSegmentPhrase(segment, phrase) {
-  if (!segment || !phrase || phrase.length < 2)
-    return 0;
-  return countPhraseOccurrences(segment, phrase);
-}
-function scorePhraseVariants(values, segments, weights) {
-  let score = 0;
-  let active = 0;
-  let background = 0;
-  let constraint = 0;
-  let overall = 0;
-  for (const phrase of normalizeVariantList(values)) {
-    const latestUserMatches = Math.min(2, countSegmentPhrase(segments.latestUserText, phrase));
-    const latestAssistantMatches = Math.min(1, countSegmentPhrase(segments.latestAssistantText, phrase));
-    const activeMatches = latestUserMatches + latestAssistantMatches;
-    const backgroundMatches = Math.min(1, countSegmentPhrase(segments.backgroundText, phrase));
-    const constraintMatches = Math.min(1, countSegmentPhrase(segments.constraintText, phrase));
-    const fullMatches = countSegmentPhrase(segments.fullText, phrase);
-    if (latestUserMatches) {
-      active += latestUserMatches;
-      score += weights.active * latestUserMatches;
-    }
-    if (latestAssistantMatches) {
-      active += latestAssistantMatches;
-      score += Math.max(1, weights.active * 0.65) * latestAssistantMatches;
-    }
-    if (backgroundMatches) {
-      background += backgroundMatches;
-      score += weights.background * backgroundMatches;
-    }
-    if (constraintMatches) {
-      constraint += constraintMatches;
-      score += weights.constraint * constraintMatches;
-    }
-    overall += fullMatches;
-  }
-  return { score, active, background, constraint, overall };
 }
 var COMPOSITE_LABEL_TERMS = new Set([
   "affection",
@@ -1778,2140 +1574,6 @@ var SUPPORT_CONTEXT_TERMS = new Set([
   "weapon",
   "weapons"
 ]);
-function getPrincipalLabelTokens(label) {
-  return tokenize(label).filter((token) => !COMPOSITE_LABEL_TERMS.has(token));
-}
-function isCompositeEntryLabel(label) {
-  const raw = label.toLowerCase();
-  const tokens = tokenize(label);
-  return /(?:&|\/|\+)|\b(?:and|with)\b|(?:'s|\u2019s)\b/.test(raw) || COMPOSITE_LABEL_TERMS.has(tokens[tokens.length - 1] ?? "") || tokens.some((token) => COMPOSITE_LABEL_TERMS.has(token));
-}
-function hasStrongCompositeEvidence(entry, segments) {
-  const exactVariants = normalizeVariantList([entry.label, ...entry.aliases]);
-  if (exactVariants.some((phrase) => countSegmentPhrase(segments.fullText, phrase) > 0))
-    return true;
-  const principalTokens = getPrincipalLabelTokens(entry.label);
-  if (principalTokens.length < 2)
-    return false;
-  const activeHits = principalTokens.filter((token) => containsToken(segments.activeText, token)).length;
-  const requiredHits = principalTokens.length <= 2 ? principalTokens.length : 3;
-  return activeHits >= requiredHits;
-}
-function getDynamicFeedbackBoost(entry, feedback) {
-  if (entry.constant || !feedback)
-    return 0;
-  const data = feedback.entries[entry.entryId];
-  if (!data)
-    return 0;
-  let boost = 0;
-  if (data.lastReferenced) {
-    const elapsed = Date.now() - data.lastReferenced;
-    if (elapsed < FEEDBACK_HOT_MS)
-      boost += 5;
-    else if (elapsed < FEEDBACK_WARM_MS)
-      boost += 3;
-  }
-  if (data.injections >= 3 && data.references / data.injections > 0.5)
-    boost += 3;
-  if (data.missStreak >= 5)
-    boost -= 4;
-  else if (data.missStreak >= 3)
-    boost -= 2;
-  if (data.injections >= FEEDBACK_STALE_INJECTION_THRESHOLD && data.references === 0)
-    boost -= 3;
-  boost -= Math.max(0, data.recentInjectionCount) * 5;
-  return boost;
-}
-function hasPrimaryReason(reasons) {
-  return reasons.includes("label") || reasons.includes("alias") || reasons.includes("keyword");
-}
-function hasSceneSupportReason(reasons) {
-  return reasons.includes("summary") || reasons.includes("content") || reasons.includes("comment");
-}
-function isConstraintOnlyCandidate(reasons) {
-  return reasons.includes("constraint") && !reasons.includes("active") && !reasons.includes("background");
-}
-function isHighConfidenceSceneSupport(candidate) {
-  return candidate.selectionRole === "support_context" && candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD && hasSceneSupportReason(candidate.reasons) && !isConstraintOnlyCandidate(candidate.reasons);
-}
-function isDynamicInjectionEligible(candidate) {
-  if (candidate.entry.constant)
-    return true;
-  if (candidate.reasons.includes("related_support")) {
-    return candidate.score >= RELATED_SUPPORT_SCORE_THRESHOLD;
-  }
-  if (isConstraintOnlyCandidate(candidate.reasons))
-    return false;
-  if (!hasPrimaryReason(candidate.reasons))
-    return isHighConfidenceSceneSupport(candidate);
-  switch (candidate.selectionRole) {
-    case "active_anchor":
-      return candidate.score >= ACTIVE_ANCHOR_SCORE_THRESHOLD;
-    case "background_mention":
-      return candidate.score >= BACKGROUND_MENTION_SCORE_THRESHOLD;
-    case "support_context":
-      return candidate.score >= SUPPORT_CONTEXT_SCORE_THRESHOLD;
-    default:
-      return candidate.score >= HIGH_CONFIDENCE_DYNAMIC_THRESHOLD;
-  }
-}
-function filterDynamicInjectionCandidates(candidates) {
-  return candidates.filter(isDynamicInjectionEligible);
-}
-function getScopeCoreReserve(candidateCount, remainingSlots) {
-  if (candidateCount <= 0 || remainingSlots <= 0)
-    return 0;
-  if (candidateCount <= SCOPE_CORE_SMALL_CANDIDATE_LIMIT)
-    return Math.min(candidateCount, remainingSlots);
-  return Math.min(remainingSlots, Math.max(SCOPE_CORE_SMALL_CANDIDATE_LIMIT, Math.min(Math.ceil(remainingSlots * SCOPE_CORE_REMAINING_SLOT_RATIO), Math.ceil(candidateCount * SCOPE_CORE_CANDIDATE_RATIO))));
-}
-function entryLooksLikeScopeCoreEntity(entry) {
-  if (isCompositeEntryLabel(entry.label))
-    return false;
-  const labelTokens = tokenize(entry.label).filter((token) => token.length >= 2 && !SEARCH_STOPWORDS.has(token));
-  if (!labelTokens.length)
-    return false;
-  if (labelTokens.some((token) => SCOPE_CORE_GENERIC_LABEL_TERMS.has(token)))
-    return false;
-  if (looksLikeNamedEntityLabel(entry.label))
-    return true;
-  const metadataTokens = [
-    entry.groupName,
-    entry.tags.join(" "),
-    entry.key.join(" "),
-    entry.keysecondary.join(" ")
-  ].flatMap(tokenize);
-  return metadataTokens.some((token) => SCOPE_CORE_ENTITY_HINT_TERMS.has(token));
-}
-function collectScopeCoreCandidates(candidates, scopes, excludedEntryIds) {
-  if (!candidates.length || !scopes.length)
-    return [];
-  const scopedEntryIds = new Set(scopes.flatMap((scope) => getScopedEntryIds(scope.book, scope.nodeId, true)));
-  return candidates.filter((candidate) => scopedEntryIds.has(candidate.entry.entryId) && !excludedEntryIds.has(candidate.entry.entryId) && !candidate.entry.constant && !candidate.reasons.includes("related_support") && !isConstraintOnlyCandidate(candidate.reasons) && entryLooksLikeScopeCoreEntity(candidate.entry));
-}
-function selectProtectedScopeCore(candidates, recentConversation, scopes, remainingSlots, excludedEntryIds) {
-  const coreCandidates = collectScopeCoreCandidates(candidates, scopes, excludedEntryIds);
-  const limit = getScopeCoreReserve(coreCandidates.length, remainingSlots);
-  if (limit <= 0)
-    return [];
-  return rankSelectionCandidates(recentConversation, coreCandidates, scopes).slice(0, limit).map((item) => ({
-    ...item.candidate,
-    reasons: uniqueStrings([...item.candidate.reasons, "scope_core"]),
-    selectionRole: item.selectionRole
-  }));
-}
-function scoreDensity(candidate) {
-  return candidate.score / Math.max(getEntryInjectionBody(candidate.entry).length, 1);
-}
-function entryLooksLikeSupportContext(entry, tree) {
-  const labelTokens = tokenize(entry.label);
-  if (labelTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token)))
-    return true;
-  if ([...entry.tags, entry.groupName, ...entry.key, ...entry.keysecondary].flatMap(tokenize).some((token) => SUPPORT_CONTEXT_TERMS.has(token))) {
-    return true;
-  }
-  if (tree) {
-    const breadcrumbTokens = tokenize(getEntryBreadcrumb(entry, tree));
-    if (breadcrumbTokens.some((token) => SUPPORT_CONTEXT_TERMS.has(token)))
-      return true;
-  }
-  return false;
-}
-function scoreRelatedSupportCandidate(candidate, tree, seedEntries, seedText, feedback) {
-  if (candidate.disabled || candidate.constant || !seedEntries.length)
-    return null;
-  const reasons = ["related_support"];
-  let score = 0;
-  const labelPhrases = normalizeVariantList([candidate.label]);
-  const aliasPhrases = normalizeVariantList(candidate.aliases);
-  const keyPhrases = normalizeVariantList([...candidate.key, ...candidate.keysecondary]);
-  const exactLabelMatches = labelPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
-  const aliasMatches = aliasPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
-  const keyMatches = keyPhrases.reduce((total, phrase) => total + Math.min(2, countSegmentPhrase(seedText, phrase)), 0);
-  if (isCompositeEntryLabel(candidate.label) && exactLabelMatches <= 0 && aliasMatches <= 0) {
-    const principalTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
-    const principalHits = principalTokens.filter((token) => containsToken(seedText, token)).length;
-    if (principalHits < Math.min(principalTokens.length, 3))
-      return null;
-  }
-  if (exactLabelMatches > 0) {
-    score += exactLabelMatches * 16;
-    reasons.push("label");
-  }
-  if (aliasMatches > 0) {
-    score += aliasMatches * 12;
-    reasons.push("alias");
-  }
-  if (keyMatches > 0) {
-    score += keyMatches * 10;
-    reasons.push("keyword");
-  }
-  const candidateLabelTokens = getPrincipalLabelTokens(candidate.label).filter((token) => token.length >= 4 && !SEARCH_STOPWORDS.has(token));
-  const labelTokenHits = candidateLabelTokens.filter((token) => containsToken(seedText, token)).length;
-  if (labelTokenHits >= Math.min(2, candidateLabelTokens.length)) {
-    score += labelTokenHits * 4;
-    if (!reasons.includes("label"))
-      reasons.push("label");
-  }
-  const candidateText = normalizeSearchText([
-    candidate.label,
-    candidate.summary,
-    candidate.comment,
-    candidate.groupName,
-    candidate.tags.join(" "),
-    getEntryBreadcrumb(candidate, tree),
-    truncateText(getEntryBody(candidate), 1000)
-  ].join(" "));
-  const seedPhraseHits = seedEntries.reduce((total, seed) => {
-    const phrases = normalizeVariantList([seed.entry.label, ...seed.entry.aliases]);
-    return total + phrases.reduce((innerTotal, phrase) => innerTotal + Math.min(1, countSegmentPhrase(candidateText, phrase)), 0);
-  }, 0);
-  if (seedPhraseHits > 0) {
-    score += Math.min(10, seedPhraseHits * 3);
-    reasons.push("content");
-  }
-  if (entryLooksLikeSupportContext(candidate, tree)) {
-    score += 4;
-    reasons.push("support_context");
-  }
-  score += getDynamicFeedbackBoost(candidate, feedback);
-  if (score < RELATED_SUPPORT_SCORE_THRESHOLD)
-    return null;
-  return {
-    entry: candidate,
-    score,
-    reasons: uniqueStrings(reasons),
-    selectionRole: "support_context"
-  };
-}
-function buildRelatedSupportCandidates(seedEntries, books, excludedEntryIds, existingEntryIds, feedback, limit = RELATED_SUPPORT_LIMIT) {
-  if (!seedEntries.length || limit <= 0)
-    return [];
-  const seedText = normalizeSearchText(seedEntries.map((item) => [
-    item.entry.label,
-    item.entry.aliases.join(" "),
-    item.entry.summary,
-    item.entry.comment,
-    item.entry.tags.join(" "),
-    item.entry.groupName,
-    getEntryInjectionBody(item.entry)
-  ].join(" ")).join(" "));
-  if (!seedText)
-    return [];
-  return books.flatMap((book) => book.cache.entries.filter((entry) => !excludedEntryIds.has(entry.entryId) && !existingEntryIds.has(entry.entryId)).map((entry) => scoreRelatedSupportCandidate(entry, book.tree, seedEntries, seedText, feedback))).filter((item) => !!item).sort((left, right) => Number(entryLooksLikeSupportContext(right.entry)) - Number(entryLooksLikeSupportContext(left.entry)) || scoreDensity(right) - scoreDensity(left) || right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, limit);
-}
-function compareSupportContext(left, right) {
-  return Number(right.reasons.includes("support_context")) - Number(left.reasons.includes("support_context")) || scoreDensity(right) - scoreDensity(left) || right.score - left.score || left.entry.label.localeCompare(right.entry.label);
-}
-function compareRelatedBridge(left, right) {
-  return right.score - left.score || scoreDensity(right) - scoreDensity(left) || left.entry.label.localeCompare(right.entry.label);
-}
-function selectProtectedRelatedSupport(candidates, limit) {
-  if (limit <= 0)
-    return [];
-  const eligible = candidates.filter((candidate) => candidate.reasons.includes("related_support") && !candidate.entry.constant && isDynamicInjectionEligible(candidate));
-  if (!eligible.length)
-    return [];
-  const selected = [];
-  const selectedIds = new Set;
-  const addCandidates = (items, count) => {
-    for (const item of items) {
-      if (selected.length >= limit || count <= 0)
-        break;
-      if (selectedIds.has(item.entry.entryId))
-        continue;
-      selected.push(item);
-      selectedIds.add(item.entry.entryId);
-      count -= 1;
-    }
-  };
-  const supportContexts = eligible.filter((candidate) => candidate.reasons.includes("support_context")).sort(compareSupportContext);
-  addCandidates(supportContexts, Math.min(PROTECTED_RELATED_SUPPORT_CONTEXT_LIMIT, limit));
-  const bridgeEntries = eligible.filter((candidate) => !candidate.reasons.includes("support_context") && hasPrimaryReason(candidate.reasons)).sort(compareRelatedBridge);
-  addCandidates(bridgeEntries, Math.min(PROTECTED_RELATED_SUPPORT_BRIDGE_LIMIT, limit - selected.length));
-  const remaining = eligible.filter((candidate) => !selectedIds.has(candidate.entry.entryId)).sort(compareSupportContext);
-  addCandidates(remaining, limit - selected.length);
-  return selected;
-}
-function selectProtectedSceneSupport(candidates, recentConversation, scopes, limit) {
-  if (limit <= 0)
-    return [];
-  return rankSelectionCandidates(recentConversation, candidates.filter((candidate) => !candidate.reasons.includes("related_support") && isHighConfidenceSceneSupport(candidate)), scopes).slice(0, limit).map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-}
-function scoreEntry(entry, tree, queryText, queryTokens, feedback) {
-  const reasons = [];
-  let score = 0;
-  const segments = buildRetrievalTextSegments(queryText);
-  const breadcrumb = normalizeSearchText(getEntryBreadcrumb(entry, tree));
-  const labelText = normalizeSearchText(entry.label);
-  const summaryText = normalizeSearchText(entry.summary);
-  const tagText = normalizeSearchText(entry.tags.join(" "));
-  const commentText = normalizeSearchText(entry.comment);
-  const bodyText = normalizeSearchText(truncateText(getEntryBody(entry), 500));
-  const groupText = normalizeSearchText(entry.groupName);
-  const scoringTokens = tokenize(segments.activeText);
-  const supportQueryTokens = scoringTokens.length ? scoringTokens : queryTokens;
-  const compositeLabel = isCompositeEntryLabel(entry.label);
-  const compositeEvidence = !compositeLabel || hasStrongCompositeEvidence(entry, segments);
-  const labelEvidence = compositeEvidence ? scorePhraseVariants([entry.label], segments, { active: 18, background: 5, constraint: 3 }) : { score: 0, active: 0, background: 0, constraint: 0, overall: 0 };
-  const aliasEvidence = scorePhraseVariants(entry.aliases, segments, { active: 14, background: 4, constraint: 2 });
-  const keyEvidence = scorePhraseVariants([...entry.key, ...entry.keysecondary], segments, {
-    active: 10,
-    background: 3,
-    constraint: 2
-  });
-  if (labelEvidence.score > 0)
-    reasons.push("label");
-  if (aliasEvidence.score > 0)
-    reasons.push("alias");
-  if (keyEvidence.score > 0)
-    reasons.push("keyword");
-  score += labelEvidence.score + aliasEvidence.score + keyEvidence.score;
-  const labelMatches = compositeEvidence ? countTokenMatches(supportQueryTokens, tokenize(labelText)) : 0;
-  const aliasMatches = countTokenMatches(supportQueryTokens, uniqueStrings(entry.aliases.flatMap(tokenize)));
-  const keyMatches = countTokenMatches(supportQueryTokens, uniqueStrings([...entry.key, ...entry.keysecondary].flatMap(tokenize)));
-  const tagMatches = countTokenMatches(supportQueryTokens, tokenize(tagText));
-  const summaryMatches = countTokenMatches(supportQueryTokens, tokenize(summaryText));
-  const bodyMatches = Math.min(6, countTokenMatches(supportQueryTokens, tokenize(bodyText)));
-  const breadcrumbMatches = countTokenMatches(supportQueryTokens, tokenize(breadcrumb));
-  const commentMatches = countTokenMatches(supportQueryTokens, tokenize(commentText));
-  const groupMatches = countTokenMatches(supportQueryTokens, tokenize(groupText));
-  if (labelMatches > 0 && !reasons.includes("label"))
-    reasons.push("label");
-  if (aliasMatches > 0 && !reasons.includes("alias"))
-    reasons.push("alias");
-  if (keyMatches > 0 && !reasons.includes("keyword"))
-    reasons.push("keyword");
-  if (tagMatches > 0)
-    reasons.push("tag");
-  if (summaryMatches > 0)
-    reasons.push("summary");
-  if (bodyMatches > 0)
-    reasons.push("content");
-  if (breadcrumbMatches > 0)
-    reasons.push("branch");
-  if (commentMatches > 0)
-    reasons.push("comment");
-  if (groupMatches > 0)
-    reasons.push("group");
-  score += labelMatches * 2;
-  score += aliasMatches * 2;
-  score += keyMatches * 2;
-  score += tagMatches;
-  score += summaryMatches;
-  score += Math.min(3, bodyMatches);
-  score += breadcrumbMatches;
-  score += commentMatches;
-  score += groupMatches;
-  score += getDynamicFeedbackBoost(entry, feedback);
-  if (entry.selective)
-    score += 0.1;
-  const primaryActive = labelEvidence.active + aliasEvidence.active + keyEvidence.active;
-  const primaryBackground = labelEvidence.background + aliasEvidence.background + keyEvidence.background;
-  const primaryConstraint = labelEvidence.constraint + aliasEvidence.constraint + keyEvidence.constraint;
-  const primaryOverall = labelEvidence.overall + aliasEvidence.overall + keyEvidence.overall;
-  let selectionRole = "score_fallback";
-  if (primaryActive > 0) {
-    selectionRole = "active_anchor";
-    reasons.push("active");
-  } else if (primaryBackground > 0) {
-    selectionRole = "background_mention";
-    reasons.push("background");
-  } else if (primaryConstraint > 0) {
-    selectionRole = "support_context";
-    reasons.push("constraint");
-  } else if (primaryOverall > 0) {
-    selectionRole = "support_context";
-  } else if (score > 0) {
-    selectionRole = "support_context";
-  }
-  return { entry, score, reasons: Array.from(new Set(reasons)), selectionRole };
-}
-function scoreEntries(queryText, books, excludedEntryIds = EMPTY_ENTRY_ID_SET, feedback) {
-  const normalized = normalizeSearchText(queryText);
-  const queryTokens = tokenize(queryText);
-  if (!normalized || !queryTokens.length)
-    return [];
-  return books.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled && !excludedEntryIds.has(entry.entryId)).map((entry) => scoreEntry(entry, book.tree, queryText, queryTokens, feedback))).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
-}
-async function runControllerJson2(prompt, controller, systemPrompt, requestLabel = "Controller request") {
-  if (controller.callCount >= CONTROLLER_MAX_CALLS) {
-    return { parsed: null, error: "Traversal controller hit its call limit.", durationMs: null };
-  }
-  const remainingMs = controller.deadlineAt - Date.now();
-  if (remainingMs <= 1000) {
-    return { parsed: null, error: "Traversal controller ran out of time.", durationMs: null };
-  }
-  controller.callCount += 1;
-  const requestStartedAt = Date.now();
-  const abortController = new AbortController;
-  const timeoutMs = Math.min(CONTROLLER_TIMEOUT_MS, remainingMs);
-  let timer = null;
-  let timeoutHandled = false;
-  try {
-    const requestPromise = runControllerJson(prompt, controller.settings, controller.userId, {
-      systemPrompt,
-      connectionId: controller.connectionId,
-      temperatureOverride: 0.1,
-      signal: abortController.signal
-    }).then((result) => {
-      const durationMs = Date.now() - requestStartedAt;
-      if (result.parsed) {
-        controller.controllerUsed = true;
-        if (result.parsedFrom === "reasoning") {
-          emitProgress(controller.reportProgress, {
-            type: "item",
-            item: createFeedItem("issue", `Controller parse fallback: ${requestLabel}`, "Controller JSON was recovered from reasoning text because the main content channel was unusable.", {
-              phase: "controller",
-              tone: "warn",
-              durationMs
-            })
-          });
-        }
-        return { parsed: result.parsed, error: null, durationMs };
-      }
-      spindle.log.warn("Lore Recall controller call returned invalid JSON.");
-      emitProgress(controller.reportProgress, {
-        type: "item",
-        item: createFeedItem("issue", `Controller issue: ${requestLabel}`, "Controller returned invalid JSON, so Lore Recall will fall back where it can.", {
-          phase: "controller",
-          tone: "warn",
-          durationMs,
-          details: [
-            `parsedFrom=${result.parsedFrom ?? "none"}`,
-            `finishReason=${result.finishReason ?? "unknown"}`
-          ]
-        })
-      });
-      return { parsed: null, error: "Traversal controller returned invalid JSON.", durationMs };
-    }).catch((error) => {
-      const durationMs = Date.now() - requestStartedAt;
-      const message = error instanceof Error ? error.message : String(error);
-      const isAbort = error instanceof Error && error.name === "AbortError";
-      if (isAbort && timeoutHandled) {
-        return {
-          parsed: null,
-          error: "Traversal controller timed out before the interceptor budget was exhausted.",
-          durationMs
-        };
-      }
-      spindle.log.warn(`Lore Recall controller call failed: ${isAbort ? "request timed out" : message}`);
-      emitProgress(controller.reportProgress, {
-        type: "item",
-        item: createFeedItem("issue", `${isAbort ? "Controller timeout" : "Controller error"}: ${requestLabel}`, isAbort ? "Controller request timed out and Lore Recall will keep going with fallback behavior when possible." : `Controller request failed: ${message}`, {
-          phase: "controller",
-          tone: isAbort ? "warn" : "error",
-          durationMs,
-          details: isAbort ? [`Timeout after ${timeoutMs} ms.`] : [message]
-        })
-      });
-      return {
-        parsed: null,
-        error: isAbort ? "Traversal controller timed out." : `Traversal controller failed: ${message}`,
-        durationMs
-      };
-    });
-    const timeoutPromise = new Promise((resolve) => {
-      timer = setTimeout(() => {
-        timeoutHandled = true;
-        abortController.abort();
-        const durationMs = Date.now() - requestStartedAt;
-        spindle.log.warn("Lore Recall controller call failed: request timed out");
-        emitProgress(controller.reportProgress, {
-          type: "item",
-          item: createFeedItem("issue", `Controller timeout: ${requestLabel}`, "Controller request timed out before Lore Recall finished retrieval.", {
-            phase: "controller",
-            tone: "warn",
-            durationMs,
-            details: [`Timeout after ${timeoutMs} ms.`]
-          })
-        });
-        resolve({
-          parsed: null,
-          error: "Traversal controller timed out before the interceptor budget was exhausted.",
-          durationMs
-        });
-      }, timeoutMs);
-    });
-    const response = await Promise.race([requestPromise, timeoutPromise]);
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    return response;
-  } finally {
-    if (timer)
-      clearTimeout(timer);
-  }
-}
-async function maybeChooseBooks(recentConversation, books, config, controller, allowController) {
-  if (!allowController || config.multiBookMode !== "per_book" || books.length <= 1) {
-    return { books, trace: [] };
-  }
-  const prompt = [
-    "Choose the most relevant lore books for the query.",
-    'Return ONLY JSON in this exact shape: {"bookIds":["book-id-1","book-id-2"]}.',
-    `Choose up to ${Math.min(3, books.length)} books.`,
-    "",
-    buildPromptContext(recentConversation),
-    "",
-    "Books:",
-    ...books.map((book) => `- id=${book.summary.id}; name=${book.summary.name}; description=${truncateText(book.config.description || book.tree.nodes[book.tree.rootId]?.summary || book.summary.description, 140)}; categories=${Math.max(0, Object.keys(book.tree.nodes).length - 1)}; entries=${book.cache.entries.length}`)
-  ].join(`
-`);
-  const { parsed } = await runControllerJson2(prompt, controller, RETRIEVAL_BOOK_SYSTEM_PROMPT, "Choose books");
-  const ids = Array.isArray(parsed?.bookIds) ? parsed.bookIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-  if (!ids.length)
-    return { books, trace: [] };
-  const chosen = books.filter((book) => ids.includes(book.summary.id));
-  const nextBooks = chosen.length ? chosen : books;
-  const trace = createTraceBuffer(controller.reportProgress);
-  pushTrace(trace, "choose_book", "Book selection", nextBooks.length ? `Controller selected ${nextBooks.length} book(s): ${nextBooks.map((book) => book.summary.name).join(", ")}.` : "Controller kept all readable books in scope.", { entryCount: nextBooks.reduce((total, book) => total + book.cache.entries.length, 0) });
-  return { books: nextBooks, trace };
-}
-async function maybeRerankEntries(queryText, scored, controller, allowController) {
-  if (!allowController || scored.length <= 1)
-    return scored;
-  const prompt = [
-    "You rank lore nodes for retrieval relevance.",
-    'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    "Use only entryIds from the candidate list.",
-    "",
-    buildPromptContext(queryText),
-    "",
-    "Candidates:",
-    ...scored.map((item) => `- entryId=${item.entry.entryId}; label=${item.entry.label}; book=${item.entry.worldBookName}; summary=${truncateText(item.entry.summary, 120)}; preview=${truncateText(getEntryBody(item.entry), 160)}`)
-  ].join(`
-`);
-  const { parsed } = await runControllerJson2(prompt, controller, undefined, "Rerank entries");
-  const ids = Array.isArray(parsed?.entryIds) ? parsed.entryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-  if (!ids.length)
-    return scored;
-  const byId = new Map(scored.map((item) => [item.entry.entryId, item]));
-  const ordered = [];
-  const seen = new Set;
-  for (const id of ids) {
-    const match = byId.get(id);
-    if (!match || seen.has(id))
-      continue;
-    seen.add(id);
-    ordered.push(match);
-  }
-  for (const item of scored) {
-    if (seen.has(item.entry.entryId))
-      continue;
-    ordered.push(item);
-  }
-  return ordered;
-}
-async function maybeSelectEntries(queryText, candidates, config, controller, allowController, scopes = [], maxFinalEntries = clampInt(Math.min(config.maxResults, config.tokenBudget), 1, 32)) {
-  const eligibleCandidates = filterDynamicInjectionCandidates(candidates);
-  if (!eligibleCandidates.length)
-    return [];
-  const initialRankedCandidates = rankSelectionCandidates(queryText, eligibleCandidates, scopes);
-  const initialRankedById = new Map(initialRankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
-  let orderedEntries = initialRankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-  if (config.rerankEnabled) {
-    orderedEntries = await maybeRerankEntries(queryText, orderedEntries, controller, allowController);
-  }
-  const rankedCandidates = orderedEntries.map((entry) => {
-    const ranked = initialRankedById.get(entry.entry.entryId);
-    const selectionRole = ranked?.selectionRole ?? entry.selectionRole ?? "score_fallback";
-    return {
-      candidate: { ...entry, selectionRole },
-      selectionRole,
-      priority: ranked?.priority ?? entry.score * 10,
-      scopeBreadcrumb: ranked?.scopeBreadcrumb ?? "Unscoped",
-      latestMentionCount: ranked?.latestMentionCount ?? 0,
-      overallMentionCount: ranked?.overallMentionCount ?? 0
-    };
-  });
-  const clampedFinalEntries = Math.min(eligibleCandidates.length, Math.max(0, maxFinalEntries));
-  if (!clampedFinalEntries)
-    return [];
-  const fallbackLimit = config.selectiveRetrieval ? Math.min(clampedFinalEntries, SELECTIVE_FALLBACK_LIMIT) : clampedFinalEntries;
-  const buildScopedFallbackSelection = (limit = fallbackLimit) => buildDeterministicSelection(rankedCandidates, limit);
-  const rankedEntries = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-  const manifests = buildScopedManifests(rankedEntries, scopes);
-  const manifestedIds = new Set(manifests.flatMap((manifest) => manifest.candidates.map((item) => item.entry.entryId)));
-  const additionalCandidates = rankedCandidates.filter((item) => !manifestedIds.has(item.candidate.entry.entryId));
-  if (!config.selectiveRetrieval || !rankedCandidates.length) {
-    return buildScopedFallbackSelection();
-  }
-  if (!allowController) {
-    return buildScopedFallbackSelection();
-  }
-  const prompt = [
-    "Select the exact lore entries that should be injected as the final set from the retrieved manifests and accumulated candidate pool.",
-    'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-    `Choose up to ${clampedFinalEntries} entryIds from the candidates below.`,
-    "Default to a compact final set: usually 1-6 entries, rarely more than 8. The cap is a maximum, not a target.",
-    "Use only entryIds that appear below.",
-    "Preserve directly mentioned active anchors such as active characters, places, objects, or factions unless the candidate is plainly a false positive.",
-    "Preserve selected-scope core entries marked with reason scope_core; they are the main cast/faction/group payload and should not be replaced by unrelated faction or support stragglers.",
-    "The retrieved scopes are already the traversal decision. Additional candidates are pooled entries not represented in a scope manifest, not forced injections.",
-    "Entries may come from any listed scope, and some scopes may contribute zero entries.",
-    "It is valid to choose fewer entries than the cap when only a sparse set is useful.",
-    "Return an empty entryIds array when none of the listed entries should be injected.",
-    "Do not select every entry in a broad manifest just because the scope is relevant; reject background entries that will not affect the next reply.",
-    "",
-    buildPromptContext(queryText),
-    "",
-    "Chosen scopes:",
-    ...scopes.length ? scopes.map((scope) => `- ${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`) : ["- none"],
-    "",
-    "Scoped entry manifests:",
-    ...manifests.length ? manifests.flatMap((manifest) => [
-      `Scope: ${manifest.scope.book.summary.name} :: ${getScopeBreadcrumb(manifest.scope.book, manifest.scope.nodeId)} (${manifest.candidates.length} entries)`,
-      ...manifest.candidates.map((item) => `- entryId=${item.entry.entryId}; signal=${item.selectionRole ?? "score_fallback"}; label=${item.entry.label}; score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.entry), 180)}`)
-    ]) : [],
-    ...additionalCandidates.length ? [
-      "",
-      "Additional candidate entries:",
-      ...additionalCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`)
-    ] : !manifests.length ? rankedCandidates.map((item) => `- entryId=${item.candidate.entry.entryId}; signal=${item.selectionRole}; scope=${item.scopeBreadcrumb}; label=${item.candidate.entry.label}; score=${item.candidate.score.toFixed(2)}; reasons=${item.candidate.reasons.join(", ")}; summary=${truncateText(item.candidate.entry.summary, 140)}; preview=${truncateText(getEntryBody(item.candidate.entry), 180)}`) : []
-  ].join(`
-`);
-  const byId = new Map(rankedCandidates.map((item) => [item.candidate.entry.entryId, item]));
-  const parseManifestSelection = (parsedValue) => {
-    const parsedEntryIds = parsedValue?.entryIds;
-    const hasExplicitEntryIds = Array.isArray(parsedEntryIds);
-    const requestedIds = hasExplicitEntryIds ? parsedEntryIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-    const uniqueRequestedIds = uniqueStrings(requestedIds);
-    const unmappedIds = uniqueRequestedIds.filter((id) => !byId.has(id));
-    const mappedIds2 = uniqueRequestedIds.filter((id) => byId.has(id));
-    const invalidSelectionReasons2 = [];
-    if (!hasExplicitEntryIds) {
-      invalidSelectionReasons2.push("Controller did not return an entryIds array.");
-    }
-    if (requestedIds.length !== uniqueRequestedIds.length) {
-      invalidSelectionReasons2.push("Controller returned duplicate entry IDs.");
-    }
-    if (unmappedIds.length) {
-      invalidSelectionReasons2.push(`Controller returned unmapped entry IDs: ${unmappedIds.join(", ")}.`);
-    }
-    if (mappedIds2.length > clampedFinalEntries) {
-      invalidSelectionReasons2.push(`Controller returned ${mappedIds2.length} entry IDs, which exceeds the final inject cap of ${clampedFinalEntries}.`);
-    }
-    return { mappedIds: mappedIds2, invalidSelectionReasons: invalidSelectionReasons2 };
-  };
-  const { parsed } = await runControllerJson2(prompt, controller, RETRIEVAL_MANIFEST_SYSTEM_PROMPT, "Select manifest entries");
-  let { mappedIds, invalidSelectionReasons } = parseManifestSelection(parsed);
-  const selectedWholeManifest = !invalidSelectionReasons.length && mappedIds.length >= Math.min(rankedCandidates.length, clampedFinalEntries) && mappedIds.length > Math.min(SELECTIVE_FALLBACK_LIMIT, clampedFinalEntries);
-  if (selectedWholeManifest) {
-    const retryPrompt = [
-      prompt,
-      "",
-      "The previous selection included every available manifest candidate. That is too broad for automatic prompt injection.",
-      'Return ONLY JSON in this exact shape: {"entryIds":["entry-id-1","entry-id-2"]}.',
-      "Choose a sparse final set only. Usually 1-6 entries is enough; choose 0 if no dynamic entry is truly needed.",
-      "Prioritize direct named entities, currently active characters, and mechanics that directly change the next reply.",
-      "Drop general background, duplicate parent/child coverage, and entries that are only loosely related."
-    ].join(`
-`);
-    const retry = await runControllerJson2(retryPrompt, controller, RETRIEVAL_MANIFEST_SYSTEM_PROMPT, "Retry sparse manifest selection");
-    const retrySelection = parseManifestSelection(retry.parsed);
-    if (!retrySelection.invalidSelectionReasons.length && retrySelection.mappedIds.length < mappedIds.length) {
-      mappedIds = retrySelection.mappedIds;
-      invalidSelectionReasons = [];
-    } else {
-      invalidSelectionReasons.push("Controller selected every manifest entry from a broad candidate pool.");
-      invalidSelectionReasons.push(...retrySelection.invalidSelectionReasons);
-    }
-  }
-  if (invalidSelectionReasons.length) {
-    spindle.log.warn(`Lore Recall manifest selection fell back to deterministic final ranking: ${invalidSelectionReasons.join(" ")}`);
-    emitProgress(controller.reportProgress, {
-      type: "item",
-      item: createFeedItem("issue", "Manifest selection fell back", `Controller manifest output could not be used as the final injected set, so Lore Recall fell back to the globally ranked top ${fallbackLimit}.`, {
-        phase: "manifest_select",
-        tone: "warn",
-        details: invalidSelectionReasons
-      })
-    });
-    return buildScopedFallbackSelection();
-  }
-  const mappedIdSet = new Set(mappedIds);
-  return buildDeterministicSelection(rankedCandidates.filter((item) => mappedIdSet.has(item.candidate.entry.entryId)).slice(0, clampedFinalEntries), clampedFinalEntries);
-}
-function getDescendantCategoryIds(tree, nodeId, depthLimit) {
-  const result = [];
-  const queue = [{ nodeId, depth: 0 }];
-  const seen = new Set;
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current || seen.has(current.nodeId))
-      continue;
-    seen.add(current.nodeId);
-    result.push(current.nodeId);
-    if (current.depth >= depthLimit)
-      continue;
-    const node = tree.nodes[current.nodeId];
-    if (!node)
-      continue;
-    for (const childId of node.childIds) {
-      queue.push({ nodeId: childId, depth: current.depth + 1 });
-    }
-  }
-  return result;
-}
-function makeCategoryChoiceId(bookId, nodeId) {
-  return `category:${bookId}:${nodeId}`;
-}
-function parseCategoryChoiceId(choiceId) {
-  const match = choiceId.match(/^category:([^:]+):(.+)$/);
-  if (!match)
-    return null;
-  return { bookId: match[1], nodeId: match[2] };
-}
-function makeDocumentChoiceId(bookId) {
-  return `${DOCUMENT_CHOICE_PREFIX}${bookId}`;
-}
-function parseDocumentChoiceId(choiceId) {
-  if (!choiceId.startsWith(DOCUMENT_CHOICE_PREFIX))
-    return null;
-  const bookId = choiceId.slice(DOCUMENT_CHOICE_PREFIX.length).trim();
-  return bookId || null;
-}
-function makeEntryChoiceId(entryId) {
-  return `entry:${entryId}`;
-}
-function parseEntryChoiceId(choiceId) {
-  const match = choiceId.match(/^entry:(.+)$/);
-  return match?.[1] ?? null;
-}
-function stripChoiceIdDecoration(value) {
-  const trimmed = value.trim();
-  if (!trimmed)
-    return "";
-  const choiceIdMatch = /choiceId\s*=\s*([^;\s,)]+)/i.exec(trimmed);
-  if (choiceIdMatch?.[1])
-    return stripChoiceIdDecoration(choiceIdMatch[1]);
-  const leadingBracketMatch = /^\[([^\]]+)\]/.exec(trimmed);
-  if (leadingBracketMatch?.[1])
-    return stripChoiceIdDecoration(leadingBracketMatch[1]);
-  return trimmed.replace(/^["'`]+|["'`]+$/g, "").replace(/^[\[(]+/g, "").replace(/[\]),.;]+$/g, "").trim();
-}
-function expandChoiceIdVariants(choiceId) {
-  const variants = [];
-  const pushVariant = (value) => {
-    const stripped = stripChoiceIdDecoration(value);
-    if (stripped && !variants.includes(stripped))
-      variants.push(stripped);
-  };
-  pushVariant(choiceId);
-  for (const match of choiceId.matchAll(/\[([^\]]+)\]/g)) {
-    if (match[1])
-      pushVariant(match[1]);
-  }
-  for (const match of choiceId.matchAll(/choiceId\s*=\s*([^;\s,)]+)/gi)) {
-    if (match[1])
-      pushVariant(match[1]);
-  }
-  return variants;
-}
-function formatChoiceIdList(choiceIds, limit = 5) {
-  if (!choiceIds.length)
-    return "none";
-  const shown = choiceIds.slice(0, limit).map((choiceId) => `"${truncateText(choiceId, 80)}"`);
-  return choiceIds.length > limit ? `${shown.join(", ")} (+${choiceIds.length - limit} more)` : shown.join(", ");
-}
-function resolveTraversalChoiceScopes(choiceIds, booksById) {
-  const scopes = new Map;
-  const addScope = (book, nodeId) => {
-    if (!book.tree.nodes[nodeId])
-      return;
-    scopes.set(`${book.summary.id}:${nodeId}`, { book, nodeId });
-  };
-  const addNodeIdAcrossBooks = (nodeId) => {
-    let resolved = false;
-    for (const book of booksById.values()) {
-      if (!book.tree.nodes[nodeId])
-        continue;
-      addScope(book, nodeId);
-      resolved = true;
-    }
-    return resolved;
-  };
-  const labelIndex = new Map;
-  const addLabelIndex = (label, book, nodeId) => {
-    const key = normalizeSearchText(label);
-    if (!key)
-      return;
-    const existing = labelIndex.get(key) ?? [];
-    if (!existing.some((scope) => scope.book.summary.id === book.summary.id && scope.nodeId === nodeId)) {
-      existing.push({ book, nodeId });
-    }
-    labelIndex.set(key, existing);
-  };
-  for (const book of booksById.values()) {
-    for (const node of Object.values(book.tree.nodes)) {
-      const breadcrumb = getScopeBreadcrumb(book, node.id);
-      addLabelIndex(node.id, book, node.id);
-      addLabelIndex(node.label, book, node.id);
-      addLabelIndex(breadcrumb, book, node.id);
-      addLabelIndex(`${book.summary.name} :: ${node.label}`, book, node.id);
-      addLabelIndex(`${book.summary.name} :: ${breadcrumb}`, book, node.id);
-      addLabelIndex(`${book.summary.id}:${node.id}`, book, node.id);
-      if (node.id === book.tree.rootId) {
-        addLabelIndex(book.summary.name, book, node.id);
-        addLabelIndex("root", book, node.id);
-      }
-    }
-  }
-  for (const choiceId of choiceIds) {
-    for (const variant of expandChoiceIdVariants(choiceId)) {
-      const categoryChoice = parseCategoryChoiceId(variant);
-      if (categoryChoice) {
-        const book = booksById.get(categoryChoice.bookId);
-        if (book && book.tree.nodes[categoryChoice.nodeId]) {
-          addScope(book, categoryChoice.nodeId);
-        } else {
-          addNodeIdAcrossBooks(categoryChoice.nodeId);
-        }
-        continue;
-      }
-      const categoryNodeOnly = /^category:(.+)$/i.exec(variant);
-      if (categoryNodeOnly?.[1] && addNodeIdAcrossBooks(categoryNodeOnly[1]))
-        continue;
-      const documentBookId = parseDocumentChoiceId(variant);
-      if (documentBookId) {
-        const book = booksById.get(documentBookId);
-        if (book)
-          addScope(book, book.tree.rootId);
-        continue;
-      }
-      if (addNodeIdAcrossBooks(variant))
-        continue;
-      const twoPartChoice = /^([^:]+):(.+)$/.exec(variant);
-      if (twoPartChoice?.[2] && addNodeIdAcrossBooks(twoPartChoice[2]))
-        continue;
-      const labelScopes = labelIndex.get(normalizeSearchText(variant)) ?? [];
-      for (const scope of labelScopes)
-        addScope(scope.book, scope.nodeId);
-    }
-  }
-  return Array.from(scopes.values());
-}
-function getScopedEntryIds(book, nodeId, includeDescendants) {
-  const node = book.tree.nodes[nodeId];
-  if (!node)
-    return [];
-  const nodeIds = includeDescendants ? getDescendantCategoryIds(book.tree, nodeId, Number.MAX_SAFE_INTEGER) : [nodeId];
-  const scopedEntryIds = uniqueStrings(nodeIds.flatMap((currentNodeId) => book.tree.nodes[currentNodeId]?.entryIds ?? []));
-  if (nodeId === book.tree.rootId) {
-    scopedEntryIds.push(...book.tree.unassignedEntryIds);
-  }
-  return uniqueStrings(scopedEntryIds);
-}
-function getScopeBreadcrumb(book, nodeId) {
-  if (nodeId === book.tree.rootId)
-    return "Root";
-  const labels = [];
-  const visited = new Set;
-  let cursor = book.tree.nodes[nodeId];
-  while (cursor && !visited.has(cursor.id)) {
-    visited.add(cursor.id);
-    if (cursor.id !== book.tree.rootId)
-      labels.push(cursor.label);
-    cursor = cursor.parentId ? book.tree.nodes[cursor.parentId] : undefined;
-  }
-  return labels.reverse().join(" > ") || "Root";
-}
-function buildPreviewScopes(scopes, manifestCounts = new Map, selectionReasons = new Map) {
-  const seen = new Set;
-  const previews = [];
-  for (const scope of scopes) {
-    const key = `${scope.book.summary.id}:${scope.nodeId}`;
-    if (seen.has(key))
-      continue;
-    seen.add(key);
-    const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node)
-      continue;
-    const isRootScope = scope.nodeId === scope.book.tree.rootId;
-    previews.push({
-      nodeId: node.id,
-      label: isRootScope ? scope.book.summary.name : node.label || scope.book.summary.name,
-      worldBookId: scope.book.summary.id,
-      worldBookName: scope.book.summary.name,
-      breadcrumb: getScopeBreadcrumb(scope.book, scope.nodeId),
-      summary: truncateText(node.summary || "", 220),
-      descendantEntryCount: getScopedEntryIds(scope.book, scope.nodeId, true).length,
-      manifestEntryCount: manifestCounts.get(key),
-      selectionReason: selectionReasons.get(key)
-    });
-  }
-  return previews;
-}
-function buildPreviewScopeManifests(manifests) {
-  return manifests.map((item) => ({
-    nodeId: item.scope.nodeId,
-    label: item.scope.nodeId === item.scope.book.tree.rootId ? item.scope.book.summary.name : item.scope.book.tree.nodes[item.scope.nodeId]?.label || item.scope.book.summary.name,
-    worldBookId: item.scope.book.summary.id,
-    worldBookName: item.scope.book.summary.name,
-    breadcrumb: getScopeBreadcrumb(item.scope.book, item.scope.nodeId),
-    manifestEntryCount: item.candidates.length,
-    selectedEntryIds: []
-  }));
-}
-function buildScopedManifests(candidates, scopes) {
-  const candidatesById = new Map(candidates.map((item) => [item.entry.entryId, item]));
-  const candidateOrder = new Map(candidates.map((item, index) => [item.entry.entryId, index]));
-  return scopes.map((scope) => {
-    const scopeCandidates = getScopedEntryIds(scope.book, scope.nodeId, true).map((entryId) => candidatesById.get(entryId)).filter((item) => !!item).sort((left, right) => {
-      const leftOrder = candidateOrder.get(left.entry.entryId) ?? Number.MAX_SAFE_INTEGER;
-      const rightOrder = candidateOrder.get(right.entry.entryId) ?? Number.MAX_SAFE_INTEGER;
-      return leftOrder - rightOrder || right.score - left.score || left.entry.label.localeCompare(right.entry.label);
-    });
-    if (!scopeCandidates.length)
-      return null;
-    return {
-      scope,
-      candidates: scopeCandidates
-    };
-  }).filter((item) => !!item);
-}
-function collectCandidatesForScopes(queryText, scopes, directEntryIds = [], fallbackById, preserveScopeOrder = false, excludedEntryIds = EMPTY_ENTRY_ID_SET, feedback) {
-  const normalized = normalizeSearchText(queryText);
-  const queryTokens = tokenize(queryText);
-  const selected = [];
-  const seen = new Set;
-  for (const scope of scopes) {
-    const entriesById = new Map(scope.book.cache.entries.map((entry) => [entry.entryId, entry]));
-    for (const entryId of getScopedEntryIds(scope.book, scope.nodeId, true)) {
-      if (seen.has(entryId))
-        continue;
-      if (excludedEntryIds.has(entryId))
-        continue;
-      const entry = entriesById.get(entryId);
-      if (!entry || entry.disabled)
-        continue;
-      seen.add(entryId);
-      const scored = normalized && queryTokens.length ? scoreEntry(entry, scope.book.tree, queryText, queryTokens, feedback) : { entry, score: 0, reasons: [] };
-      const reasons = uniqueStrings([...scored.reasons, "branch"]);
-      selected.push({
-        entry,
-        score: scored.score > 0 ? scored.score + 0.25 : 0.25,
-        reasons,
-        selectionRole: scored.selectionRole
-      });
-    }
-  }
-  if (directEntryIds.length) {
-    const allBooks = new Map(scopes.map((scope) => [scope.book.summary.id, scope.book]));
-    for (const entryId of directEntryIds) {
-      if (seen.has(entryId))
-        continue;
-      if (excludedEntryIds.has(entryId))
-        continue;
-      let resolved = false;
-      for (const book of allBooks.values()) {
-        const entriesById = new Map(book.cache.entries.map((entry2) => [entry2.entryId, entry2]));
-        const entry = entriesById.get(entryId);
-        if (!entry || entry.disabled)
-          continue;
-        seen.add(entryId);
-        const scored = normalized && queryTokens.length ? scoreEntry(entry, book.tree, queryText, queryTokens, feedback) : { entry, score: 0, reasons: [] };
-        selected.push({
-          entry,
-          score: scored.score > 0 ? scored.score : 0.5,
-          reasons: uniqueStrings([...scored.reasons, "direct"]),
-          selectionRole: scored.selectionRole
-        });
-        resolved = true;
-        break;
-      }
-      if (resolved || !fallbackById)
-        continue;
-      const fallback = fallbackById.get(entryId);
-      if (!fallback)
-        continue;
-      seen.add(entryId);
-      selected.push({
-        entry: fallback.entry,
-        score: fallback.score > 0 ? fallback.score : 0.5,
-        reasons: uniqueStrings([...fallback.reasons, "direct"]),
-        selectionRole: fallback.selectionRole
-      });
-    }
-  }
-  if (preserveScopeOrder)
-    return selected;
-  return selected.sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label));
-}
-function collectEntriesByIds(entryIds, deterministicById) {
-  const selected = [];
-  const seen = new Set;
-  for (const entryId of entryIds) {
-    if (seen.has(entryId))
-      continue;
-    const match = deterministicById.get(entryId);
-    if (!match)
-      continue;
-    seen.add(entryId);
-    selected.push(match);
-  }
-  return selected;
-}
-function makeScopeKey(scope) {
-  return `${scope.book.summary.id}:${scope.nodeId}`;
-}
-function dedupeScopes(scopes) {
-  const unique = new Map;
-  for (const scope of scopes) {
-    unique.set(makeScopeKey(scope), scope);
-  }
-  return Array.from(unique.values());
-}
-function isNodeAncestor(tree, ancestorId, nodeId) {
-  if (ancestorId === nodeId)
-    return true;
-  const visited = new Set;
-  let cursor = tree.nodes[nodeId];
-  while (cursor?.parentId && !visited.has(cursor.id)) {
-    visited.add(cursor.id);
-    if (cursor.parentId === ancestorId)
-      return true;
-    cursor = tree.nodes[cursor.parentId];
-  }
-  return false;
-}
-function collectChildScopeChoices(scopes, deterministicById, config) {
-  const categories = [];
-  const seen = new Set;
-  for (const scope of scopes) {
-    const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node || getNodeDepth(scope.book.tree, scope.nodeId) >= config.maxTraversalDepth)
-      continue;
-    for (const childId of node.childIds) {
-      const child = scope.book.tree.nodes[childId];
-      if (!child)
-        continue;
-      const choiceId = child.id;
-      if (seen.has(choiceId))
-        continue;
-      seen.add(choiceId);
-      const matchMeta = describeScopeMatches(scope.book, child.id, deterministicById);
-      categories.push({
-        choiceId,
-        book: scope.book,
-        nodeId: child.id,
-        label: `${scope.book.summary.name} :: ${child.label}`,
-        summary: truncateText(child.summary || "", 160),
-        depth: getNodeDepth(scope.book.tree, child.id),
-        childCount: child.childIds.length,
-        entryCount: getScopedEntryIds(scope.book, child.id, true).length,
-        relevance: matchMeta.relevance,
-        matchHints: []
-      });
-    }
-  }
-  return categories;
-}
-function sortScopeChoices(choices) {
-  return choices.slice().sort((left, right) => right.relevance - left.relevance || right.depth - left.depth || left.entryCount - right.entryCount || left.label.localeCompare(right.label));
-}
-function resolveScopeChoices(nodeIds, books) {
-  const booksById = new Map(books.map((book) => [book.summary.id, book]));
-  const scopes = new Map;
-  for (const choiceId of nodeIds) {
-    const documentBookId = parseDocumentChoiceId(choiceId);
-    if (documentBookId) {
-      const book2 = booksById.get(documentBookId);
-      if (!book2)
-        continue;
-      scopes.set(makeScopeKey({ book: book2, nodeId: book2.tree.rootId }), { book: book2, nodeId: book2.tree.rootId });
-      continue;
-    }
-    const legacyChoice = parseCategoryChoiceId(choiceId);
-    if (legacyChoice) {
-      const book2 = booksById.get(legacyChoice.bookId);
-      if (!book2 || !book2.tree.nodes[legacyChoice.nodeId])
-        continue;
-      scopes.set(makeScopeKey({ book: book2, nodeId: legacyChoice.nodeId }), { book: book2, nodeId: legacyChoice.nodeId });
-      continue;
-    }
-    const matchingBooks = books.filter((book2) => !!book2.tree.nodes[choiceId]);
-    if (matchingBooks.length !== 1)
-      continue;
-    const [book] = matchingBooks;
-    scopes.set(makeScopeKey({ book, nodeId: choiceId }), { book, nodeId: choiceId });
-  }
-  return Array.from(scopes.values());
-}
-function chooseDeterministicScopes(currentScopes, deterministicById, config) {
-  const scopePickLimit = getScopePickLimit(config);
-  const choices = collectChildScopeChoices(currentScopes, deterministicById, config);
-  const ranked = sortScopeChoices(choices).filter((choice) => choice.entryCount > 0);
-  if (!ranked.length)
-    return currentScopes;
-  const selected = [];
-  for (const choice of ranked) {
-    const scope = { book: choice.book, nodeId: choice.nodeId };
-    const overlaps = selected.some((existing) => existing.book.summary.id === scope.book.summary.id && (isNodeAncestor(scope.book.tree, existing.nodeId, scope.nodeId) || isNodeAncestor(scope.book.tree, scope.nodeId, existing.nodeId)));
-    if (overlaps)
-      continue;
-    selected.push(scope);
-    if (selected.length >= scopePickLimit)
-      break;
-  }
-  return selected.length ? selected : currentScopes;
-}
-function getScopePickLimit(config) {
-  return clampInt(config.scopePickLimit ?? DEFAULT_SCOPE_PICK_LIMIT, 1, 24);
-}
-function limitScopeSelection(scopes, limit) {
-  return dedupeScopes(scopes).slice(0, Math.max(0, limit));
-}
-function getEntryPrimaryScopeFromBooks(entry, booksById) {
-  const preferredBook = booksById.get(entry.worldBookId);
-  const candidateBooks = preferredBook ? [preferredBook, ...Array.from(booksById.values()).filter((book) => book.summary.id !== preferredBook.summary.id)] : Array.from(booksById.values());
-  for (const book of candidateBooks) {
-    const node = Object.values(book.tree.nodes).find((item) => item.entryIds.includes(entry.entryId));
-    if (node)
-      return { book, nodeId: node.id };
-    if (book.tree.unassignedEntryIds.includes(entry.entryId))
-      return { book, nodeId: book.tree.rootId };
-  }
-  return null;
-}
-function isScopeFallbackSeedCandidate(candidate) {
-  const reasons = candidate.reasons;
-  const nonStructuralReasons = reasons.filter((reason) => reason !== "branch" && reason !== "tag" && reason !== "group" && reason !== "constraint");
-  if (isConstraintOnlyCandidate(reasons))
-    return false;
-  if (!nonStructuralReasons.length)
-    return false;
-  return hasPrimaryReason(reasons) || hasSceneSupportReason(reasons) || reasons.includes("active") || reasons.includes("background") || reasons.includes("related_support") || candidate.score >= SCENE_SUPPORT_SCORE_THRESHOLD;
-}
-function chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config) {
-  const deterministic = Array.from(deterministicById.values());
-  if (!deterministic.length)
-    return chooseDeterministicScopes(rootScopes, deterministicById, config);
-  const booksById = new Map(rootScopes.map((scope) => [scope.book.summary.id, scope.book]));
-  const ranked = rankSelectionCandidates(recentConversation, deterministic, rootScopes).filter((item) => isScopeFallbackSeedCandidate(item.candidate)).slice(0, Math.min(getScopePickLimit(config), Math.max(1, config.maxResults))).map((item) => item.candidate);
-  const scopes = ranked.map((candidate) => getEntryPrimaryScopeFromBooks(candidate.entry, booksById)).filter((scope) => !!scope);
-  return scopes.length ? limitScopeSelection(scopes, getScopePickLimit(config)) : [];
-}
-function buildInitialScopePrompt(recentConversation, treeOverview, scopePickLimit) {
-  return [
-    'Return ONLY JSON in this exact shape: {"nodeIds":["node-id-1"],"reason":"brief explanation"}.',
-    `Pick 1-${scopePickLimit} nodeIds maximum.`,
-    "Rules:",
-    "- Prefer specific leaves over broad branches.",
-    "- Pick only nodeIds exactly as shown in the knowledge tree index.",
-    "- If document selectors like doc:<bookId> are shown, you may pick them to narrow to a single lorebook before refining deeper.",
-    "- Pick nodes whose content would be most useful for the next reply.",
-    "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
-    "- Return an empty nodeIds array only when the recent conversation has no retrievable lore need.",
-    "",
-    "KNOWLEDGE TREE INDEX:",
-    treeOverview || "- none",
-    "",
-    buildPromptContext(recentConversation)
-  ].filter(Boolean).join(`
-`);
-}
-function buildChildScopePrompt(recentConversation, scopes, categories, step, config) {
-  return [
-    'Return ONLY JSON in this exact shape: {"action":"refine|retrieve","nodeIds":["node-id-1"],"reason":"brief explanation"}.',
-    `Traversal step ${step + 1} of ${config.traversalStepLimit}.`,
-    "Rules:",
-    `- Pick 1-${getScopePickLimit(config)} category nodeIds maximum from the choices below.`,
-    '- Use action "refine" when child categories should be opened before retrieval.',
-    '- Use action "retrieve" when the chosen nodeIds are already specific enough to resolve entries.',
-    "- Prefer specific leaves over broad branches.",
-    "- Do not choose entries directly. Exact entry selection happens later after node retrieval.",
-    "",
-    buildPromptContext(recentConversation),
-    `Current scopes: ${scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ")}`,
-    "",
-    "CATEGORY CHOICES:",
-    ...categories.length ? categories.map((category) => `- [${category.nodeId}] ${category.label} [${category.childCount > 0 ? "branch" : "leaf"}] (${category.entryCount} entries)
-  ${category.summary || "No summary."}`) : ["- none"]
-  ].filter(Boolean).join(`
-`);
-}
-function buildTraceScopeSummary(scopes) {
-  if (!scopes.length)
-    return "No scopes selected.";
-  return scopes.map((scope) => `${scope.book.summary.name} :: ${getScopeBreadcrumb(scope.book, scope.nodeId)}`).join(" | ");
-}
-function buildFallbackReason(fallbackPath) {
-  return fallbackPath.length ? fallbackPath.join(" ") : null;
-}
-async function chooseCollapsedScopes(recentConversation, books, config, controller, allowController, deterministicById, trace) {
-  const rootScopes = books.map((book) => ({ book, nodeId: book.tree.rootId }));
-  const scopePickLimit = getScopePickLimit(config);
-  const fallbackPath = [];
-  let scopes = [];
-  let selectionReason = "Controller selected retrieval scopes.";
-  if (allowController) {
-    const response = await runControllerJson2(buildInitialScopePrompt(recentConversation, buildFullTraversalTreeOverview(rootScopes), scopePickLimit), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Choose collapsed scopes");
-    const requestedNodeIds = Array.isArray(response.parsed?.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-    scopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
-    const controllerReason = typeof response.parsed?.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "Controller selected retrieval scopes.";
-    if (scopes.length) {
-      selectionReason = controllerReason;
-    } else {
-      fallbackPath.push(response.error ?? (requestedNodeIds.length ? "Collapsed scope selection returned nodeIds that did not map to visible scopes; used deterministic entry-scope fallback." : "Collapsed scope selection returned an empty nodeIds array; used deterministic entry-scope fallback."));
-      scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
-      selectionReason = fallbackPath[fallbackPath.length - 1];
-    }
-  } else {
-    fallbackPath.push("Collapsed scope selection skipped the controller and used deterministic entry-scope fallback.");
-    scopes = chooseDeterministicEntryScopes(recentConversation, rootScopes, deterministicById, config);
-    selectionReason = fallbackPath[fallbackPath.length - 1];
-  }
-  pushTrace(trace, "choose_scope", "Choose scopes", `${selectionReason} Selected ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`, {
-    bookId: scopes[0]?.book.summary.id ?? null,
-    nodeId: scopes[0]?.nodeId ?? null,
-    entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
-  });
-  if (shouldRefineRetrievedScopes(scopes, config)) {
-    const categories = collectChildScopeChoices(scopes, deterministicById, config);
-    if (categories.length) {
-      let refinedScopes = [];
-      let refinedReason = "Refined broad scopes.";
-      if (allowController) {
-        const refinement = await runControllerJson2(buildChildScopePrompt(recentConversation, scopes, categories, 1, config), controller, RETRIEVAL_SCOPE_SYSTEM_PROMPT, "Refine collapsed scopes");
-        const requestedNodeIds = Array.isArray(refinement.parsed?.nodeIds) ? refinement.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-        refinedScopes = limitScopeSelection(resolveScopeChoices(requestedNodeIds, books), scopePickLimit);
-        refinedReason = typeof refinement.parsed?.reason === "string" && refinement.parsed.reason.trim() ? refinement.parsed.reason.trim() : "Refined broad scopes.";
-        if (!refinedScopes.length) {
-          fallbackPath.push(refinement.error ?? (requestedNodeIds.length ? "Collapsed scope refinement returned nodeIds that did not map to current child scopes; used deterministic child-scope fallback." : "Collapsed scope refinement returned an empty nodeIds array; used deterministic child-scope fallback."));
-          refinedScopes = chooseDeterministicScopes(scopes, deterministicById, config);
-          refinedReason = fallbackPath[fallbackPath.length - 1];
-        }
-      } else {
-        fallbackPath.push("Collapsed scope refinement skipped the controller and used deterministic child scopes.");
-        refinedScopes = chooseDeterministicScopes(scopes, deterministicById, config);
-        refinedReason = fallbackPath[fallbackPath.length - 1];
-      }
-      if (refinedScopes.length) {
-        scopes = refinedScopes;
-        selectionReason = refinedReason;
-        pushTrace(trace, "refine_scope", "Refine scopes", `${refinedReason} Narrowed retrieval to ${scopes.length} scope(s): ${buildTraceScopeSummary(scopes)}.`, {
-          bookId: scopes[0]?.book.summary.id ?? null,
-          nodeId: scopes[0]?.nodeId ?? null,
-          entryCount: scopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
-        });
-      }
-    }
-  }
-  return { scopes, fallbackPath, selectionReason };
-}
-function populateScopeManifestSelections(scopeManifestCounts, selected, scopes) {
-  const previews = scopeManifestCounts.map((item) => ({ ...item, selectedEntryIds: [...item.selectedEntryIds] }));
-  for (const item of selected) {
-    for (const scope of scopes) {
-      const scopeEntryIds = getScopedEntryIds(scope.book, scope.nodeId, true);
-      if (!scopeEntryIds.includes(item.entry.entryId))
-        continue;
-      const key = `${scope.book.summary.id}:${scope.nodeId}`;
-      const preview = previews.find((candidate) => `${candidate.worldBookId}:${candidate.nodeId}` === key);
-      if (!preview)
-        continue;
-      if (!preview.selectedEntryIds.includes(item.entry.entryId)) {
-        preview.selectedEntryIds.push(item.entry.entryId);
-      }
-      break;
-    }
-  }
-  return previews;
-}
-async function selectEntriesForScopes(recentConversation, scopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, excludedEntryIds = EMPTY_ENTRY_ID_SET, feedback) {
-  const fallbackPath = [];
-  let activeScopes = dedupeScopes(scopes);
-  const selectedScopeCoreScopes = dedupeScopes(scopes);
-  let selectionReason = null;
-  const booksById = new Map(activeScopes.map((scope) => [scope.book.summary.id, scope.book]));
-  const sceneAnchors = buildDirectMentionCandidates(recentConversation, Array.from(deterministicById.values()), activeScopes, Math.min(SCENE_ANCHOR_LIMIT, maxDynamicEntries)).map((candidate) => ({
-    ...candidate,
-    reasons: uniqueStrings([...candidate.reasons, "active_anchor"])
-  }));
-  if (sceneAnchors.length) {
-    const anchorScopes = sceneAnchors.map((anchor) => {
-      const book = booksById.get(anchor.entry.worldBookId);
-      if (!book)
-        return null;
-      const path = getEntryCategoryPath(book.tree, anchor.entry.entryId);
-      const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
-      return { book, nodeId };
-    }).filter((scope) => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...anchorScopes], getScopePickLimit(config));
-    pushTrace(trace, "retrieve", "Seed active anchors", `Seeded ${sceneAnchors.length} directly mentioned active anchor candidate(s) from the current scene before selecting scoped support entries.`, { entryCount: sceneAnchors.length });
-  }
-  const rawCandidates = collectCandidatesForScopes(recentConversation, activeScopes, [], deterministicById, !config.selectiveRetrieval, excludedEntryIds, feedback);
-  const rawCandidateById = new Map(rawCandidates.map((item) => [item.entry.entryId, item]));
-  const supportSeeds = sceneAnchors.length ? sceneAnchors : rawCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
-  for (const anchor of sceneAnchors) {
-    const existing = rawCandidateById.get(anchor.entry.entryId);
-    rawCandidateById.set(anchor.entry.entryId, existing ? {
-      ...existing,
-      score: Math.max(existing.score, anchor.score),
-      reasons: uniqueStrings([...existing.reasons, ...anchor.reasons]),
-      selectionRole: mergeSelectionRole(existing.selectionRole, anchor.selectionRole)
-    } : anchor);
-  }
-  const relatedSupport = buildRelatedSupportCandidates(supportSeeds, Array.from(booksById.values()), excludedEntryIds, new Set(supportSeeds.map((candidate) => candidate.entry.entryId)), feedback, Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - sceneAnchors.length)));
-  if (relatedSupport.length) {
-    for (const candidate of relatedSupport) {
-      rawCandidateById.set(candidate.entry.entryId, candidate);
-    }
-    const relatedScopes = relatedSupport.map((candidate) => {
-      const book = booksById.get(candidate.entry.worldBookId);
-      if (!book)
-        return null;
-      const path = getEntryCategoryPath(book.tree, candidate.entry.entryId);
-      const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
-      return { book, nodeId };
-    }).filter((scope) => !!scope);
-    activeScopes = limitScopeSelection([...activeScopes, ...relatedScopes], getScopePickLimit(config));
-    pushTrace(trace, "retrieve", "Expand related support", `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`, { entryCount: relatedSupport.length });
-  }
-  const mergedRawCandidates = Array.from(rawCandidateById.values());
-  const rankedCandidates = rankSelectionCandidates(recentConversation, mergedRawCandidates, activeScopes);
-  const candidates = rankedCandidates.map((item) => ({ ...item.candidate, selectionRole: item.selectionRole }));
-  const filteredEligibleCandidates = filterDynamicInjectionCandidates(candidates);
-  let manifests = [];
-  if (!candidates.length) {
-    pushTrace(trace, "fallback", "No scoped entries", "The chosen scopes did not resolve any candidate entries.");
-    return {
-      scopes: activeScopes,
-      selected: [],
-      candidates,
-      manifests: [],
-      fallbackPath: [...fallbackPath, "Chosen scopes did not resolve any candidate entries."],
-      selectionReason
-    };
-  }
-  let selected;
-  if (config.selectiveRetrieval) {
-    const beforeCalls = controller.callCount;
-    const rankedSceneAnchors = buildDeterministicSelection(rankSelectionCandidates(recentConversation, sceneAnchors, activeScopes), Math.min(maxDynamicEntries, sceneAnchors.length));
-    const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
-    const protectedScopeCore = selectProtectedScopeCore(candidates, recentConversation, selectedScopeCoreScopes, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length), sceneAnchorIds);
-    const protectedScopeCoreIds = new Set(protectedScopeCore.map((item) => item.entry.entryId));
-    const eligibleCandidates = mergeScoredEntryLists(filteredEligibleCandidates, protectedScopeCore);
-    manifests = buildScopedManifests(eligibleCandidates, activeScopes);
-    const supportCandidates = eligibleCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
-    const protectedRelatedSupport = selectProtectedRelatedSupport(supportCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId)), Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length)));
-    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
-    const sceneSupportCandidates = supportCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId) && !protectedRelatedIds.has(item.entry.entryId));
-    const protectedSceneSupport = selectProtectedSceneSupport(sceneSupportCandidates, recentConversation, activeScopes, Math.min(PROTECTED_SCENE_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length)));
-    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
-    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length - protectedSceneSupport.length);
-    const supportSelectionLimit = config.selectiveRetrieval ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT) : remainingSupportSlots;
-    const supportSelected = supportSelectionLimit > 0 ? await maybeSelectEntries(recentConversation, optionalSupportCandidates, config, controller, allowController, activeScopes, supportSelectionLimit) : [];
-    selected = [
-      ...rankedSceneAnchors,
-      ...protectedScopeCore,
-      ...protectedRelatedSupport,
-      ...protectedSceneSupport,
-      ...supportSelected
-    ].slice(0, maxDynamicEntries);
-    if (controller.callCount === beforeCalls && !allowController) {
-      fallbackPath.push("Selective manifest selection skipped the controller and used deterministic scoped fallback.");
-    }
-    const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
-    const selectedScopeCoreCount = selected.filter((item) => protectedScopeCoreIds.has(item.entry.entryId)).length;
-    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
-    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
-    const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s),` : ",";
-    const scopeCoreSummary = selectedScopeCoreCount ? ` with ${selectedScopeCoreCount} protected selected-scope core candidate(s),` : "";
-    const relatedSummary = selectedRelatedSupportCount ? ` with ${selectedRelatedSupportCount} protected related support candidate(s),` : "";
-    const sceneSupportSummary = selectedSceneSupportCount ? ` with ${selectedSceneSupportCount} protected scene support candidate(s),` : "";
-    pushTrace(trace, "manifest_select", "Select manifest entries", `Scoped manifests exposed ${candidates.length} candidate entr${candidates.length === 1 ? "y" : "ies"} across ${Math.max(manifests.length, 1)} chosen scope(s)${anchorSummary}${scopeCoreSummary}${relatedSummary}${sceneSupportSummary} and ${selected.length} final dynamic entry candidate(s) were selected for injection (cap ${maxDynamicEntries}).`, { entryCount: selected.length });
-  } else {
-    manifests = buildScopedManifests(filteredEligibleCandidates, activeScopes);
-    selected = filteredEligibleCandidates;
-    pushTrace(trace, "retrieve", "Resolve scoped entries", `Resolved ${selected.length} scoped entry candidate(s) directly from ${Math.max(activeScopes.length, 1)} chosen scope(s).`, { entryCount: selected.length });
-  }
-  return { scopes: activeScopes, selected, candidates, manifests, fallbackPath, selectionReason };
-}
-function describeScopeMatches(book, nodeId, deterministicById) {
-  const matches = getScopedEntryIds(book, nodeId, true).map((entryId) => deterministicById.get(entryId)).filter((item) => !!item).sort((left, right) => right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, 3);
-  return {
-    relevance: matches.reduce((total, item, index) => total + item.score / (index + 1), 0),
-    matchHints: matches.map((item) => item.entry.label)
-  };
-}
-function buildFullTraversalTreeOverview(scopes) {
-  const lines = [];
-  const seenScopes = new Set;
-  const visitedNodes = new Set;
-  const rootScopes = dedupeScopes(scopes.filter((scope) => scope.nodeId === scope.book.tree.rootId));
-  const multiBook = rootScopes.length > 1;
-  const pushNode = (book, nodeId, depth) => {
-    const visitKey = `${book.summary.id}:${nodeId}`;
-    if (visitedNodes.has(visitKey))
-      return;
-    visitedNodes.add(visitKey);
-    const node = book.tree.nodes[nodeId];
-    if (!node)
-      return;
-    const indent = "  ".repeat(depth);
-    const type = node.childIds.length ? "branch" : "leaf";
-    lines.push(`${indent}- choiceId=${makeCategoryChoiceId(book.summary.id, node.id)}; label=${node.label || "Unnamed"}; type=${type}; descendantEntries=${getScopedEntryIds(book, node.id, true).length}`);
-    if (node.summary?.trim()) {
-      lines.push(`${indent}  ${truncateText(node.summary.trim(), 180)}`);
-    }
-    for (const childId of node.childIds) {
-      pushNode(book, childId, depth + 1);
-    }
-  };
-  for (const scope of scopes) {
-    const scopeKey = `${scope.book.summary.id}:${scope.nodeId}`;
-    if (seenScopes.has(scopeKey))
-      continue;
-    seenScopes.add(scopeKey);
-    const scopeNode = scope.book.tree.nodes[scope.nodeId];
-    if (!scopeNode)
-      continue;
-    if (scope.nodeId === scope.book.tree.rootId) {
-      if (multiBook) {
-        lines.push(`- choiceId=${makeDocumentChoiceId(scope.book.summary.id)}; label=${scope.book.summary.name}; type=document; descendantEntries=${scope.book.cache.entries.length}`);
-      } else {
-        lines.push(`Lorebook: ${scope.book.summary.name}`);
-      }
-      const rootSummary = truncateText(scopeNode.summary || scope.book.config.description || scope.book.summary.description || "", 180);
-      if (rootSummary) {
-        lines.push(`  ${rootSummary}`);
-      }
-      if (scope.book.tree.unassignedEntryIds.length) {
-        lines.push(`  - choiceId=${makeCategoryChoiceId(scope.book.summary.id, scope.book.tree.rootId)}; label=ROOT; type=leaf; descendantEntries=${scope.book.tree.unassignedEntryIds.length}`);
-      }
-      for (const childId of scopeNode.childIds) {
-        pushNode(scope.book, childId, 0);
-      }
-      lines.push("");
-      continue;
-    }
-    lines.push(`Scope: ${getScopeBreadcrumb(scope.book, scope.nodeId)} (${scope.book.summary.name})`);
-    pushNode(scope.book, scope.nodeId, 0);
-    lines.push("");
-  }
-  const text = lines.join(`
-`).trim();
-  if (text.length <= TRAVERSAL_FULL_OVERVIEW_LIMIT)
-    return text;
-  return `${text.slice(0, TRAVERSAL_FULL_OVERVIEW_LIMIT - 28).trimEnd()}
-... (tree index truncated)`;
-}
-function buildTraversalFrontier(scopes, deterministicById, config, overrideScoresById, step) {
-  const categories = [];
-  const seenCategories = new Set;
-  const showAllCurrentCategories = step === 0 && scopes.length > 0 && scopes.every((scope) => scope.nodeId === scope.book.tree.rootId);
-  for (const scope of scopes) {
-    const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node)
-      continue;
-    if (getNodeDepth(scope.book.tree, scope.nodeId) < config.maxTraversalDepth) {
-      for (const childId of node.childIds) {
-        const child = scope.book.tree.nodes[childId];
-        if (!child)
-          continue;
-        const choiceId = makeCategoryChoiceId(scope.book.summary.id, child.id);
-        if (seenCategories.has(choiceId))
-          continue;
-        seenCategories.add(choiceId);
-        const matchMeta = describeScopeMatches(scope.book, child.id, overrideScoresById ?? deterministicById);
-        categories.push({
-          choiceId,
-          book: scope.book,
-          nodeId: child.id,
-          label: `${scope.book.summary.name} :: ${child.label}`,
-          summary: truncateText(child.summary, 160),
-          depth: getNodeDepth(scope.book.tree, child.id),
-          childCount: child.childIds.length,
-          entryCount: getScopedEntryIds(scope.book, child.id, true).length,
-          relevance: matchMeta.relevance,
-          matchHints: matchMeta.matchHints
-        });
-      }
-    }
-  }
-  return {
-    mode: "tree",
-    scopeLabel: scopes.map((scope) => {
-      const node = scope.book.tree.nodes[scope.nodeId];
-      if (!node || scope.nodeId === scope.book.tree.rootId)
-        return scope.book.summary.name;
-      return `${scope.book.summary.name} :: ${node.label}`;
-    }).join(" | "),
-    fullTreeOverview: showAllCurrentCategories ? buildFullTraversalTreeOverview(scopes) : "",
-    searchResults: [],
-    categories: showAllCurrentCategories ? categories : categories.sort((left, right) => right.relevance - left.relevance || left.depth - right.depth || left.label.localeCompare(right.label)).slice(0, TRAVERSAL_CATEGORY_LIMIT)
-  };
-}
-function buildSearchTraversalFrontier(queryText, results, booksById) {
-  const searchResults = results.slice(0, TRAVERSAL_SEARCH_LIMIT).map((item) => {
-    const book = booksById.get(item.entry.worldBookId);
-    return {
-      choiceId: makeEntryChoiceId(item.entry.entryId),
-      entry: item,
-      breadcrumb: book ? getEntryBreadcrumb(item.entry, book.tree) : item.entry.label,
-      summary: truncateText(item.entry.summary || item.entry.label, 140),
-      preview: truncateText(getEntryBody(item.entry), 180)
-    };
-  });
-  return {
-    mode: "search",
-    scopeLabel: "Global search frontier",
-    categories: [],
-    searchResults,
-    fullTreeOverview: "",
-    searchQuery: queryText,
-    totalResults: results.length
-  };
-}
-function buildCandidatePoolPromptSummary(candidatePool) {
-  if (!candidatePool.length)
-    return ["Accumulated candidate pool: 0 dynamic candidates."];
-  const topCandidates = [...candidatePool].sort((left, right) => Number(right.reasons.includes("active_anchor")) - Number(left.reasons.includes("active_anchor")) || right.score - left.score || left.entry.label.localeCompare(right.entry.label)).slice(0, 8);
-  return [
-    `Accumulated candidate pool: ${candidatePool.length} dynamic candidate${candidatePool.length === 1 ? "" : "s"}.`,
-    "Top pooled candidates:",
-    ...topCandidates.map((item) => `- ${item.entry.label} (${item.entry.worldBookName}); score=${item.score.toFixed(2)}; reasons=${item.reasons.join(", ")}; summary=${truncateText(item.entry.summary || getEntryBody(item.entry), 120)}`)
-  ];
-}
-function buildTraversalPrompt(queryText, frontier, step, config, candidatePool = []) {
-  if (frontier.mode === "search") {
-    return [
-      "You are a retrieval assistant for a global lore search frontier.",
-      'Return ONLY JSON in this exact shape: {"action":"retrieve|search|finish","choiceIds":["choice-id-1"],"query":"optional search query","reason":"brief explanation"}.',
-      "Task:",
-      "- Choose from the global search results below to resolve the best lore entries for the next response.",
-      "Rules:",
-      "- Use only choiceIds exactly as shown below.",
-      "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
-      "- Use action retrieve to add one or more shown entry results to the traversal candidate pool, then continue exploring.",
-      '- Use action search to replace the current search frontier with a new global keyword search across all readable managed lorebooks. Include a short "query" string when you do this.',
-      "- Use action finish when the candidate pool is ready for final manifest selection. If you include no choiceIds, all shown search results are added before finishing.",
-      "- The candidate pool is additive. Retrieve only missing context; finish once the pool contains enough candidates for final entry selection.",
-      "- Treat directly mentioned active anchors already in the candidate pool as relevant; use search retrieval to add missing named entities or support lore.",
-      `- Pick 1-${getScopePickLimit(config)} choiceIds maximum when using retrieve.`,
-      "- Do not invent new choiceIds or entry IDs.",
-      `- Stay within ${config.traversalStepLimit} total steps.`,
-      "",
-      buildPromptContext(queryText),
-      `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
-      `Current frontier: global search${frontier.searchQuery ? ` for "${frontier.searchQuery}"` : ""}`,
-      `Global matches available: ${frontier.totalResults ?? frontier.searchResults.length}`,
-      "",
-      ...buildCandidatePoolPromptSummary(candidatePool),
-      "",
-      "Search result choices:",
-      ...frontier.searchResults.length ? frontier.searchResults.map((result) => `- choiceId=${result.choiceId}; label=${result.entry.entry.label}; book=${result.entry.entry.worldBookName}; breadcrumb=${result.breadcrumb}; score=${result.entry.score.toFixed(2)}; reasons=${result.entry.reasons.join(", ")}; summary=${result.summary}; preview=${result.preview}`) : ["- none"]
-    ].join(`
-`);
-  }
-  const hasFullTreeOverview = frontier.fullTreeOverview.trim().length > 0;
-  return [
-    "You are a retrieval assistant for a hierarchical knowledge tree.",
-    'Return ONLY JSON in this exact shape: {"action":"navigate|retrieve|search|finish","choiceIds":["choice-id-1"],"query":"optional search query","reason":"brief explanation"}.',
-    "Task:",
-    "- Pick the most relevant traversal choices from the tree to retrieve for the next response.",
-    "Rules:",
-    `- Pick 1-${getScopePickLimit(config)} choiceIds maximum and prefer specific branches over broad branches.`,
-    "- Return the exact value after choiceId= with no brackets, labels, breadcrumbs, or explanations inside choiceIds.",
-    hasFullTreeOverview ? "- The full tree index below already includes categories from across the selected books. You may choose choiceIds from anywhere in that index." : "- Choose choiceIds only from the category list shown below.",
-    "- Use action navigate when a shown category or document root still needs to be opened before retrieval.",
-    "- Use action retrieve to add one or more shown categories to the traversal candidate pool, then continue exploring.",
-    "- Do not use retrieve with empty choiceIds from a broad or root tree frontier; navigate to specific shown categories or search first.",
-    "- Use retrieve on broad parent categories only when you truly need a manifest from the whole branch; otherwise navigate to specific child categories.",
-    "- The candidate pool is additive. Avoid retrieving child scopes that are already covered by a retrieved parent unless they add missing specificity.",
-    '- Use action search to run a global keyword search across all readable managed lorebooks when the shown tree choices do not clearly expose the needed concept. Include a short "query" string when you do this.',
-    "- Use action finish when the candidate pool is ready for final manifest selection. Include choiceIds if unretrieved shown categories should be added before finishing.",
-    "- Do not pick entries directly from this tree frontier. Exact entry selection happens later after scope retrieval or search.",
-    "- Pick tree choices whose content would be most useful for the next response.",
-    "- Preserve directly mentioned active anchors already in the candidate pool; retrieve additional branches for missing named entities or support lore.",
-    "- Do not replace active cast, place, object, or faction entries with abstract mechanics; mechanics should supplement the active anchors.",
-    "- Consider world info, rules, places, systems, organizations, incidents, abilities, or factions when they matter to the scene, not just named people.",
-    "- Do not stop at Characters if other categories better explain powers, organizations, command response, locations, vehicles, rules, or ongoing incidents.",
-    `- Stay within ${config.traversalStepLimit} total steps.`,
-    "",
-    buildPromptContext(queryText),
-    `Traversal step: ${step + 1} of ${config.traversalStepLimit}`,
-    `Current scope: ${frontier.scopeLabel || "All selected books"}`,
-    "",
-    ...buildCandidatePoolPromptSummary(candidatePool),
-    "",
-    hasFullTreeOverview ? "Full tree index:" : "Category choices:",
-    ...hasFullTreeOverview ? [frontier.fullTreeOverview] : frontier.categories.length ? frontier.categories.map((category) => `- choiceId=${category.choiceId}; label=${category.label}; depth=${category.depth}; childCategories=${category.childCount}; descendantEntries=${category.entryCount}; summary=${category.summary || "No summary."}`) : ["- none"]
-  ].join(`
-`);
-}
-function shouldRefineRetrievedScopes(scopes, config) {
-  return scopes.some((scope) => {
-    const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node)
-      return false;
-    const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
-    return node.childIds.length > 0 ? descendantCount > 8 : descendantCount > 10;
-  });
-}
-async function selectTraversalEntries(queryText, books, initialScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, excludedEntryIds = EMPTY_ENTRY_ID_SET, feedback) {
-  const deterministic = Array.from(deterministicById.values());
-  const booksById = new Map(books.map((book) => [book.summary.id, book]));
-  let scopes = dedupeScopes(initialScopes);
-  let activeSelectionQuery = queryText;
-  let searchFrontier = null;
-  const searchEvents = [];
-  const steps = [`Traversal started from ${scopes.length} root scope(s).`];
-  let selectionReason = null;
-  let usedSearchFrontier = false;
-  const candidatePoolById = new Map;
-  const sceneAnchorsById = new Map;
-  let retrievedScopes = [];
-  const getCandidatePool = () => Array.from(candidatePoolById.values());
-  const getCollapsedFallbackSelection = () => {
-    const limit = config.selectiveRetrieval ? Math.min(maxDynamicEntries, SELECTIVE_FALLBACK_LIMIT) : maxDynamicEntries;
-    return buildDeterministicSelection(rankSelectionCandidates(queryText, deterministic, retrievedScopes.length ? retrievedScopes : scopes), limit);
-  };
-  const mergeCandidate = (candidate) => {
-    const existing = candidatePoolById.get(candidate.entry.entryId);
-    if (!existing) {
-      candidatePoolById.set(candidate.entry.entryId, candidate);
-      return;
-    }
-    candidatePoolById.set(candidate.entry.entryId, {
-      ...existing,
-      score: Math.max(existing.score, candidate.score),
-      reasons: uniqueStrings([...existing.reasons, ...candidate.reasons]),
-      selectionRole: mergeSelectionRole(existing.selectionRole, candidate.selectionRole)
-    });
-  };
-  const getEntryPrimaryScope = (entry) => {
-    const book = booksById.get(entry.worldBookId);
-    if (!book)
-      return null;
-    const path = getEntryCategoryPath(book.tree, entry.entryId);
-    const nodeId = path[path.length - 1]?.id ?? book.tree.rootId;
-    return { book, nodeId };
-  };
-  const addCandidatesToPool = (candidates, candidateScopes) => {
-    for (const candidate of candidates)
-      mergeCandidate(candidate);
-    if (candidateScopes.length) {
-      retrievedScopes = dedupeScopes([...retrievedScopes, ...candidateScopes]);
-    }
-  };
-  const addSearchCandidatesToPool = (candidates) => {
-    const candidateScopes = candidates.map((candidate) => getEntryPrimaryScope(candidate.entry)).filter((scope) => !!scope);
-    addCandidatesToPool(candidates, candidateScopes);
-  };
-  const resolveDirectEntryChoices = (choiceIds) => {
-    const byId = new Map(deterministicById);
-    for (const [entryId, candidate] of candidatePoolById)
-      byId.set(entryId, candidate);
-    const entryIds = uniqueStrings(choiceIds.flatMap(expandChoiceIdVariants).map((choiceId) => parseEntryChoiceId(choiceId) ?? choiceId).filter((entryId) => byId.has(entryId)));
-    return collectEntriesByIds(entryIds, byId);
-  };
-  const seedSceneAnchors = () => {
-    const anchors = buildDirectMentionCandidates(queryText, deterministic, [], Math.min(SCENE_ANCHOR_LIMIT, maxDynamicEntries)).map((candidate) => ({
-      ...candidate,
-      reasons: uniqueStrings([...candidate.reasons, "active_anchor"])
-    }));
-    if (!anchors.length)
-      return;
-    for (const anchor of anchors) {
-      sceneAnchorsById.set(anchor.entry.entryId, anchor);
-      mergeCandidate(anchor);
-    }
-    pushTrace(trace, "retrieve", "Seed active anchors", `Seeded ${anchors.length} directly mentioned active anchor candidate(s) from the current scene into the traversal pool before exploring support lore.`, { entryCount: anchors.length });
-    steps.push(`Traversal seeded ${anchors.length} directly mentioned active anchor candidate(s).`);
-  };
-  const isBroadScopeSet = (targetScopes) => targetScopes.some((scope) => {
-    const node = scope.book.tree.nodes[scope.nodeId];
-    if (!node)
-      return false;
-    const descendantCount = getScopedEntryIds(scope.book, scope.nodeId, true).length;
-    return node.childIds.length > 0 || descendantCount > Math.max(maxDynamicEntries, config.maxResults, 8);
-  });
-  const navigateBroadImplicitRetrieve = (reason, durationMs) => {
-    const nextScopes = chooseDeterministicScopes(scopes, deterministicById, config);
-    if (!nextScopes.length || areSameScopes(scopes, nextScopes))
-      return false;
-    scopes = nextScopes;
-    searchFrontier = null;
-    selectionReason = reason;
-    pushTrace(trace, "navigate", "Avoid broad retrieve", `${reason} The controller requested the current broad scope without choiceIds, so Lore Recall opened ${nextScopes.length} narrower branch(es) instead of pooling the entire scope.`, {
-      bookId: nextScopes[0]?.book.summary.id ?? null,
-      nodeId: nextScopes[0]?.nodeId ?? null,
-      durationMs
-    });
-    steps.push(`Traversal avoided broad current-scope retrieval and opened ${nextScopes.length} narrower branch(es).`);
-    return true;
-  };
-  const buildFinalCandidateSet = () => {
-    const pooled = getCandidatePool();
-    if (!pooled.length)
-      return [];
-    const directMentionCandidates = buildDirectMentionCandidates(queryText, pooled, retrievedScopes, Math.min(DIRECT_MENTION_SEED_LIMIT, maxDynamicEntries));
-    const directMentionById = new Map(directMentionCandidates.map((item) => [item.entry.entryId, item]));
-    const combined = pooled.map((item) => directMentionById.get(item.entry.entryId) ?? item);
-    const ranked = rankSelectionCandidates(queryText, combined, retrievedScopes);
-    const limit = Math.min(maxDynamicEntries, combined.length);
-    return buildDeterministicSelection(ranked, limit);
-  };
-  const finalizeAccumulatedSelection = async (reason, label, durationMs) => {
-    let pooledCandidates = getCandidatePool();
-    const scopeCoreScopes = dedupeScopes(retrievedScopes.length ? retrievedScopes : scopes);
-    const scopeCoreSourceCandidates = pooledCandidates;
-    const supportSeeds = sceneAnchorsById.size ? Array.from(sceneAnchorsById.values()) : pooledCandidates.filter((candidate) => candidate.selectionRole === "active_anchor");
-    const relatedSupport = buildRelatedSupportCandidates(supportSeeds, books, excludedEntryIds, new Set(supportSeeds.map((candidate) => candidate.entry.entryId)), feedback, Math.min(RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - supportSeeds.length)));
-    if (relatedSupport.length) {
-      addSearchCandidatesToPool(relatedSupport);
-      pooledCandidates = getCandidatePool();
-      pushTrace(trace, "retrieve", "Expand related support", `Selected active entries referenced ${relatedSupport.length} related support candidate(s) from their own lore content.`, { entryCount: relatedSupport.length, durationMs });
-      steps.push(`Traversal expanded ${relatedSupport.length} related support candidate(s) from selected entry content.`);
-    }
-    const finalScopes = dedupeScopes(retrievedScopes);
-    const rankedSceneAnchors = buildDeterministicSelection(rankSelectionCandidates(queryText, Array.from(sceneAnchorsById.values()), finalScopes), Math.min(maxDynamicEntries, sceneAnchorsById.size));
-    const sceneAnchorIds = new Set(rankedSceneAnchors.map((item) => item.entry.entryId));
-    const protectedScopeCore = selectProtectedScopeCore(scopeCoreSourceCandidates, queryText, scopeCoreScopes, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length), sceneAnchorIds);
-    const protectedScopeCoreIds = new Set(protectedScopeCore.map((item) => item.entry.entryId));
-    const manifestCandidates = mergeScoredEntryLists(buildFinalCandidateSet(), protectedScopeCore);
-    const supportManifestCandidates = manifestCandidates.filter((item) => !sceneAnchorIds.has(item.entry.entryId));
-    const protectedRelatedSupport = selectProtectedRelatedSupport(supportManifestCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId)), Math.min(PROTECTED_RELATED_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length)));
-    const protectedRelatedIds = new Set(protectedRelatedSupport.map((item) => item.entry.entryId));
-    const sceneSupportCandidates = supportManifestCandidates.filter((item) => !protectedScopeCoreIds.has(item.entry.entryId) && !protectedRelatedIds.has(item.entry.entryId));
-    const protectedSceneSupport = selectProtectedSceneSupport(sceneSupportCandidates, queryText, finalScopes, Math.min(PROTECTED_SCENE_SUPPORT_LIMIT, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length)));
-    const protectedSceneSupportIds = new Set(protectedSceneSupport.map((item) => item.entry.entryId));
-    const optionalSupportCandidates = sceneSupportCandidates.filter((item) => !protectedSceneSupportIds.has(item.entry.entryId));
-    const finalCandidatePool = [
-      ...rankedSceneAnchors,
-      ...protectedScopeCore,
-      ...protectedRelatedSupport,
-      ...protectedSceneSupport,
-      ...optionalSupportCandidates.slice(0, Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length - protectedSceneSupport.length))
-    ];
-    const manifests = buildScopedManifests(finalCandidatePool, finalScopes);
-    if (!pooledCandidates.length || !finalCandidatePool.length) {
-      pushTrace(trace, "finish", label, `${reason} Exploration finished without accumulated dynamic candidates.`, { entryCount: 0, durationMs });
-      return {
-        scopes: finalScopes.length ? finalScopes : scopes,
-        selected: [],
-        candidates: pooledCandidates,
-        manifests,
-        retrievedScopes: finalScopes,
-        fallbackReason: null,
-        selectionReason: reason,
-        usedSearchFrontier,
-        searchEvents,
-        steps: [...steps, "Traversal finished with no accumulated dynamic candidates."],
-        trace
-      };
-    }
-    const remainingSupportSlots = Math.max(0, maxDynamicEntries - rankedSceneAnchors.length - protectedScopeCore.length - protectedRelatedSupport.length - protectedSceneSupport.length);
-    const supportSelectionLimit = config.selectiveRetrieval ? Math.min(remainingSupportSlots, SELECTIVE_FALLBACK_LIMIT) : remainingSupportSlots;
-    const selectedSupport = config.selectiveRetrieval && supportSelectionLimit > 0 ? await maybeSelectEntries(queryText, optionalSupportCandidates, config, controller, allowController, finalScopes, supportSelectionLimit) : config.selectiveRetrieval ? [] : optionalSupportCandidates.slice(0, supportSelectionLimit);
-    const selected = [
-      ...rankedSceneAnchors,
-      ...protectedScopeCore,
-      ...protectedRelatedSupport,
-      ...protectedSceneSupport,
-      ...selectedSupport
-    ].slice(0, maxDynamicEntries);
-    const selectedAnchorCount = selected.filter((item) => sceneAnchorIds.has(item.entry.entryId)).length;
-    const selectedScopeCoreCount = selected.filter((item) => protectedScopeCoreIds.has(item.entry.entryId)).length;
-    const selectedRelatedSupportCount = selected.filter((item) => protectedRelatedIds.has(item.entry.entryId)).length;
-    const selectedSceneSupportCount = selected.filter((item) => protectedSceneSupportIds.has(item.entry.entryId)).length;
-    const anchorSummary = selectedAnchorCount ? `, including ${selectedAnchorCount} active anchor(s)` : "";
-    const scopeCoreSummary = selectedScopeCoreCount ? `${anchorSummary ? " and" : ", including"} ${selectedScopeCoreCount} protected selected-scope core candidate(s)` : "";
-    const relatedSummary = selectedRelatedSupportCount ? `${anchorSummary || scopeCoreSummary ? " and" : ", including"} ${selectedRelatedSupportCount} protected related support candidate(s)` : "";
-    const sceneSupportSummary = selectedSceneSupportCount ? `${anchorSummary || scopeCoreSummary || relatedSummary ? " and" : ", including"} ${selectedSceneSupportCount} protected scene support candidate(s)` : "";
-    pushTrace(trace, "finish", label, `${reason} Exploration accumulated ${pooledCandidates.length} dynamic candidate(s) across ${Math.max(finalScopes.length, 1)} retrieved scope(s).`, { entryCount: pooledCandidates.length, durationMs });
-    pushTrace(trace, "manifest_select", "Select accumulated entries", `Final manifest selection kept ${selected.length} dynamic entry candidate(s)${anchorSummary}${scopeCoreSummary}${relatedSummary}${sceneSupportSummary} from ${pooledCandidates.length} pooled candidate(s).`, { entryCount: selected.length });
-    return {
-      scopes: finalScopes.length ? finalScopes : scopes,
-      selected,
-      candidates: pooledCandidates,
-      manifests,
-      retrievedScopes: finalScopes,
-      fallbackReason: null,
-      selectionReason: reason,
-      usedSearchFrontier,
-      searchEvents,
-      steps: [
-        ...steps,
-        `Traversal accumulated ${pooledCandidates.length} pulled candidate(s).`,
-        `Final manifest selection kept ${selected.length} dynamic entry candidate(s).`
-      ],
-      trace
-    };
-  };
-  if (!deterministic.length) {
-    pushTrace(trace, "fallback", "No traversal candidates", "Traversal found no scored entries, so nothing was injected.");
-    return {
-      scopes,
-      selected: [],
-      candidates: [],
-      manifests: [],
-      retrievedScopes: [],
-      fallbackReason: "Traversal found no scored entries, so nothing was injected.",
-      selectionReason,
-      usedSearchFrontier: false,
-      searchEvents,
-      steps: ["No traversal candidates scored above zero."],
-      trace
-    };
-  }
-  seedSceneAnchors();
-  if (!allowController) {
-    const fallbackSelection = await selectEntriesForScopes(queryText, scopes, config, controller, false, deterministicById, trace, maxDynamicEntries, excludedEntryIds, feedback);
-    pushTrace(trace, "fallback", "Traversal controller skipped", "Fast preview mode skipped traversal controller selection and used deterministic fallback results.", { entryCount: fallbackSelection.selected.length });
-    return {
-      scopes: fallbackSelection.scopes,
-      selected: fallbackSelection.selected,
-      candidates: fallbackSelection.candidates,
-      manifests: fallbackSelection.manifests,
-      retrievedScopes: fallbackSelection.scopes,
-      fallbackReason: "Fast preview skipped traversal controller selection and used deterministic fallback results.",
-      selectionReason: fallbackSelection.selectionReason,
-      usedSearchFrontier: false,
-      searchEvents,
-      steps: ["Fast preview mode skipped controller-driven traversal."],
-      trace
-    };
-  }
-  for (let step = 0;step < config.traversalStepLimit; step += 1) {
-    const frontier = searchFrontier ? buildSearchTraversalFrontier(searchFrontier.query, searchFrontier.results, booksById) : buildTraversalFrontier(scopes, deterministicById, config, null, step);
-    if (frontier.mode === "tree" && !frontier.categories.length) {
-      const autoSelected = collectCandidatesForScopes(queryText, scopes, [], deterministicById, false, excludedEntryIds, feedback);
-      if (!autoSelected.length) {
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection("Traversal reached an empty frontier after retrieving candidates.", "Finish traversal", null);
-        }
-        pushTrace(trace, "fallback", "Empty frontier", "Traversal reached an empty frontier, so collapsed retrieval was used.");
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal reached an empty frontier, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier: false,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because traversal had no frontier choices."],
-          trace
-        };
-      }
-      addCandidatesToPool(autoSelected, scopes);
-      pushTrace(trace, "retrieve", "Retrieve current scope", `Current scope had no deeper categories, so Lore Recall added ${autoSelected.length} entry candidate(s) to the traversal pool.`, { entryCount: autoSelected.length });
-      steps.push(`Traversal added ${autoSelected.length} candidate(s) from the current scope.`);
-      return finalizeAccumulatedSelection("Traversal reached a leaf frontier.", "Finish traversal", null);
-    }
-    if (frontier.mode === "search" && !frontier.searchResults.length) {
-      if (getCandidatePool().length) {
-        return finalizeAccumulatedSelection("Global search had no more results after retrieval.", "Finish traversal", null);
-      }
-      pushTrace(trace, "fallback", "Empty search frontier", "Global search did not expose any frontier choices, so collapsed retrieval was used.");
-      return {
-        scopes,
-        selected: getCollapsedFallbackSelection(),
-        candidates: [],
-        manifests: [],
-        retrievedScopes: [],
-        fallbackReason: "Traversal search exposed no usable frontier choices, so collapsed retrieval was used instead.",
-        selectionReason,
-        usedSearchFrontier: true,
-        searchEvents,
-        steps: [...steps, "Collapsed fallback used because traversal search exposed no frontier choices."],
-        trace
-      };
-    }
-    const response = await runControllerJson2(buildTraversalPrompt(activeSelectionQuery, frontier, step, config, getCandidatePool()), controller, RETRIEVAL_TRAVERSAL_SYSTEM_PROMPT, "Traverse retrieval tree");
-    const fallbackReason = response.error ?? "Traversal controller returned no usable response.";
-    if (!response.parsed) {
-      if (getCandidatePool().length) {
-        return finalizeAccumulatedSelection(`${fallbackReason} Finalizing accumulated traversal candidates.`, "Finish traversal", response.durationMs);
-      }
-      pushTrace(trace, "fallback", "Controller failed", fallbackReason);
-      return {
-        scopes,
-        selected: getCollapsedFallbackSelection(),
-        candidates: [],
-        manifests: [],
-        retrievedScopes: [],
-        fallbackReason: `${fallbackReason} Collapsed retrieval was used instead.`,
-        selectionReason,
-        usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
-        searchEvents,
-        steps: [...steps, "Collapsed fallback used because traversal controller output was invalid."],
-        trace
-      };
-    }
-    const action = typeof response.parsed.action === "string" ? response.parsed.action.trim().toLowerCase() : "";
-    const choiceIds = Array.isArray(response.parsed.choiceIds) ? response.parsed.choiceIds.filter((value) => typeof value === "string" && value.trim().length > 0) : Array.isArray(response.parsed.nodeIds) ? response.parsed.nodeIds.filter((value) => typeof value === "string" && value.trim().length > 0) : [];
-    const reason = typeof response.parsed.reason === "string" && response.parsed.reason.trim() ? response.parsed.reason.trim() : "No controller reason provided.";
-    if (action === "navigate") {
-      if (frontier.mode !== "tree") {
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection("Controller tried to navigate from a search-result frontier after accumulating candidates.", "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Invalid navigate", "Controller tried to navigate from a search-result frontier.");
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal controller tried to navigate from a search-result frontier, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier: true,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because navigation was requested from a search-result frontier."],
-          trace
-        };
-      }
-      const nextScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
-      if (!nextScopes.length) {
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection(`Controller picked no valid traversal branches after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`, "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Invalid navigate", `Controller picked no valid traversal branches. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`);
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal controller chose no valid branches, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because no valid traversal branch was selected."],
-          trace
-        };
-      }
-      scopes = nextScopes;
-      searchFrontier = null;
-      selectionReason = reason;
-      pushTrace(trace, "navigate", "Navigate deeper", `${reason} Opened ${nextScopes.length} branch(es).`, {
-        bookId: nextScopes[0]?.book.summary.id ?? null,
-        nodeId: nextScopes[0]?.nodeId ?? null
-      });
-      continue;
-    }
-    if (action === "search") {
-      const searchQuery = typeof response.parsed.query === "string" && response.parsed.query.trim() ? response.parsed.query.trim() : activeSelectionQuery;
-      const rescored = scoreEntries(searchQuery, books, excludedEntryIds, feedback);
-      const frontierResults = rescored.slice(0, Math.max(TRAVERSAL_SEARCH_LIMIT, maxDynamicEntries * 3));
-      if (!frontierResults.length) {
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection(`Search "${searchQuery}" found no additional results.`, "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Search found nothing", `Search "${searchQuery}" found no global traversal matches.`);
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: `Traversal search "${searchQuery}" found no usable global results, so collapsed retrieval was used instead.`,
-          selectionReason,
-          usedSearchFrontier: true,
-          searchEvents,
-          steps: [...steps, `Collapsed fallback used because traversal search "${searchQuery}" found nothing.`],
-          trace
-        };
-      }
-      searchFrontier = { query: searchQuery, results: frontierResults };
-      activeSelectionQuery = searchQuery;
-      usedSearchFrontier = true;
-      const previewMatches = buildPreviewNodes(frontierResults.slice(0, Math.min(frontierResults.length, 8)), booksById);
-      const searchSummary = `${reason} Global search matched ${rescored.length} entry result${rescored.length === 1 ? "" : "s"} across ${books.length} readable managed book${books.length === 1 ? "" : "s"}.`;
-      searchEvents.push({
-        query: searchQuery,
-        global: true,
-        resultCount: rescored.length,
-        summary: searchSummary,
-        matches: previewMatches
-      });
-      pushTrace(trace, "search", `Search: ${searchQuery}`, `${reason} Global search built a temporary frontier of ${frontierResults.length} entry result choice(s) from ${rescored.length} readable-book match(es).`, { entryCount: rescored.length, durationMs: response.durationMs });
-      emitProgress(controller.reportProgress, {
-        type: "item",
-        item: createFeedItem("search", `Global search: ${searchQuery}`, `Built a ${frontierResults.length}-result frontier from ${rescored.length} global match${rescored.length === 1 ? "" : "es"}.`, {
-          phase: "search",
-          count: rescored.length,
-          entries: previewMatches,
-          searchQuery,
-          searchGlobal: true,
-          tone: "info",
-          details: [
-            `Reason: ${reason}`,
-            `Readable managed books searched: ${books.length}`
-          ],
-          durationMs: response.durationMs
-        })
-      });
-      continue;
-    }
-    if (action === "retrieve" || action === "finish") {
-      if (frontier.mode === "search") {
-        const frontierById = new Map(searchFrontier?.results.map((item) => [item.entry.entryId, item]) ?? []);
-        const requestedEntryIds = uniqueStrings(choiceIds.flatMap(expandChoiceIdVariants).map(parseEntryChoiceId).filter((value) => !!value));
-        const selectedCandidates2 = requestedEntryIds.length ? collectEntriesByIds(requestedEntryIds, frontierById) : searchFrontier?.results ?? [];
-        if (!selectedCandidates2.length) {
-          if (getCandidatePool().length) {
-            return finalizeAccumulatedSelection(`${reason} Search-result choices did not resolve after accumulating candidates.`, "Finish global search", response.durationMs);
-          }
-          pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal search frontier did not resolve any entry results.");
-          return {
-            scopes,
-            selected: getCollapsedFallbackSelection(),
-            candidates: [],
-            manifests: [],
-            retrievedScopes: [],
-            fallbackReason: "Traversal search frontier returned no usable entries, so collapsed retrieval was used instead.",
-            selectionReason,
-            usedSearchFrontier: true,
-            searchEvents,
-            steps: [...steps, "Collapsed fallback used because traversal search results did not resolve any entries."],
-            trace
-          };
-        }
-        addSearchCandidatesToPool(selectedCandidates2);
-        selectionReason = reason;
-        pushTrace(trace, "retrieve", action === "finish" ? "Retrieve search results before finish" : "Retrieve search results", `${reason} Added ${selectedCandidates2.length} search result candidate(s) to the traversal pool.`, { entryCount: selectedCandidates2.length, durationMs: response.durationMs });
-        steps.push(`Traversal added ${selectedCandidates2.length} candidate(s) from global search.`);
-        searchFrontier = null;
-        activeSelectionQuery = queryText;
-        if (action === "finish") {
-          return finalizeAccumulatedSelection(reason, "Finish global search", response.durationMs);
-        }
-        continue;
-      }
-      const requestedScopes = limitScopeSelection(resolveTraversalChoiceScopes(choiceIds, booksById), getScopePickLimit(config));
-      if (choiceIds.length > 0 && !requestedScopes.length) {
-        const directChoiceCandidates = resolveDirectEntryChoices(choiceIds);
-        if (directChoiceCandidates.length) {
-          addSearchCandidatesToPool(directChoiceCandidates);
-          pushTrace(trace, "retrieve", "Recover direct entry choices", `${reason} The controller returned entry IDs while on a tree frontier, so Lore Recall recovered ${directChoiceCandidates.length} matching entry candidate(s) instead of falling back.`, { entryCount: directChoiceCandidates.length, durationMs: response.durationMs });
-          steps.push(`Traversal recovered ${directChoiceCandidates.length} direct entry candidate(s) from tree-frontier choiceIds.`);
-          if (action === "finish") {
-            return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
-          }
-          continue;
-        }
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection(`${reason} Tree choiceIds did not resolve after accumulating candidates. Unresolved choiceIds: ${formatChoiceIdList(choiceIds)}.`, "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Retrieve resolved no choices", `Traversal controller chose tree choiceIds that did not resolve to any category: ${formatChoiceIdList(choiceIds)}.`);
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal controller chose unknown tree choiceIds, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because traversal tree choiceIds did not resolve."],
-          trace
-        };
-      }
-      const implicitCurrentScopeRetrieve = !requestedScopes.length && choiceIds.length === 0;
-      if (implicitCurrentScopeRetrieve && isBroadScopeSet(scopes)) {
-        if (action === "finish" && getCandidatePool().length) {
-          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
-        }
-        if (navigateBroadImplicitRetrieve(reason, response.durationMs)) {
-          continue;
-        }
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Avoid broad retrieve", "Traversal controller requested the current broad scope without choiceIds, and no narrower branch was available.");
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal controller requested an implicit broad retrieve, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because traversal requested an implicit broad retrieve."],
-          trace
-        };
-      }
-      const scopesToRetrieve = requestedScopes.length ? requestedScopes : action === "finish" && getCandidatePool().length ? [] : scopes;
-      const selectedCandidates = scopesToRetrieve.length ? collectCandidatesForScopes(queryText, scopesToRetrieve, [], deterministicById, false, excludedEntryIds, feedback) : [];
-      if (!selectedCandidates.length) {
-        if (getCandidatePool().length) {
-          return finalizeAccumulatedSelection(`${reason} Selected tree choices resolved no new entries after accumulating candidates.`, "Finish traversal", response.durationMs);
-        }
-        pushTrace(trace, "fallback", "Retrieve resolved nothing", "Traversal did not resolve any entries from the selected choices.");
-        return {
-          scopes,
-          selected: getCollapsedFallbackSelection(),
-          candidates: [],
-          manifests: [],
-          retrievedScopes: [],
-          fallbackReason: "Traversal controller returned no usable entries, so collapsed retrieval was used instead.",
-          selectionReason,
-          usedSearchFrontier,
-          searchEvents,
-          steps: [...steps, "Collapsed fallback used because traversal did not resolve any entries."],
-          trace
-        };
-      }
-      addCandidatesToPool(selectedCandidates, scopesToRetrieve);
-      selectionReason = reason;
-      pushTrace(trace, "retrieve", action === "finish" ? "Retrieve entries before finish" : "Retrieve entries", `${reason} Added ${selectedCandidates.length} entry candidate(s) from ${Math.max(scopesToRetrieve.length, 1)} retrieval scope(s) to the traversal pool.`, { entryCount: selectedCandidates.length, durationMs: response.durationMs });
-      steps.push(`Traversal added ${selectedCandidates.length} candidate(s) from ${Math.max(scopesToRetrieve.length, 1)} scope(s).`);
-      if (scopesToRetrieve.length)
-        scopes = scopesToRetrieve;
-      if (action === "finish") {
-        return finalizeAccumulatedSelection(reason, "Finish traversal", response.durationMs);
-      }
-      continue;
-    }
-    if (getCandidatePool().length) {
-      return finalizeAccumulatedSelection(`Traversal controller returned unsupported action "${action || "empty"}" after accumulating candidates.`, "Finish traversal", response.durationMs);
-    }
-    pushTrace(trace, "fallback", "Unknown action", `Traversal controller returned unsupported action "${action || "empty"}".`);
-    return {
-      scopes,
-      selected: getCollapsedFallbackSelection(),
-      candidates: [],
-      manifests: [],
-      retrievedScopes: [],
-      fallbackReason: "Traversal controller returned an unsupported action, so collapsed retrieval was used instead.",
-      selectionReason,
-      usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
-      searchEvents,
-      steps: [...steps, "Collapsed fallback used because traversal controller returned an unsupported action."],
-      trace
-    };
-  }
-  if (getCandidatePool().length) {
-    return finalizeAccumulatedSelection(`Traversal hit the ${config.traversalStepLimit}-step limit after accumulating candidates.`, "Finish traversal", null);
-  }
-  pushTrace(trace, "fallback", "Step limit reached", `Traversal hit the ${config.traversalStepLimit}-step limit and fell back to collapsed retrieval.`);
-  return {
-    scopes,
-    selected: getCollapsedFallbackSelection(),
-    candidates: [],
-    manifests: [],
-    retrievedScopes: [],
-    fallbackReason: `Traversal exhausted its ${config.traversalStepLimit}-step limit, so collapsed retrieval was used instead.`,
-    selectionReason,
-    usedSearchFrontier: usedSearchFrontier || !!searchFrontier,
-    searchEvents,
-    steps: [...steps, "Collapsed fallback used because traversal exceeded the configured step limit."],
-    trace
-  };
-}
 function buildPreviewNodes(selected, booksById) {
   return selected.map((item) => {
     const book = booksById.get(item.entry.worldBookId);
@@ -3927,13 +1589,6 @@ function buildPreviewNodes(selected, booksById) {
       selectionRole: item.selectionRole
     };
   });
-}
-function areSameScopes(left, right) {
-  const leftKeys = left.map(makeScopeKey);
-  const rightKeys = right.map(makeScopeKey);
-  if (leftKeys.length !== rightKeys.length)
-    return false;
-  return leftKeys.every((key, index) => key === rightKeys[index]);
 }
 function buildInjectionText(selected, booksById, injectedEntryLimit, collapsedDepth) {
   if (!selected.length)
@@ -3975,287 +1630,176 @@ function buildInjectionText(selected, booksById, injectedEntryLimit, collapsedDe
   };
 }
 async function buildRetrievalPreview(messages, settings, config, books, userId, options = {}) {
-  const allowController = options.allowController !== false;
+  return buildCategoryRetrievalPreview(messages, settings, config, books, userId, options);
+}
+async function buildCategoryRetrievalPreview(messages, settings, config, books, userId, options) {
   const queryText = buildQueryText(messages, config.contextMessages);
   const recentConversation = buildRecentConversation(messages, config.contextMessages) || queryText;
   if (!queryText.trim())
     return null;
-  const readableBooks = books.filter((book) => isReadableBook(book.config));
+  const readableBooks = books.filter((book) => book.config.enabled && isReadableBook(book.config));
   if (!readableBooks.length)
     return null;
-  const reportProgress = options.reportProgress;
+  const report = options.reportProgress;
   const startedAt = options.capturedAt ?? Date.now();
-  emitProgress(reportProgress, {
+  emitProgress(report, {
     type: "start",
-    mode: config.searchMode,
+    mode: "collapsed",
     timestamp: startedAt,
     label: "Start retrieval",
-    summary: `Started ${config.searchMode} retrieval across ${readableBooks.length} readable book(s).`,
-    details: [`Recent conversation: ${truncateText(recentConversation, 260)}`]
+    summary: `Reviewing ${readableBooks.length} managed book(s).`
   });
-  const controller = {
-    settings,
-    userId,
-    connectionId: resolveControllerConnectionId(settings, options.connectionId),
-    controllerUsed: false,
-    deadlineAt: Date.now() + CONTROLLER_TOTAL_BUDGET_MS,
-    callCount: 0,
-    reportProgress
+  const allEntries = readableBooks.flatMap((book) => book.cache.entries.filter((entry) => !entry.disabled && !entry.constant).map((entry) => ({ entry, category: rootCategoryForEntry(book.tree, entry.entryId) })));
+  const constants = collectReservedConstantEntries(readableBooks);
+  const reservedConstantNodes = buildPreviewNodes(constants, new Map(readableBooks.map((book) => [book.summary.id, book])));
+  const issues = [];
+  let controllerUsed = false;
+  const controllerAllowed = options.allowController !== false;
+  const connectionId = resolveControllerConnectionId(settings, options.connectionId);
+  const modelDeadline = Date.now() + 155000;
+  const runModel = async (prompt) => {
+    if (!controllerAllowed)
+      return null;
+    const remainingMs = modelDeadline - Date.now();
+    if (remainingMs < 1000) {
+      issues.push("Model selection ran out of time; remaining batches were skipped.");
+      return null;
+    }
+    const abort = new AbortController;
+    const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30000));
+    try {
+      const response = await runControllerJson(prompt, settings, userId, { connectionId, temperatureOverride: 0.1, signal: abort.signal });
+      if (!response.parsed)
+        throw new Error("Model returned no valid JSON.");
+      controllerUsed = true;
+      return response.parsed;
+    } catch (error) {
+      issues.push(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   };
-  const chooseBooksStartedAt = Date.now();
-  const chosenBooksResult = await maybeChooseBooks(recentConversation, readableBooks, config, controller, allowController);
-  const chooseBooksDurationMs = Date.now() - chooseBooksStartedAt;
-  const chosenBooks = chosenBooksResult.books;
-  const steps = [
-    `${books.length} managed book(s) loaded.`,
-    `${chosenBooks.length} readable book(s) selected for search in ${chooseBooksDurationMs} ms.`
-  ];
+  const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
+  const categoryResult = categoriesPresent.length ? await runModel([
+    'Choose every top-level lore category relevant to the next reply. Return only JSON: {"categories":["Characters"]}.',
+    "Use only the category names listed. An empty array is valid.",
+    buildPromptContext(recentConversation),
+    "Categories:",
+    ...categoriesPresent.map((category) => {
+      const group = allEntries.filter((item) => item.category === category);
+      return `- ${category}: ${group.length} entries; examples: ${group.slice(0, 8).map((item) => item.entry.label).join(", ")}`;
+    })
+  ].join(`
+`)) : { categories: [] };
+  const rawCategories = categoryResult?.categories;
+  const routedCategories = Array.isArray(rawCategories) && rawCategories.every((value) => typeof value === "string" && categoriesPresent.includes(value)) ? [...new Set(rawCategories)] : [];
+  if (categoriesPresent.length && controllerAllowed && (!Array.isArray(rawCategories) || rawCategories.some((value) => typeof value !== "string" || !categoriesPresent.includes(value)))) {
+    issues.push("Category routing returned an invalid categories array.");
+  }
+  emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories", routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.", { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
+  const routed = allEntries.filter((item) => routedCategories.includes(item.category));
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+  for (const item of routed) {
+    const cost = Math.min(700, item.entry.summary.length + item.entry.previewText.length + 180);
+    if (batch.length && (chars + cost > 18000 || batch.length >= 60)) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(item);
+    chars += cost;
+  }
+  if (batch.length)
+    batches.push(batch);
+  const selectedEntries = [];
+  for (let batchIndex = 0;batchIndex < batches.length; batchIndex++) {
+    const candidates = batches[batchIndex];
+    const result = await runModel([
+      'Select ALL lore entries relevant to the next reply. Return only JSON: {"entryIds":["id"]}.',
+      "Use only IDs from this batch. An empty array is valid. Do not impose a count limit.",
+      buildPromptContext(recentConversation),
+      `Batch ${batchIndex + 1} of ${batches.length}:`,
+      ...candidates.map(({ entry, category }) => `- id=${JSON.stringify(entry.entryId)}; category=${category}; book=${entry.worldBookName}; label=${entry.label}; aliases=${entry.aliases.join(", ")}; keys=${entry.key.join(", ")}; summary=${truncateText(entry.summary, 240)}; preview=${truncateText(entry.previewText, 300)}`)
+    ].join(`
+`));
+    if (!result || !Array.isArray(result.entryIds) || !result.entryIds.every((id) => typeof id === "string")) {
+      issues.push(`Selection batch ${batchIndex + 1} returned no usable entryIds array.`);
+      continue;
+    }
+    const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
+    const requested = [...new Set(result.entryIds)];
+    const invalid = requested.filter((id) => !byId.has(id));
+    if (invalid.length) {
+      issues.push(`Selection batch ${batchIndex + 1} returned ${invalid.length} unknown ID(s).`);
+      continue;
+    }
+    for (const id of requested)
+      selectedEntries.push({ entry: byId.get(id), score: 0, reasons: ["model_selected"] });
+  }
   const booksById = new Map(readableBooks.map((book) => [book.summary.id, book]));
-  const trace = createTraceBuffer(reportProgress);
-  trace.push(...chosenBooksResult.trace);
-  const reservedConstants = collectReservedConstantEntries(chosenBooks);
-  const reservedConstantCount = reservedConstants.length;
-  const reservedEntryIds = new Set(reservedConstants.map((item) => item.entry.entryId));
-  const configuredInjectCap = clampInt(config.tokenBudget, 1, 64);
-  const remainingDynamicSlots = configuredInjectCap;
-  const maxDynamicEntries = getDynamicEntryLimit(config, remainingDynamicSlots);
-  const reservedConstantNodes = buildPreviewNodes(reservedConstants, booksById);
-  if (reservedConstantCount) {
-    const reservedSummary = `Prepared ${reservedConstantCount} native constant entr${reservedConstantCount === 1 ? "y" : "ies"} for always-on injection; dynamic retrieval still has ${remainingDynamicSlots} slot(s).`;
-    steps.push(reservedSummary);
-    pushTrace(trace, "inject", "Reserve constants", reservedSummary, { entryCount: reservedConstantCount });
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("reserved", "Reserved constants", reservedSummary, {
-        phase: "inject",
-        count: reservedConstantCount,
-        entries: reservedConstantNodes,
-        tone: "info"
-      })
-    });
-  } else {
-    steps.push(`No native constant entries were prepared; ${remainingDynamicSlots} dynamic slot(s) are available.`);
-  }
-  const deterministic = scoreEntries(recentConversation, chosenBooks, reservedEntryIds, options.dynamicFeedback);
-  const deterministicById = new Map(deterministic.map((item) => [item.entry.entryId, item]));
-  let selectedScopes = [];
-  let pulledCandidates = [];
-  let selected = [];
-  let manifests = [];
-  let searchEvents = [];
-  let selectionReason = "";
-  let entrySelectionDurationMs = null;
-  let usedSearchFrontier = false;
-  const fallbackPath = [];
-  if (!deterministic.length) {
-    fallbackPath.push("Deterministic scoring found no matching dynamic entries.");
-    pushTrace(trace, "fallback", "No scored entries", fallbackPath[0]);
-  } else {
-    const scopeSelectionStartedAt = Date.now();
-    const scopeSelection = config.searchMode === "traversal" ? {
-      scopes: chosenBooks.map((book) => ({ book, nodeId: book.tree.rootId })),
-      fallbackPath: [],
-      selectionReason: "Exploratory traversal starts from selected book roots."
-    } : await chooseCollapsedScopes(recentConversation, chosenBooks, config, controller, allowController, deterministicById, trace);
-    const scopeSelectionDurationMs = Date.now() - scopeSelectionStartedAt;
-    const initiallySelectedScopes = scopeSelection.scopes;
-    selectedScopes = scopeSelection.scopes;
-    selectionReason = scopeSelection.selectionReason;
-    fallbackPath.push(...scopeSelection.fallbackPath);
-    if (config.searchMode === "traversal") {
-      pushTrace(trace, "choose_scope", "Start exploratory traversal", `${selectionReason} Started from ${selectedScopes.length} root scope(s): ${buildTraceScopeSummary(selectedScopes)}.`, {
-        bookId: selectedScopes[0]?.book.summary.id ?? null,
-        nodeId: selectedScopes[0]?.nodeId ?? null,
-        entryCount: selectedScopes.reduce((total, scope) => total + getScopedEntryIds(scope.book, scope.nodeId, true).length, 0)
-      });
-      steps.push(`Exploratory traversal started from ${selectedScopes.length} root scope(s).`);
-    } else {
-      steps.push(`Node-first ${config.searchMode} retrieval selected ${selectedScopes.length} scope(s).`);
-    }
-    const initialSelectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-    const initialScopePreviews = buildPreviewScopes(selectedScopes, new Map, initialSelectionReasons);
-    if (initialScopePreviews.length) {
-      emitProgress(reportProgress, {
-        type: "item",
-        item: createFeedItem("scope", "Selected scopes", `Working from ${initialScopePreviews.length} scope(s) across ${chosenBooks.length} readable book(s).`, {
-          phase: "choose_scope",
-          count: initialScopePreviews.length,
-          scopes: initialScopePreviews,
-          details: selectionReason ? [selectionReason] : undefined,
-          tone: "info",
-          durationMs: scopeSelectionDurationMs
-        })
-      });
-    }
-    const entrySelectionStartedAt = Date.now();
-    const entrySelection = config.searchMode === "traversal" ? await selectTraversalEntries(recentConversation, chosenBooks, selectedScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, reservedEntryIds, options.dynamicFeedback) : await selectEntriesForScopes(recentConversation, selectedScopes, config, controller, allowController, deterministicById, trace, maxDynamicEntries, reservedEntryIds, options.dynamicFeedback);
-    entrySelectionDurationMs = Date.now() - entrySelectionStartedAt;
-    selectedScopes = entrySelection.scopes;
-    pulledCandidates = entrySelection.candidates;
-    selected = entrySelection.selected;
-    manifests = entrySelection.manifests;
-    if ("fallbackPath" in entrySelection && Array.isArray(entrySelection.fallbackPath)) {
-      fallbackPath.push(...entrySelection.fallbackPath);
-    }
-    if ("fallbackReason" in entrySelection && entrySelection.fallbackReason) {
-      fallbackPath.push(entrySelection.fallbackReason);
-    }
-    if (Array.isArray(entrySelection.searchEvents) && entrySelection.searchEvents.length) {
-      searchEvents = entrySelection.searchEvents;
-    }
-    if (entrySelection.usedSearchFrontier) {
-      usedSearchFrontier = true;
-    }
-    if (entrySelection.selectionReason) {
-      selectionReason = entrySelection.selectionReason;
-    }
-    steps.push(usedSearchFrontier ? `Resolved ${pulledCandidates.length} pulled entry candidate(s), including global search contribution(s).` : `Resolved ${pulledCandidates.length} pulled entry candidate(s) across ${Math.max(selectedScopes.length, 1)} scope(s).`);
-    steps.push(`Kept ${selected.length} entry candidate(s) for injection.`);
-    if (!areSameScopes(initiallySelectedScopes, selectedScopes)) {
-      const refinedReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-      const refinedScopePreviews = buildPreviewScopes(selectedScopes, new Map, refinedReasons);
-      if (refinedScopePreviews.length) {
-        const scopeEventLabel = config.searchMode === "traversal" ? "Retrieved scopes" : "Refined scopes";
-        const scopeEventSummary = config.searchMode === "traversal" ? `Traversal accumulated candidates from ${refinedScopePreviews.length} retrieved scope(s).` : `Narrowed retrieval to ${refinedScopePreviews.length} scope(s) before final selection.`;
-        emitProgress(reportProgress, {
-          type: "item",
-          item: createFeedItem("scope", scopeEventLabel, scopeEventSummary, {
-            phase: config.searchMode === "traversal" ? "retrieve" : "refine_scope",
-            count: refinedScopePreviews.length,
-            scopes: refinedScopePreviews,
-            details: selectionReason ? [selectionReason] : undefined,
-            tone: "info",
-            durationMs: scopeSelectionDurationMs
-          })
-        });
-      }
-    }
-  }
-  const pulledNodes = buildPreviewNodes(pulledCandidates.length ? pulledCandidates : selected, booksById);
-  if (pulledNodes.length) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("pulled", "Pulled candidates", usedSearchFrontier ? `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"}, including global search contribution(s).` : `Resolved ${pulledNodes.length} pulled candidate entr${pulledNodes.length === 1 ? "y" : "ies"} from ${Math.max(selectedScopes.length, 1)} scope(s).`, {
-        phase: "retrieve",
-        count: pulledNodes.length,
-        entries: pulledNodes,
-        tone: "info",
-        durationMs: entrySelectionDurationMs
-      })
-    });
-  }
-  const manifestCounts = new Map(manifests.map((item) => [makeScopeKey(item.scope), item.candidates.length]));
-  const selectionReasons = new Map(selectedScopes.map((scope) => [makeScopeKey(scope), selectionReason]));
-  const selectedScopePreviews = buildPreviewScopes(selectedScopes, manifestCounts, selectionReasons);
-  const scopeManifestCounts = populateScopeManifestSelections(buildPreviewScopeManifests(manifests), selected, selectedScopes);
-  const manifestSelectedEntries = buildPreviewNodes(selected, booksById);
-  if (config.selectiveRetrieval || manifests.length) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("manifest", "Manifest selection", usedSearchFrontier ? `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal and search manifest selection.` : `Selected ${manifestSelectedEntries.length} final entry candidate entr${manifestSelectedEntries.length === 1 ? "y" : "ies"} after traversal manifest selection.`, {
-        phase: "manifest_select",
-        count: manifestSelectedEntries.length,
-        scopes: selectedScopePreviews,
-        entries: manifestSelectedEntries,
-        tone: "info",
-        durationMs: entrySelectionDurationMs
-      })
-    });
-  }
-  const maxInjectedEntries = remainingDynamicSlots;
-  if (config.selectiveRetrieval && selected.length > maxInjectedEntries) {
-    spindle.log.warn(`Lore Recall selective retrieval exceeded the inject cap before prompt assembly (${selected.length} > ${maxInjectedEntries}); applying safety clamp.`);
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("issue", "Selective retrieval exceeded inject cap", `Selective retrieval produced ${selected.length} entries before injection, so Lore Recall had to safety-clamp to ${maxInjectedEntries}.`, {
-        phase: "inject",
-        tone: "warn",
-        details: [
-          `selected=${selected.length}`,
-          `injectCap=${maxInjectedEntries}`
-        ]
-      })
-    });
-  }
-  const injectionStartedAt = Date.now();
-  const selectedForInjection = [...reservedConstants, ...selected];
-  const injection = selectedForInjection.length ? buildInjectionText(selectedForInjection, booksById, reservedConstantCount + remainingDynamicSlots, config.collapsedDepth) : null;
-  const injectionDurationMs = Date.now() - injectionStartedAt;
-  const included = injection?.included ?? [];
-  const injectedNodes = buildPreviewNodes(included, booksById);
-  const selectionSummary = summarizeSelection(selected, reservedConstantCount, remainingDynamicSlots);
-  if (injection?.included.length) {
-    const constantInjectionSuffix = reservedConstantCount > 0 ? `, including ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y" : "ies"}` : "";
-    pushTrace(trace, "inject", "Inject entries", `Injected ${injection.included.length} entry reference(s) into the interceptor prompt${constantInjectionSuffix}.`, { entryCount: injection.included.length, durationMs: injectionDurationMs });
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("injected", "Injected entries", `Prepared ${injectedNodes.length} entr${injectedNodes.length === 1 ? "y" : "ies"} for prompt injection.`, {
-        phase: "inject",
-        count: injectedNodes.length,
-        entries: injectedNodes,
-        tone: "success",
-        durationMs: injectionDurationMs
-      })
-    });
-  } else {
-    const skippedSummary = reservedConstantCount > 0 ? `No entries were injected even though ${reservedConstantCount} constant entr${reservedConstantCount === 1 ? "y was" : "ies were"} available.` : "No retrieved entries were injected for this turn.";
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("injected", "Injection skipped", skippedSummary, {
-        phase: "inject",
-        count: 0,
-        tone: selected.length ? "warn" : reservedConstantCount > 0 ? "success" : "info",
-        durationMs: injectionDurationMs
-      })
-    });
-  }
-  const fallbackReason = buildFallbackReason(fallbackPath);
-  if (fallbackReason) {
-    emitProgress(reportProgress, {
-      type: "item",
-      item: createFeedItem("issue", "Fallback path active", fallbackReason, {
-        phase: "fallback",
-        tone: "warn",
-        details: fallbackPath
-      })
-    });
-  }
-  const resolvedConnectionId = controller.controllerUsed ? controller.connectionId : null;
-  emitProgress(reportProgress, {
+  const modelSelectedEntries = buildPreviewNodes(selectedEntries, booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("manifest", "Model picks", `Selected ${selectedEntries.length} of ${routed.length} reviewed entries across ${batches.length} batch(es).`, { phase: "manifest_select", count: selectedEntries.length, entries: modelSelectedEntries, tone: "info" }) });
+  const jev = await filterWithJev(selectedEntries.map((item) => item.entry), recentConversation, settings, userId);
+  if (jev.error)
+    issues.push(jev.error);
+  const verdictById = new Map(jev.verdicts.map((verdict) => [verdict.entryId, verdict]));
+  const approved = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved !== false).sort((a, b) => (verdictById.get(b.entry.entryId)?.confidence ?? -1) - (verdictById.get(a.entry.entryId)?.confidence ?? -1));
+  const rejected = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved === false);
+  const jevApprovedEntries = buildPreviewNodes(approved, booksById);
+  const jevRejectedEntries = buildPreviewNodes(rejected, booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("trace", "JEV filter", `Approved ${approved.length}; rejected ${rejected.length}; unanswered ${jev.verdicts.filter((v) => !v.answered).length}.`, { phase: "manifest_select", count: approved.length, entries: jevApprovedEntries, tone: jev.error ? "warn" : "info" }) });
+  if (rejected.length)
+    emitProgress(report, { type: "item", item: createFeedItem("manifest", "JEV rejected", `JEV rejected ${rejected.length} model-selected entr${rejected.length === 1 ? "y" : "ies"}.`, { phase: "manifest_select", count: rejected.length, entries: jevRejectedEntries, tone: "info" }) });
+  const dynamicLimit = Math.max(0, config.tokenBudget);
+  const selected = approved.slice(0, dynamicLimit);
+  const injection = buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12);
+  const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
+  emitProgress(report, { type: "item", item: createFeedItem("injected", "Injected entries", `Injected ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic).`, { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
+  for (const issue of issues)
+    emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue, { phase: "fallback", tone: "warn" }) });
+  const fallbackReason = issues.length ? issues.join(" ") : null;
+  emitProgress(report, {
     type: "finish",
     timestamp: Date.now(),
-    status: fallbackReason ? "fallback" : "completed",
-    controllerUsed: controller.controllerUsed,
-    resolvedConnectionId,
+    status: issues.length ? "fallback" : "completed",
+    controllerUsed,
+    resolvedConnectionId: controllerUsed ? connectionId : null,
     fallbackReason
   });
   return {
-    mode: config.searchMode,
+    mode: "collapsed",
     queryText,
     recentConversation,
     estimatedTokens: injection?.estimatedTokens ?? 0,
     injectedText: injection?.text ?? "",
-    selectionSummary,
-    reservedConstantCount,
-    remainingDynamicSlots,
-    selectedScopes: selectedScopePreviews,
-    retrievedScopes: selectedScopePreviews,
-    scopeManifestCounts,
-    searchEvents,
+    selectionSummary: `${selected.length} dynamic, ${constants.length} constant`,
+    reservedConstantCount: constants.length,
+    remainingDynamicSlots: dynamicLimit,
+    selectedScopes: [],
+    retrievedScopes: [],
+    scopeManifestCounts: [],
+    searchEvents: [],
+    selectedNodes: [],
     reservedConstantNodes,
-    pulledNodes,
+    pulledNodes: buildPreviewNodes(routed.map(({ entry }) => ({ entry, score: 0, reasons: ["routed"] })), booksById),
     injectedNodes,
-    manifestSelectedEntries,
-    selectedNodes: selectedScopePreviews,
+    manifestSelectedEntries: modelSelectedEntries,
+    routedCategories,
+    modelSelectedEntries,
+    jevApprovedEntries,
+    jevRejectedEntries,
     fallbackReason,
-    fallbackPath,
-    selectedBookIds: chosenBooks.map((book) => book.summary.id),
-    steps,
-    trace,
-    capturedAt: options.capturedAt ?? Date.now(),
+    fallbackPath: issues,
+    selectedBookIds: readableBooks.map((book) => book.summary.id),
+    steps: [],
+    trace: [],
+    capturedAt: startedAt,
     isActual: options.isActual === true,
-    controllerUsed: controller.controllerUsed,
-    resolvedConnectionId
+    controllerUsed,
+    resolvedConnectionId: controllerUsed ? connectionId : null
   };
 }
 
@@ -4600,7 +2144,7 @@ function ensureCategoryPathFromParent(tree, parentId, labels, createdBy) {
   return currentParentId;
 }
 function collectNodeKeywordHints(tree, nodeId, entries) {
-  const entryIds = getDescendantCategoryIds2(tree, nodeId, Number.MAX_SAFE_INTEGER).flatMap((currentNodeId) => tree.nodes[currentNodeId]?.entryIds ?? []);
+  const entryIds = getDescendantCategoryIds(tree, nodeId, Number.MAX_SAFE_INTEGER).flatMap((currentNodeId) => tree.nodes[currentNodeId]?.entryIds ?? []);
   if (nodeId === tree.rootId) {
     entryIds.push(...tree.unassignedEntryIds);
   }
@@ -4662,7 +2206,7 @@ async function subdivideLargeLeafNodes(tree, entries, granularity, settings, use
         ...nodeEntries.map((entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)))
       ].join(`
 `);
-      const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_subdivide", ASSIGNMENTS_SCHEMA, {
+      const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_subdivide", ASSIGNMENTS_SCHEMA, {
         systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
         maxTokensOverride: Math.min(settings.controllerMaxTokens, 900)
       });
@@ -4747,7 +2291,7 @@ function buildControllerDebugPayload(input) {
     capturedAt: Date.now()
   }, null, 2);
 }
-async function runControllerJson3(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
+async function runControllerJson2(prompt, settings, userId, primaryKey, schemaName, schema, options = {}) {
   const result = await runControllerJson(prompt, settings, userId, {
     ...options,
     primaryKey,
@@ -4846,7 +2390,7 @@ function collectCategorySummaryContext(tree, nodeId, entries) {
   const node = tree.nodes[nodeId];
   if (!node)
     return { childLabels: [], sampleEntries: [] };
-  const descendantIds = getDescendantCategoryIds2(tree, nodeId, 2);
+  const descendantIds = getDescendantCategoryIds(tree, nodeId, 2);
   const childLabels = uniqueStrings(descendantIds.filter((id) => id !== nodeId).map((id) => tree.nodes[id]?.label).filter((value) => typeof value === "string" && value.trim().length > 0)).slice(0, 8);
   const sampleEntryIds = uniqueStrings(descendantIds.flatMap((id) => tree.nodes[id]?.entryIds ?? [])).slice(0, 8);
   const sampleEntries = sampleEntryIds.map((entryId) => entries.find((entry) => entry.entryId === entryId)).filter((entry) => !!entry);
@@ -4876,7 +2420,7 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
     }))
   ].filter(Boolean).join(`
 `);
-  const controllerResult = await runControllerJson3(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
+  const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
     systemPrompt: SUMMARY_SYSTEM_PROMPT,
     maxTokensOverride: Math.min(settings.controllerMaxTokens, 700)
   });
@@ -4922,7 +2466,7 @@ function computeEntrySummaryTokenBudget(settings, entryCount) {
 async function generateEntrySummaryBatch(entries, settings, userId) {
   if (!entries.length)
     return [];
-  const controllerResult = await runControllerJson3(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
+  const controllerResult = await runControllerJson2(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
     systemPrompt: SUMMARY_SYSTEM_PROMPT,
     maxTokensOverride: computeEntrySummaryTokenBudget(settings, entries.length)
   });
@@ -5110,7 +2654,7 @@ async function buildTreeFromMetadata(bookIds, userId, operation) {
         chunkCurrent: null,
         chunkTotal: null
       });
-      const tree = createEmptyTreeIndex(bookId);
+      const tree = ensureRootCategories(createEmptyTreeIndex(bookId));
       for (const entry of cache.entries) {
         const path = getMetadataCategoryPath(entry);
         if (path.length) {
@@ -5271,10 +2815,15 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
   for (const book of preparedBooks) {
     const { bookId, bookName, cache, chunkCount, originalIndex } = book;
     try {
-      const tree = createEmptyTreeIndex(bookId);
+      const tree = ensureRootCategories(createEmptyTreeIndex(bookId));
       const updates = [];
       const chunks = chunkEntries(cache.entries, settings.chunkTokens, (entry) => JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length);
-      const granularity = getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length);
+      const granularity = {
+        ...getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length),
+        targetTopLevelMin: 7,
+        targetTopLevelMax: 7,
+        targetCategories: "7 fixed roots"
+      };
       const allEntryManifest = chunks.length > 1 ? cache.entries.map((entry) => truncateText(entry.label || entry.comment || entry.entryId, 80)).filter(Boolean).join(`
 - `) : "";
       const entrySummaryBatchSize = 8;
@@ -5309,8 +2858,8 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
           `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
           `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
           "Hard granularity constraints:",
-          `- Aim for ${granularity.targetCategories} broad reusable top-level categories for the whole book; never create individual entry/name roots just to hit this number.`,
-          `- The absolute top-level cap is ${granularity.targetTopLevelMax}.`,
+          `- Every path MUST begin with exactly one fixed root: ${ROOT_CATEGORIES.join(", ")}.`,
+          "- Place uncertain entries under Other. Create nested branches only below these roots.",
           `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
           "- Reuse existing top-level categories before creating new ones.",
           "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
@@ -5335,7 +2884,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
         let retriedForGranularity = false;
         for (let attempt = 0;attempt < 2; attempt += 1) {
           const prompt = buildPrompt(retryViolations);
-          const controllerResult = await runControllerJson3(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
+          const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
             systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
             maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
           });
@@ -5586,6 +3135,9 @@ async function updateCategory(bookId, nodeId, patch, userId) {
   const node = loaded.tree.nodes[nodeId];
   if (!node || node.id === loaded.tree.rootId)
     throw new Error("That category no longer exists.");
+  if (node.parentId === loaded.tree.rootId && typeof patch.label === "string" && patch.label !== node.label) {
+    throw new Error("Top-level category names are fixed.");
+  }
   if (typeof patch.label === "string" && patch.label.trim())
     node.label = patch.label.trim();
   if (typeof patch.summary === "string")
@@ -5605,6 +3157,8 @@ async function createCategory(bookId, parentId, label, userId) {
     throw new Error("That world book no longer exists.");
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
   const nextParentId = parentId && loaded.tree.nodes[parentId] ? parentId : ROOT_NODE_ID;
+  if (nextParentId === ROOT_NODE_ID)
+    throw new Error("Create nested categories under one of the seven fixed roots.");
   const nodeId = makeNodeId("cat", label);
   loaded.tree.nodes[nodeId] = {
     id: nodeId,
@@ -5647,6 +3201,10 @@ async function moveCategory(bookId, nodeId, parentId, userId) {
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
   if (!loaded.tree.nodes[nodeId] || nodeId === loaded.tree.rootId)
     throw new Error("That category no longer exists.");
+  if (loaded.tree.nodes[nodeId].parentId === loaded.tree.rootId)
+    throw new Error("Top-level categories cannot be moved.");
+  if (!parentId || parentId === loaded.tree.rootId)
+    throw new Error("Nested categories must stay under a fixed root.");
   if (wouldCreateCycle(loaded.tree, nodeId, parentId))
     throw new Error("That move would create a category cycle.");
   moveCategoryNode(loaded.tree, nodeId, parentId);
@@ -5664,6 +3222,8 @@ async function deleteCategory(bookId, nodeId, target, userId) {
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
   if (!loaded.tree.nodes[nodeId] || nodeId === loaded.tree.rootId)
     throw new Error("That category no longer exists.");
+  if (loaded.tree.nodes[nodeId].parentId === loaded.tree.rootId)
+    throw new Error("Top-level categories cannot be deleted.");
   deleteCategoryNode(loaded.tree, nodeId, target);
   loaded.tree.lastBuiltAt = Date.now();
   loaded.tree.buildSource = "manual";
@@ -5687,7 +3247,7 @@ async function assignEntries(bookId, entryIds, target, userId) {
   loaded.tree.buildSource = "manual";
   await saveTreeIndex(bookId, loaded.tree, cache.entries.map((entry) => entry.entryId), userId);
 }
-function getDescendantCategoryIds2(tree, nodeId, depthLimit) {
+function getDescendantCategoryIds(tree, nodeId, depthLimit) {
   const result = [];
   const queue = [{ nodeId, depth: 0 }];
   const seen = new Set;
@@ -5920,9 +3480,6 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
-    const oversizedLeafNodes = categoryNodes.filter((node) => node.childIds.length === 0 && node.entryIds.length >= 20);
-    const overviewEstimate = categoryNodes.reduce((total, node) => total + 48 + node.label.length + Math.min(node.summary.length, 120), 0);
-    const rootSummary = book.tree.nodes[book.tree.rootId]?.summary?.trim() ?? "";
     if (book.status.attachedToCharacter) {
       diagnostics.push({
         id: `attached:${book.summary.id}`,
@@ -5969,14 +3526,13 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
       });
     }
     const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
-    const missingCollapsedCount = book.cache.entries.filter((entry) => !entry.collapsedText.trim()).length;
-    if (missingSummaryCount || missingCollapsedCount) {
+    if (missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,
         severity: "info",
         bookId: book.summary.id,
         title: "Book metadata is incomplete",
-        detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s) and ${missingCollapsedCount} collapsed-text gap(s).`
+        detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s). Entry previews still let the model review them.`
       });
     }
     if (categoryNodes.length && categorySummaryCount < categoryNodes.length) {
@@ -5985,34 +3541,7 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         severity: categorySummaryCount === 0 ? "warn" : "info",
         bookId: book.summary.id,
         title: "Category summary coverage is incomplete",
-        detail: `${book.summary.name} has ${categorySummaryCount}/${categoryNodes.length} category summaries. Tree navigation works better when categories have short summaries.`
-      });
-    }
-    if (oversizedLeafNodes.length) {
-      diagnostics.push({
-        id: `oversized-leaf:${book.summary.id}`,
-        severity: "warn",
-        bookId: book.summary.id,
-        title: "Some leaf categories are oversized",
-        detail: `${book.summary.name} has ${oversizedLeafNodes.length} leaf categor${oversizedLeafNodes.length === 1 ? "y" : "ies"} with 20 or more direct entries. Rebuild with LLM to split oversized leaves into more specific branches.`
-      });
-    }
-    if (overviewEstimate > 1e4) {
-      diagnostics.push({
-        id: `overview-size:${book.summary.id}`,
-        severity: "info",
-        bookId: book.summary.id,
-        title: "Tree overview is large",
-        detail: `${book.summary.name} has a large category index, so collapsed or full-tree traversal prompts may need tighter categories and stronger summaries to stay readable.`
-      });
-    }
-    if (multiBookMode && !book.config.description.trim() && !rootSummary) {
-      diagnostics.push({
-        id: `multibook-description:${book.summary.id}`,
-        severity: "info",
-        bookId: book.summary.id,
-        title: "Book lacks a disambiguating description",
-        detail: `${book.summary.name} has no Lore Recall book description and no root summary yet, which makes multi-book retrieval harder to disambiguate.`
+        detail: `${book.summary.name} has ${categorySummaryCount}/${categoryNodes.length} category summaries. Summaries help people browse the tree.`
       });
     }
   }
@@ -6509,7 +4038,8 @@ async function buildState(userId, chatId) {
     diagnosticsResults: [],
     suggestedBookIds: [],
     retrievalFeed: cachedRetrievalFeed,
-    preview: cachedPreview
+    preview: cachedPreview,
+    jevKeyStored: await hasJevKey(settings.jevProvider, userId)
   };
   if (!activeChat?.character_id) {
     return { state: baseState };
@@ -6537,8 +4067,6 @@ async function buildState(userId, chatId) {
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
   const previewFallbackPath = cachedPreview?.fallbackPath ?? [];
-  const scopeSelectionTroubleDetails = previewFallbackPath.filter((detail) => /invalid json|did not map|empty nodeids array/i.test(detail));
-  const recoveredEntryScopeFallback = !!cachedPreview && scopeSelectionTroubleDetails.length > 0 && scopeSelectionTroubleDetails.every((detail) => /deterministic entry-scope fallback/i.test(detail)) && cachedPreview.selectedScopes.length > 0 && (cachedPreview.pulledNodes.length > 0 || cachedPreview.manifestSelectedEntries.length > 0 || cachedPreview.injectedNodes.length > 0);
   const previewDiagnostics = cachedPreview ? [
     ...previewFallbackPath.length ? [
       {
@@ -6547,33 +4075,6 @@ async function buildState(userId, chatId) {
         bookId: null,
         title: "Last retrieval used fallback behavior",
         detail: previewFallbackPath.join(" ")
-      }
-    ] : [],
-    ...scopeSelectionTroubleDetails.length > 0 && !recoveredEntryScopeFallback ? [
-      {
-        id: "preview-scope-selection-failure",
-        severity: "warn",
-        bookId: null,
-        title: "Last retrieval had controller scope-selection trouble",
-        detail: "The most recent retrieval fell back because the controller returned invalid JSON, empty nodeIds, or nodeIds that did not map to visible scopes."
-      }
-    ] : [],
-    ...cachedPreview.selectedScopes.length > 0 && cachedPreview.pulledNodes.length === 0 ? [
-      {
-        id: "preview-empty-scopes",
-        severity: "warn",
-        bookId: null,
-        title: "Last retrieval scopes resolved no entries",
-        detail: "The most recent retrieval chose one or more scopes but resolved no pulled entries. This usually points to overly broad or poorly summarized categories."
-      }
-    ] : [],
-    ...cachedPreview.selectedScopes.some((scope) => scope.descendantEntryCount > 24 && typeof scope.manifestEntryCount === "number" && scope.manifestEntryCount < scope.descendantEntryCount) ? [
-      {
-        id: "preview-broad-manifest-scope",
-        severity: "warn",
-        bookId: null,
-        title: "Last retrieval still had a broad manifest scope",
-        detail: "One or more selected scopes exposed more than 24 descendant entries, so exact entry choice depended on a broad manifest. Retrieval may still be too wide for clean entry selection."
       }
     ] : [],
     ...cachedPreview.recentConversation && /\[narrative|important note:|black box|you represent/i.test(cachedPreview.recentConversation) ? [
@@ -6911,6 +4412,15 @@ spindle.onFrontendMessage(async (payload, userId) => {
         break;
       case "save_global_settings":
         await saveGlobalSettings(message.patch, userId);
+        await pushState(userId, message.chatId);
+        break;
+      case "save_jev_key":
+        await saveJevKey(message.provider, message.apiKey, userId);
+        await saveGlobalSettings({ jevProvider: message.provider }, userId);
+        await pushState(userId, message.chatId);
+        break;
+      case "clear_jev_key":
+        await clearJevKey(message.provider, userId);
         await pushState(userId, message.chatId);
         break;
       case "save_character_config":

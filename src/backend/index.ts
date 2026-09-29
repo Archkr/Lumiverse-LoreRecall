@@ -15,6 +15,7 @@ import type {
 } from "../types";
 import type { RuntimeBook } from "./contracts";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
+import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
   type OperationContext,
   type OperationOutcome,
@@ -405,6 +406,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     suggestedBookIds: [],
     retrievalFeed: cachedRetrievalFeed,
     preview: cachedPreview,
+    jevKeyStored: await hasJevKey(settings.jevProvider, userId),
   };
 
   if (!activeChat?.character_id) {
@@ -444,17 +446,6 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
   const unassignedCounts = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree.unassignedEntryIds.length]));
   const previewFallbackPath = cachedPreview?.fallbackPath ?? [];
-  const scopeSelectionTroubleDetails = previewFallbackPath.filter((detail) =>
-    /invalid json|did not map|empty nodeids array/i.test(detail),
-  );
-  const recoveredEntryScopeFallback =
-    !!cachedPreview &&
-    scopeSelectionTroubleDetails.length > 0 &&
-    scopeSelectionTroubleDetails.every((detail) => /deterministic entry-scope fallback/i.test(detail)) &&
-    cachedPreview.selectedScopes.length > 0 &&
-    (cachedPreview.pulledNodes.length > 0 ||
-      cachedPreview.manifestSelectedEntries.length > 0 ||
-      cachedPreview.injectedNodes.length > 0);
   const previewDiagnostics =
     cachedPreview
       ? [
@@ -466,47 +457,6 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
                   bookId: null,
                   title: "Last retrieval used fallback behavior",
                   detail: previewFallbackPath.join(" "),
-                },
-              ]
-            : []),
-          ...(scopeSelectionTroubleDetails.length > 0 && !recoveredEntryScopeFallback
-            ? [
-                {
-                  id: "preview-scope-selection-failure",
-                  severity: "warn" as const,
-                  bookId: null,
-                  title: "Last retrieval had controller scope-selection trouble",
-                  detail:
-                    "The most recent retrieval fell back because the controller returned invalid JSON, empty nodeIds, or nodeIds that did not map to visible scopes.",
-                },
-              ]
-            : []),
-          ...(cachedPreview.selectedScopes.length > 0 && cachedPreview.pulledNodes.length === 0
-            ? [
-                {
-                  id: "preview-empty-scopes",
-                  severity: "warn" as const,
-                  bookId: null,
-                  title: "Last retrieval scopes resolved no entries",
-                  detail:
-                    "The most recent retrieval chose one or more scopes but resolved no pulled entries. This usually points to overly broad or poorly summarized categories.",
-                },
-              ]
-            : []),
-          ...(cachedPreview.selectedScopes.some(
-            (scope) =>
-              scope.descendantEntryCount > 24 &&
-              typeof scope.manifestEntryCount === "number" &&
-              scope.manifestEntryCount < scope.descendantEntryCount,
-          )
-            ? [
-                {
-                  id: "preview-broad-manifest-scope",
-                  severity: "warn" as const,
-                  bookId: null,
-                  title: "Last retrieval still had a broad manifest scope",
-                  detail:
-                    "One or more selected scopes exposed more than 24 descendant entries, so exact entry choice depended on a broad manifest. Retrieval may still be too wide for clean entry selection.",
                 },
               ]
             : []),
@@ -914,6 +864,17 @@ spindle.onFrontendMessage(async (payload, userId) => {
 
       case "save_global_settings":
         await saveGlobalSettings(message.patch, userId);
+        await pushState(userId, message.chatId);
+        break;
+
+      case "save_jev_key":
+        await saveJevKey(message.provider, message.apiKey, userId);
+        await saveGlobalSettings({ jevProvider: message.provider }, userId);
+        await pushState(userId, message.chatId);
+        break;
+
+      case "clear_jev_key":
+        await clearJevKey(message.provider, userId);
         await pushState(userId, message.chatId);
         break;
 

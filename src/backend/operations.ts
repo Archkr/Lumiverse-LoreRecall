@@ -20,6 +20,7 @@ import {
   truncateText,
   uniqueStrings,
 } from "../shared";
+import { ROOT_CATEGORIES, ensureRootCategories } from "../categories";
 import type {
   BookTreeIndex,
   BookTreeNode,
@@ -971,7 +972,7 @@ export async function buildTreeFromMetadata(
         chunkTotal: null,
       });
 
-      const tree = createEmptyTreeIndex(bookId);
+      const tree = ensureRootCategories(createEmptyTreeIndex(bookId));
       for (const entry of cache.entries) {
         const path = getMetadataCategoryPath(entry);
         if (path.length) {
@@ -1167,12 +1168,13 @@ export async function buildTreeWithLlm(
     const { bookId, bookName, cache, chunkCount, originalIndex } = book;
 
     try {
-      const tree = createEmptyTreeIndex(bookId);
+      const tree = ensureRootCategories(createEmptyTreeIndex(bookId));
       const updates: Array<{ entryId: string; summary?: string; collapsedText?: string }> = [];
       const chunks = chunkEntries(cache.entries, settings.chunkTokens, (entry) =>
         JSON.stringify(buildAssignmentEntryPayload(entry, settings.buildDetail)).length,
       );
-      const granularity = getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length);
+      const granularity = { ...getEffectiveTreeGranularity(settings.treeGranularity, cache.entries.length),
+        targetTopLevelMin: 7, targetTopLevelMax: 7, targetCategories: "7 fixed roots" };
       const allEntryManifest =
         chunks.length > 1
           ? cache.entries
@@ -1218,8 +1220,8 @@ export async function buildTreeWithLlm(
             `Build detail: ${getBuildDetailLabel(settings.buildDetail)}. ${getBuildDetailDescription(settings.buildDetail)}`,
             `Tree granularity: ${granularity.label}${granularity.isAuto ? " (auto)" : ""}. This is mandatory, not optional.`,
             "Hard granularity constraints:",
-            `- Aim for ${granularity.targetCategories} broad reusable top-level categories for the whole book; never create individual entry/name roots just to hit this number.`,
-            `- The absolute top-level cap is ${granularity.targetTopLevelMax}.`,
+            `- Every path MUST begin with exactly one fixed root: ${ROOT_CATEGORIES.join(", ")}.`,
+            "- Place uncertain entries under Other. Create nested branches only below these roots.",
             `- Leaf categories must stay at or below ${granularity.maxEntries} entries whenever a split is possible.`,
             "- Reuse existing top-level categories before creating new ones.",
             "- If a category would exceed the leaf limit, create or reuse subcategories instead of overfilling it.",
@@ -1556,6 +1558,10 @@ export async function updateCategory(
   const node = loaded.tree.nodes[nodeId];
   if (!node || node.id === loaded.tree.rootId) throw new Error("That category no longer exists.");
 
+  if (node.parentId === loaded.tree.rootId && typeof patch.label === "string" && patch.label !== node.label) {
+    throw new Error("Top-level category names are fixed.");
+  }
+
   if (typeof patch.label === "string" && patch.label.trim()) node.label = patch.label.trim();
   if (typeof patch.summary === "string") node.summary = patch.summary.trim();
   if (typeof patch.collapsed === "boolean") node.collapsed = patch.collapsed;
@@ -1572,6 +1578,7 @@ export async function createCategory(bookId: string, parentId: string | null, la
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
 
   const nextParentId = parentId && loaded.tree.nodes[parentId] ? parentId : ROOT_NODE_ID;
+  if (nextParentId === ROOT_NODE_ID) throw new Error("Create nested categories under one of the seven fixed roots.");
   const nodeId = makeNodeId("cat", label);
   loaded.tree.nodes[nodeId] = {
     id: nodeId,
@@ -1610,6 +1617,8 @@ export async function moveCategory(bookId: string, nodeId: string, parentId: str
   if (!cache) throw new Error("That world book no longer exists.");
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
   if (!loaded.tree.nodes[nodeId] || nodeId === loaded.tree.rootId) throw new Error("That category no longer exists.");
+  if (loaded.tree.nodes[nodeId].parentId === loaded.tree.rootId) throw new Error("Top-level categories cannot be moved.");
+  if (!parentId || parentId === loaded.tree.rootId) throw new Error("Nested categories must stay under a fixed root.");
   if (wouldCreateCycle(loaded.tree, nodeId, parentId)) throw new Error("That move would create a category cycle.");
 
   moveCategoryNode(loaded.tree, nodeId, parentId);
@@ -1630,6 +1639,7 @@ export async function deleteCategory(
   if (!cache) throw new Error("That world book no longer exists.");
   const loaded = await loadTreeIndex(bookId, cache.entries, userId);
   if (!loaded.tree.nodes[nodeId] || nodeId === loaded.tree.rootId) throw new Error("That category no longer exists.");
+  if (loaded.tree.nodes[nodeId].parentId === loaded.tree.rootId) throw new Error("Top-level categories cannot be deleted.");
 
   deleteCategoryNode(loaded.tree, nodeId, target);
   loaded.tree.lastBuiltAt = Date.now();
@@ -1931,12 +1941,6 @@ export function buildDiagnostics(
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
-    const oversizedLeafNodes = categoryNodes.filter((node) => node.childIds.length === 0 && node.entryIds.length >= 20);
-    const overviewEstimate = categoryNodes.reduce(
-      (total, node) => total + 48 + node.label.length + Math.min(node.summary.length, 120),
-      0,
-    );
-    const rootSummary = book.tree.nodes[book.tree.rootId]?.summary?.trim() ?? "";
 
     if (book.status.attachedToCharacter) {
       diagnostics.push({
@@ -1984,14 +1988,13 @@ export function buildDiagnostics(
       });
     }
     const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
-    const missingCollapsedCount = book.cache.entries.filter((entry) => !entry.collapsedText.trim()).length;
-    if (missingSummaryCount || missingCollapsedCount) {
+    if (missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,
         severity: "info",
         bookId: book.summary.id,
         title: "Book metadata is incomplete",
-        detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s) and ${missingCollapsedCount} collapsed-text gap(s).`,
+        detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s). Entry previews still let the model review them.`,
       });
     }
     if (categoryNodes.length && categorySummaryCount < categoryNodes.length) {
@@ -2000,34 +2003,7 @@ export function buildDiagnostics(
         severity: categorySummaryCount === 0 ? "warn" : "info",
         bookId: book.summary.id,
         title: "Category summary coverage is incomplete",
-        detail: `${book.summary.name} has ${categorySummaryCount}/${categoryNodes.length} category summaries. Tree navigation works better when categories have short summaries.`,
-      });
-    }
-    if (oversizedLeafNodes.length) {
-      diagnostics.push({
-        id: `oversized-leaf:${book.summary.id}`,
-        severity: "warn",
-        bookId: book.summary.id,
-        title: "Some leaf categories are oversized",
-        detail: `${book.summary.name} has ${oversizedLeafNodes.length} leaf categor${oversizedLeafNodes.length === 1 ? "y" : "ies"} with 20 or more direct entries. Rebuild with LLM to split oversized leaves into more specific branches.`,
-      });
-    }
-    if (overviewEstimate > 10_000) {
-      diagnostics.push({
-        id: `overview-size:${book.summary.id}`,
-        severity: "info",
-        bookId: book.summary.id,
-        title: "Tree overview is large",
-        detail: `${book.summary.name} has a large category index, so collapsed or full-tree traversal prompts may need tighter categories and stronger summaries to stay readable.`,
-      });
-    }
-    if (multiBookMode && !book.config.description.trim() && !rootSummary) {
-      diagnostics.push({
-        id: `multibook-description:${book.summary.id}`,
-        severity: "info",
-        bookId: book.summary.id,
-        title: "Book lacks a disambiguating description",
-        detail: `${book.summary.name} has no Lore Recall book description and no root summary yet, which makes multi-book retrieval harder to disambiguate.`,
+        detail: `${book.summary.name} has ${categorySummaryCount}/${categoryNodes.length} category summaries. Summaries help people browse the tree.`,
       });
     }
   }
