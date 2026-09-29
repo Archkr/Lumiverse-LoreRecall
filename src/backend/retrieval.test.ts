@@ -29,16 +29,16 @@ function book(entries: IndexedEntry[]): RuntimeBook {
   };
 }
 
-function host(options: { key?: string; reject?: string[]; malformedBatch?: boolean } = {}) {
+function host(options: { key?: string; reject?: string[]; malformedBatch?: boolean; emptyCategories?: boolean; emptySelection?: boolean } = {}) {
   const prompts: string[] = [];
   (globalThis as any).spindle = {
     generate: { quiet: async ({ messages }: any) => {
       const prompt = messages.at(-1).content as string;
       prompts.push(prompt);
-      if (prompt.startsWith("Choose every top-level")) return { content: JSON.stringify({ categories: ["Characters"] }) };
+      if (prompt.startsWith("Choose every top-level")) return { content: JSON.stringify({ categories: options.emptyCategories ? [] : ["Characters"] }) };
       if (options.malformedBatch) return { content: "{}" };
       const ids = [...prompt.matchAll(/id="([^"]+)";/g)].map((match) => match[1]);
-      return { content: JSON.stringify({ entryIds: ids }) };
+      return { content: JSON.stringify({ entryIds: options.emptySelection ? [] : ids }) };
     } },
     enclave: { get: async () => options.key ?? null },
     cors: async (_url: string, request: any) => {
@@ -108,6 +108,19 @@ describe("category retrieval", () => {
     const result = await preview([entry("cast-0")]);
     expect(result?.modelSelectedEntries).toHaveLength(0);
     expect(result?.fallbackReason).toContain("no usable entryIds");
+    expect(result?.retrievalComplete).toBe(false);
+  });
+
+  test("valid empty category and entry selections complete without native fallback", async () => {
+    host({ emptyCategories: true });
+    const noCategory = await preview([entry("cast-0")]);
+    expect(noCategory?.retrievalComplete).toBe(true);
+    expect(noCategory?.injectedNodes).toHaveLength(0);
+
+    host({ emptySelection: true });
+    const noEntry = await preview([entry("cast-0")]);
+    expect(noEntry?.retrievalComplete).toBe(true);
+    expect(noEntry?.injectedNodes).toHaveLength(0);
   });
 
   test("partial JEV answers pass missing decisions through", async () => {

@@ -1895,24 +1895,13 @@ export function buildDiagnostics(
   const multiBookMode = !!characterConfig && runtimeBooks.length > 1;
   const readableBooks = runtimeBooks.filter((book) => book.config.enabled && book.config.permission !== "write_only");
 
-  if (characterConfig?.searchMode === "traversal" && characterConfig.selectiveRetrieval && characterConfig.traversalStepLimit < 3) {
-    diagnostics.push({
-      id: "selective-traversal-limit",
-      severity: "warn",
-      bookId: null,
-      title: "Traversal step limit is low for selective retrieval",
-      detail:
-        "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose useful scopes before picking exact entries from their manifests.",
-    });
-  }
-
   if (!readableBooks.length && runtimeBooks.length) {
     diagnostics.push({
       id: "no-readable-books",
       severity: "warn",
       bookId: null,
-      title: "No readable managed books",
-      detail: "All managed books are currently disabled or write-only, so Lore Recall has nothing it can search during retrieval.",
+      title: "No attached books available to Recall",
+      detail: "Attached books are disabled or write-only in Lore Recall, so Lumiverse will activate them natively.",
     });
   }
 
@@ -1942,15 +1931,6 @@ export function buildDiagnostics(
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
 
-    if (book.status.attachedToCharacter) {
-      diagnostics.push({
-        id: `attached:${book.summary.id}`,
-        severity: "warn",
-        bookId: book.summary.id,
-        title: "Managed book is still attached natively",
-        detail: `${book.summary.name} is attached to the character and may duplicate native world info activation.`,
-      });
-    }
     if (book.status.treeMissing) {
       diagnostics.push({
         id: `tree:${book.summary.id}`,
@@ -1974,8 +1954,8 @@ export function buildDiagnostics(
         id: `disabled:${book.summary.id}`,
         severity: "info",
         bookId: book.summary.id,
-        title: "Managed book is disabled",
-        detail: `${book.summary.name} is still selected for the character, but Lore Recall has it disabled in book settings.`,
+        title: "Book excluded from Recall",
+        detail: `${book.summary.name} is disabled in Lore Recall. Lumiverse will use native activation for this attached book.`,
       });
     }
     if (book.config.permission === "write_only") {
@@ -1983,8 +1963,8 @@ export function buildDiagnostics(
         id: `writeonly:${book.summary.id}`,
         severity: "warn",
         bookId: book.summary.id,
-        title: "Managed book is write-only",
-        detail: `${book.summary.name} will not be searched during retrieval while write-only mode is active.`,
+        title: "Book excluded from Recall",
+        detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`,
       });
     }
     const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;

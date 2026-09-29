@@ -5,10 +5,10 @@
   "author": "Archkr",
   "github": "https://github.com/archkr/Lumiverse-LoreRecall",
   "homepage": "https://lumiverse.chat",
-  "description": "Tree-aware retrieval over managed world books with per-character bindings.",
-  "permissions": ["world_books", "characters", "chats", "chat_mutation", "generation", "interceptor", "cors_proxy"],
-  "interceptorTimeoutMs": 180000,
+  "description": "Tree-aware retrieval from lorebooks attached in Lumiverse.",
+  "permissions": ["world_books", "characters", "chats", "chat_mutation", "generation", "cors_proxy"],
+  "interceptorTimeoutMs": 240000,
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
-  "minimum_lumiverse_version": "1.0.6"
+  "minimum_lumiverse_version": "1.2.4"
 }

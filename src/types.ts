@@ -244,6 +244,10 @@ export interface RetrievalPreview {
   modelSelectedEntries?: PreviewNode[];
   jevApprovedEntries?: PreviewNode[];
   jevRejectedEntries?: PreviewNode[];
+  /** False when category routing or any selection batch failed. */
+  retrievalComplete?: boolean;
+  activationSource?: "recall" | "native" | "preview";
+  attachedBookSources?: Record<string, string>;
 }
 
 export type RetrievalFeedItemKind = "trace" | "scope" | "search" | "manifest" | "reserved" | "pulled" | "injected" | "issue";
@@ -367,8 +371,10 @@ export interface FrontendState {
   activeCharacterId: string | null;
   activeCharacterName: string | null;
   globalSettings: GlobalLoreRecallSettings;
+  hostSelectionAvailable: boolean;
   characterConfig: CharacterRetrievalConfig | null;
   allWorldBooks: BookSummary[];
+  attachedBookSources: Record<string, string>;
   managedEntries: Record<string, ManagedBookEntryView[]>;
   bookConfigs: Record<string, BookRetrievalConfig>;
   bookStatuses: Record<string, BookStatus>;

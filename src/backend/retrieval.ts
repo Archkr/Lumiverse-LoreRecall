@@ -4709,6 +4709,7 @@ async function buildCategoryRetrievalPreview(
   const constants = collectReservedConstantEntries(readableBooks);
   const reservedConstantNodes = buildPreviewNodes(constants, new Map(readableBooks.map((book) => [book.summary.id, book])));
   const issues: string[] = [];
+  let retrievalComplete = true;
   let controllerUsed = false;
   const controllerAllowed = options.allowController !== false;
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
@@ -4716,7 +4717,7 @@ async function buildCategoryRetrievalPreview(
   const runModel = async (prompt: string): Promise<Record<string, unknown> | null> => {
     if (!controllerAllowed) return null;
     const remainingMs = modelDeadline - Date.now();
-    if (remainingMs < 1000) { issues.push("Model selection ran out of time; remaining batches were skipped."); return null; }
+    if (remainingMs < 1000) { issues.push("Model selection ran out of time; remaining batches were skipped."); retrievalComplete = false; return null; }
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30_000));
     try {
@@ -4727,6 +4728,7 @@ async function buildCategoryRetrievalPreview(
       return response.parsed;
     } catch (error) {
       issues.push(error instanceof Error ? error.message : String(error));
+      retrievalComplete = false;
       return null;
     } finally { clearTimeout(timer); }
   };
@@ -4746,7 +4748,9 @@ async function buildCategoryRetrievalPreview(
     ? [...new Set(rawCategories as RootCategory[])] : [];
   if (categoriesPresent.length && controllerAllowed && (!Array.isArray(rawCategories) || rawCategories.some((value) => typeof value !== "string" || !categoriesPresent.includes(value as RootCategory)))) {
     issues.push("Category routing returned an invalid categories array.");
+    retrievalComplete = false;
   }
+  if (categoriesPresent.length && !controllerAllowed) retrievalComplete = false;
   emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories",
     routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.",
     { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
@@ -4772,6 +4776,7 @@ async function buildCategoryRetrievalPreview(
     ].join("\n"));
     if (!result || !Array.isArray(result.entryIds) || !result.entryIds.every((id) => typeof id === "string")) {
       issues.push(`Selection batch ${batchIndex + 1} returned no usable entryIds array.`);
+      retrievalComplete = false;
       continue;
     }
     const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
@@ -4779,6 +4784,7 @@ async function buildCategoryRetrievalPreview(
     const invalid = requested.filter((id) => !byId.has(id));
     if (invalid.length) {
       issues.push(`Selection batch ${batchIndex + 1} returned ${invalid.length} unknown ID(s).`);
+      retrievalComplete = false;
       continue;
     }
     for (const id of requested) selectedEntries.push({ entry: byId.get(id)!, score: 0, reasons: ["model_selected"] });
@@ -4806,13 +4812,13 @@ async function buildCategoryRetrievalPreview(
   const selected = approved.slice(0, dynamicLimit);
   const injection = buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12);
   const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
-  emitProgress(report, { type: "item", item: createFeedItem("injected", "Injected entries",
-    `Injected ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic).`,
+  emitProgress(report, { type: "item", item: createFeedItem("injected", "Cap result",
+    `Prepared ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic) for activation.`,
     { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
   for (const issue of issues) emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue,
     { phase: "fallback", tone: "warn" }) });
-  const fallbackReason = issues.length ? issues.join(" ") : null;
-  emitProgress(report, { type: "finish", timestamp: Date.now(), status: issues.length ? "fallback" : "completed",
+  const fallbackReason = !retrievalComplete && issues.length ? issues.join(" ") : null;
+  emitProgress(report, { type: "finish", timestamp: Date.now(), status: retrievalComplete ? "completed" : "fallback",
     controllerUsed, resolvedConnectionId: controllerUsed ? connectionId : null, fallbackReason });
   return {
     mode: "collapsed", queryText, recentConversation, estimatedTokens: injection?.estimatedTokens ?? 0,
@@ -4822,6 +4828,7 @@ async function buildCategoryRetrievalPreview(
     reservedConstantNodes, pulledNodes: buildPreviewNodes(routed.map(({ entry }) => ({ entry, score: 0, reasons: ["routed"] })), booksById),
     injectedNodes, manifestSelectedEntries: modelSelectedEntries, routedCategories, modelSelectedEntries,
     jevApprovedEntries, jevRejectedEntries, fallbackReason, fallbackPath: issues,
+    retrievalComplete,
     selectedBookIds: readableBooks.map((book) => book.summary.id), steps: [], trace: [], capturedAt: startedAt,
     isActual: options.isActual === true, controllerUsed, resolvedConnectionId: controllerUsed ? connectionId : null,
   };

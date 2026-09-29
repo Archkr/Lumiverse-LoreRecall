@@ -1,0 +1,116 @@
+import type { RuntimeBook, IndexedEntry } from "./contracts";
+import { EXTENSION_KEY, normalizeEntryRecallMeta, truncateText } from "../shared";
+import { getRuntimeBooks, isReadableBook } from "./storage";
+
+/** The host has already resolved the active character, persona, chat, and global books. */
+export interface ActiveLoreEntry {
+  readonly id: string;
+  readonly world_book_id: string;
+  readonly comment: string;
+  readonly key: readonly string[];
+  readonly keysecondary: readonly string[];
+  readonly content: string;
+  readonly disabled: boolean;
+  readonly constant: boolean;
+  readonly extensions: Readonly<Record<string, unknown>>;
+  readonly book_source?: string;
+}
+
+export function mapAttachedBookSources(input: {
+  character: readonly string[];
+  persona?: string | null;
+  chat: readonly string[];
+  global: readonly string[];
+}): Record<string, string> {
+  const sources: Record<string, string> = {};
+  const add = (ids: readonly string[], source: string) => {
+    for (const id of ids) if (id && !sources[id]) sources[id] = source;
+  };
+  add(input.character, "character");
+  if (input.persona) add([input.persona], "persona");
+  add(input.chat, "chat");
+  add(input.global, "global");
+  return sources;
+}
+
+function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: IndexedEntry): IndexedEntry {
+  const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
+    entryId: entry.id,
+    comment: entry.comment,
+    key: [...entry.key],
+  });
+  if (cached) {
+    return {
+      ...cached,
+      ...meta,
+      disabled: entry.disabled,
+      constant: entry.constant,
+      content: entry.content,
+      previewText: truncateText(entry.content, 220),
+      comment: entry.comment,
+      key: [...entry.key],
+      keysecondary: [...entry.keysecondary],
+    };
+  }
+  return {
+    entryId: entry.id,
+    worldBookId: book.summary.id,
+    worldBookName: book.summary.name,
+    comment: entry.comment,
+    key: [...entry.key],
+    keysecondary: [...entry.keysecondary],
+    disabled: entry.disabled,
+    constant: entry.constant,
+    content: entry.content,
+    previewText: truncateText(entry.content, 220),
+    updatedAt: book.summary.updatedAt,
+    groupName: "",
+    selective: false,
+    vectorized: false,
+    legacyTree: null,
+    ...meta,
+  };
+}
+
+export function overlayActiveEntries(
+  books: RuntimeBook[],
+  entries: readonly ActiveLoreEntry[],
+): RuntimeBook[] {
+  const activeByBook = new Map<string, ActiveLoreEntry[]>();
+  for (const entry of entries) {
+    const list = activeByBook.get(entry.world_book_id) ?? [];
+    list.push(entry);
+    activeByBook.set(entry.world_book_id, list);
+  }
+  return books.map((book) => {
+    const cachedById = new Map(book.cache.entries.map((entry) => [entry.entryId, entry]));
+    return {
+      ...book,
+      cache: {
+        ...book.cache,
+        entries: (activeByBook.get(book.summary.id) ?? []).filter((entry) => entry.content.trim()).map((entry) =>
+          indexedFromHost(entry, book, cachedById.get(entry.id))),
+      },
+    };
+  });
+}
+
+export function recallEligibleBooks(books: RuntimeBook[]): RuntimeBook[] {
+  return books.filter((book) => book.config.enabled && isReadableBook(book.config));
+}
+
+export async function loadAttachedRuntimeBooks(
+  entries: readonly ActiveLoreEntry[],
+  userId: string,
+): Promise<{ books: RuntimeBook[]; sources: Record<string, string> }> {
+  const bookIds = [...new Set(entries.map((entry) => entry.world_book_id))];
+  const sources: Record<string, string> = {};
+  for (const entry of entries) {
+    if (!(entry.world_book_id in sources)) sources[entry.world_book_id] = entry.book_source ?? "attached";
+  }
+  const { runtimeBooks } = await getRuntimeBooks(bookIds, bookIds, userId);
+  return {
+    books: overlayActiveEntries(recallEligibleBooks(runtimeBooks), entries),
+    sources,
+  };
+}

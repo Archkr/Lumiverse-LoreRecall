@@ -1,6 +1,10 @@
 import type { BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
 
 export type DrawerFeedFilter = "all" | "entries" | "steps" | "issue";
+
+export function isRecallActive(state: FrontendState | null): boolean {
+  return !!state?.globalSettings.enabled && !!state.hostSelectionAvailable;
+}
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }

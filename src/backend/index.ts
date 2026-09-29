@@ -1,6 +1,6 @@
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
-import type { ConnectionProfileDTO, InterceptorResultDTO, LlmMessageDTO } from "lumiverse-spindle-types";
+import type { ConnectionProfileDTO, LlmMessageDTO } from "lumiverse-spindle-types";
 import type {
   FrontendState,
   FrontendToBackend,
@@ -14,6 +14,8 @@ import type {
   RetrievalSession,
 } from "../types";
 import type { RuntimeBook } from "./contracts";
+import { DEFAULT_CHARACTER_CONFIG } from "../shared";
+import { loadAttachedRuntimeBooks, mapAttachedBookSources, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
@@ -44,7 +46,6 @@ import {
 } from "./runtime";
 import {
   buildConnectionOption,
-  computeSuggestedBookIds,
   getRuntimeBooks,
   invalidateWorldBookListCache,
   listAllWorldBooks,
@@ -55,8 +56,6 @@ import {
   saveGlobalSettings,
   toBookSummary,
 } from "./storage";
-
-const LORE_RECALL_BREAKDOWN_NAME = "Retrieved Lore";
 
 const CONNECTION_CACHE_TTL_MS = 5000;
 const RETRIEVAL_FEED_SESSION_LIMIT = 25;
@@ -363,14 +362,6 @@ function scheduleLiveStatePush(userId: string, chatId: string): void {
   scheduledStatePushes.set(key, handle);
 }
 
-function summarizeTrace(preview: RetrievalPreview): string {
-  if (!preview.trace.length) return "no traversal trace";
-  return preview.trace
-    .map((step) => `${step.step}:${step.phase}:${step.label}`)
-    .slice(0, 6)
-    .join(" | ");
-}
-
 async function buildState(userId: string, chatId?: string | null): Promise<StateBuildEnvelope> {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
@@ -394,8 +385,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     activeCharacterId: activeChat?.character_id ?? null,
     activeCharacterName: null,
     globalSettings: settings,
+    hostSelectionAvailable: exactSelectionAvailable,
     characterConfig: null,
     allWorldBooks: sortedBooks,
+    attachedBookSources: {},
     managedEntries: {},
     bookConfigs: {},
     bookStatuses: {},
@@ -409,36 +402,33 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     jevKeyStored: await hasJevKey(settings.jevProvider, userId),
   };
 
-  if (!activeChat?.character_id) {
+  if (!activeChat) {
     return { state: baseState };
   }
 
-  const character = await spindle.characters.get(activeChat.character_id, userId);
-  if (!character) {
-    return { state: baseState };
-  }
-
-  const rawCharacterConfig = await loadCharacterConfig(character.id, userId, character);
-  const validBookIds = new Set(allBooks.map((book) => book.id));
-  const selectedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
-  const removedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => !validBookIds.has(bookId));
-
-  // Auto-prune stale managed-book references when the underlying book has been
-  // deleted natively in Lumiverse. Otherwise the UI keeps showing it as "managed"
-  // and there's no way for the user to clear it.
-  let characterConfig = rawCharacterConfig;
-  if (removedBookIds.length > 0) {
-    try {
-      await saveCharacterConfig(character.id, { managedBookIds: selectedBookIds }, userId, character);
-      characterConfig = { ...rawCharacterConfig, managedBookIds: selectedBookIds };
-    } catch (error) {
-      // Cleanup save failed - keep raw config so we don't pretend to have cleaned up
-      // when we didn't. Stale IDs will continue to surface, which is the lesser evil.
-    }
-  }
-
-  const attachedWorldBookIds = character.world_book_ids;
-  const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
+  const character = activeChat.character_id
+    ? await spindle.characters.get(activeChat.character_id, userId)
+    : null;
+  const characterConfig = character
+    ? await loadCharacterConfig(character.id, userId, character)
+    : { ...DEFAULT_CHARACTER_CONFIG };
+  const globalBooksApi = spindle.world_books as typeof spindle.world_books & {
+    getGlobal?: (userId?: string) => Promise<string[]>;
+  };
+  const [globalBookIds, activePersona] = await Promise.all([
+    globalBooksApi.getGlobal?.(userId).catch(() => [] as string[]) ?? Promise.resolve([] as string[]),
+    spindle.personas.getActive(userId).catch(() => null),
+  ]);
+  const chatBookIds = activeChat.metadata?.chat_world_book_ids;
+  const attachedBookSources = mapAttachedBookSources({
+    character: character?.world_book_ids ?? [],
+    persona: activePersona?.attached_world_book_id,
+    chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id): id is string => typeof id === "string") : [],
+    global: globalBookIds,
+  });
+  const { runtimeBooks, staleIssues } = await getRuntimeBooks(
+    sortedBooks.map((book) => book.id), Object.keys(attachedBookSources), userId,
+  );
 
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
   const bookConfigs = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.config]));
@@ -474,37 +464,28 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
             : []),
         ]
       : [];
-  const cleanupDiagnostics =
-    removedBookIds.length > 0
-      ? [
-          {
-            id: "managed-book-cleanup",
-            severity: "info" as const,
-            bookId: null,
-            title: `Removed ${removedBookIds.length} stale managed-book reference${removedBookIds.length === 1 ? "" : "s"}`,
-            detail:
-              "One or more lorebooks that were managed by this character were deleted in Lumiverse. Their references have been cleaned up automatically.",
-          },
-        ]
-      : [];
-  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(
-    cleanupDiagnostics,
+  const diagnosticsResults = buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections).concat(
     previewDiagnostics,
   );
-  const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
+  if (!exactSelectionAvailable) diagnosticsResults.unshift({
+    id: "host-selection-unavailable", severity: "warn", bookId: null,
+    title: "Lumiverse update needed for Lore Recall",
+    detail: "This Lumiverse build cannot activate Recall's exact entry picks. Native lorebook activation remains active.",
+  });
 
   const nextState: FrontendState = {
     ...baseState,
-    activeCharacterId: character.id,
-    activeCharacterName: character.name,
+    activeCharacterId: character?.id ?? null,
+    activeCharacterName: character?.name ?? null,
     characterConfig,
+    attachedBookSources,
     managedEntries,
     bookConfigs,
     bookStatuses,
     treeIndexes,
     unassignedCounts,
     diagnosticsResults,
-    suggestedBookIds,
+    suggestedBookIds: [],
   };
 
   return {
@@ -699,48 +680,93 @@ async function runTrackedOperation<T>(
   }
 }
 
-spindle.registerInterceptor(async (messages, context) => {
+type WorldInfoContext = {
+  chatId: string;
+  characterId: string;
+  userId?: string;
+  connectionId?: string | null;
+  deadlineAt?: number;
+  entries: readonly ActiveLoreEntry[];
+  messages: readonly { role: "system" | "user" | "assistant"; content: string }[];
+};
+
+const worldInfoApi = spindle as unknown as {
+  registerWorldInfoInterceptor: (
+    handler: (context: WorldInfoContext) => Promise<{ disabled: string[]; selected: string[] } | void>,
+    priority?: number,
+  ) => void;
+};
+
+const exactSelectionAvailable = (spindle as unknown as {
+  host?: { capabilities?: Readonly<Record<string, number>> };
+}).host?.capabilities?.["world-info-exact-selection-v1"] === 1;
+
+if (exactSelectionAvailable && typeof worldInfoApi.registerWorldInfoInterceptor === "function") {
+worldInfoApi.registerWorldInfoInterceptor(async (context) => {
   let liveChatId: string | null = null;
   let liveUserId: string | null = null;
   let retrievalSessionId: string | null = null;
   let retrievalSessionStarted = false;
-  let retrievalSessionFinished = false;
+  const recordNativeFallback = (reason: string) => {
+    if (!liveChatId || !liveUserId) return;
+    retrievalSessionId ??= `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    if (!retrievalSessionStarted) {
+      beginRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
+        type: "start", mode: "collapsed", timestamp: Date.now(),
+        label: "Native lorebook fallback", summary: "Recall could not complete retrieval.",
+      });
+      retrievalSessionStarted = true;
+    }
+    const current = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))
+      ?.sessions.find((session) => session.id === retrievalSessionId);
+    appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
+      id: `native:${Date.now()}`, kind: "issue", label: "Native lorebook fallback",
+      summary: reason, timestamp: Date.now(), phase: "fallback", tone: "warn",
+    });
+    finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
+      type: "finish", timestamp: Date.now(), status: "fallback",
+      controllerUsed: current?.controllerUsed ?? false,
+      resolvedConnectionId: current?.resolvedConnectionId ?? null,
+      fallbackReason: reason,
+    });
+    scheduleLiveStatePush(liveUserId, liveChatId);
+  };
   try {
-    const chatId =
-      context && typeof context === "object" && typeof (context as { chatId?: unknown }).chatId === "string"
-        ? ((context as { chatId?: unknown }).chatId as string)
-        : null;
-    const connectionId =
-      context && typeof context === "object" && typeof (context as { connectionId?: unknown }).connectionId === "string"
-        ? ((context as { connectionId?: unknown }).connectionId as string)
-        : null;
-    if (!chatId) return messages;
+    const chatId = context.chatId;
+    const connectionId = context.connectionId ?? null;
+    const messages = context.messages.map((message) => ({ role: message.role, content: message.content }));
+    if (!chatId) return;
     liveChatId = chatId;
 
-    const userId = resolveUserId(chatId);
+    const userId = context.userId ?? resolveUserId(chatId);
     if (!userId) {
       spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
-      return messages;
+      return;
     }
     liveUserId = userId;
 
     await ensureStorageFolders(userId);
     const settings = await loadGlobalSettings(userId);
-    if (!settings.enabled) return messages;
+    if (!settings.enabled) return;
+    const previewCacheKey = getPreviewCacheKey(userId, chatId);
+    previewCache.set(previewCacheKey, null);
 
     const chat = await spindle.chats.get(chatId, userId);
-    if (!chat?.character_id) return messages;
+    if (!chat) return;
 
-    const character = await spindle.characters.get(chat.character_id, userId);
-    if (!character) return messages;
-    const config = await loadCharacterConfig(chat.character_id, userId, character);
-    if (!config.enabled || !config.managedBookIds.length) return messages;
+    const character = chat.character_id
+      ? await spindle.characters.get(chat.character_id, userId)
+      : null;
+    const config = character
+      ? await loadCharacterConfig(character.id, userId, character)
+      : { ...DEFAULT_CHARACTER_CONFIG };
+    const { books: runtimeBooks, sources } = await loadAttachedRuntimeBooks(context.entries, userId);
+    if (!runtimeBooks.length) return;
+    if (context.deadlineAt && Date.now() >= context.deadlineAt - 2_000) {
+      recordNativeFallback("Recall ran out of time before reviewing attached books.");
+      return;
+    }
 
-    const attachedWorldBookIds = character.world_book_ids;
-    const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
-    if (!runtimeBooks.length) return messages;
-
-    const previewCacheKey = getPreviewCacheKey(userId, chatId);
     processPendingDynamicFeedback(previewCacheKey, messages as LlmMessageDTO[]);
     const dynamicFeedback = buildDynamicFeedbackSnapshot(previewCacheKey);
 
@@ -760,7 +786,6 @@ spindle.registerInterceptor(async (messages, context) => {
           return;
         case "finish":
           if (!retrievalSessionStarted) return;
-          retrievalSessionFinished = true;
           finishRetrievalSession(userId, chatId, retrievalSessionId, event);
           scheduleLiveStatePush(userId, chatId);
           return;
@@ -768,7 +793,7 @@ spindle.registerInterceptor(async (messages, context) => {
     };
 
     const preview = await buildRetrievalPreview(
-      messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      messages,
       settings,
       config,
       runtimeBooks,
@@ -781,65 +806,67 @@ spindle.registerInterceptor(async (messages, context) => {
         dynamicFeedback,
       },
     );
-    previewCache.set(previewCacheKey, preview);
-    recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
-    scheduleLiveStatePush(userId, chatId);
+    const exceededDeadline = !!context.deadlineAt && Date.now() >= context.deadlineAt - 2_000;
+    const retrievalComplete = preview?.retrievalComplete === true && !exceededDeadline;
+    if (preview && exceededDeadline) {
+      preview.retrievalComplete = false;
+      preview.fallbackReason = "Recall exceeded the host activation deadline.";
+      preview.fallbackPath.push(preview.fallbackReason);
+    }
     if (preview) {
-      if (preview.mode === "traversal" && preview.fallbackReason) {
-        spindle.log.info(
-          `Lore Recall traversal fell back for chat ${chatId}: ${preview.fallbackReason} [trace=${summarizeTrace(preview)}]`,
-        );
-      } else if (preview.mode === "traversal" && preview.controllerUsed) {
-        spindle.log.info(
-          `Lore Recall traversal used controller for chat ${chatId}: scopes=${preview.retrievedScopes.length}, pulled=${preview.pulledNodes.length}, injected=${preview.injectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`,
-        );
-      } else if (preview.mode === "collapsed" && preview.fallbackReason) {
-        spindle.log.info(
-          `Lore Recall collapsed retrieval used fallback behavior for chat ${chatId}: ${preview.fallbackReason}`,
-        );
+      preview.activationSource = retrievalComplete ? "recall" : "native";
+      preview.attachedBookSources = Object.fromEntries(
+        runtimeBooks.map((book) => [book.summary.id, sources[book.summary.id] ?? "attached"]),
+      );
+      if (!retrievalComplete) {
+        preview.injectedNodes = [];
+        preview.injectedText = "";
       }
     }
-    if (!preview?.injectedText.trim()) return messages;
-
-    // Inject the assembled lore as a system message and tag it as a Prompt
-    // Breakdown entry so it shows up as its own block (with extension
-    // attribution from spindle.json) in dry-run, live generation breakdown,
-    // and saved breakdown snapshots. messageIndex points at position 0 of
-    // the returned `messages` array — the injected system message.
-    const injected: LlmMessageDTO = { role: "system", content: preview.injectedText };
-    const result: InterceptorResultDTO = {
-      messages: [injected, ...messages],
-      breakdown: [{ messageIndex: 0, name: LORE_RECALL_BREAKDOWN_NAME }],
-    };
-    return result;
-  } catch (error: unknown) {
-    if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
-      const activeSession = retrievalFeedCache
-        .get(getPreviewCacheKey(liveUserId, liveChatId))
-        ?.sessions.find((session) => session.id === retrievalSessionId);
-      appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
-        id: `issue:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-        kind: "issue",
-        label: "Retrieval failed",
-        summary: error instanceof Error ? error.message : String(error),
-        timestamp: Date.now(),
-        phase: "fallback",
-        tone: "error",
-      });
-      finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
-        type: "finish",
-        timestamp: Date.now(),
-        status: "failed",
-        controllerUsed: activeSession?.controllerUsed ?? false,
-        resolvedConnectionId: activeSession?.resolvedConnectionId ?? null,
-        fallbackReason: error instanceof Error ? error.message : String(error),
-      });
-      scheduleLiveStatePush(liveUserId, liveChatId);
+    previewCache.set(previewCacheKey, preview);
+    if (retrievalComplete) recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
+    scheduleLiveStatePush(userId, chatId);
+    if (!retrievalComplete) {
+      recordNativeFallback(preview?.fallbackReason ?? "Recall could not complete retrieval.");
+      return;
     }
-    spindle.log.warn(`Lore Recall interceptor failed: ${error instanceof Error ? error.message : String(error)}`);
-    return messages;
+
+    const handledBookIds = new Set(runtimeBooks.map((book) => book.summary.id));
+    const selectedIds = new Set(preview!.injectedNodes.map((node) => node.entryId));
+    preview!.injectedText = context.entries
+      .filter((entry) => selectedIds.has(entry.id))
+      .map((entry) => entry.content)
+      .join("\n\n");
+    preview!.estimatedTokens = Math.ceil(preview!.injectedText.length / 4);
+    const disabled = context.entries
+      .filter((entry) => handledBookIds.has(entry.world_book_id) && !selectedIds.has(entry.id))
+      .map((entry) => entry.id);
+    appendRetrievalSessionItem(userId, chatId, retrievalSessionId, {
+      id: `activation:${Date.now()}`, kind: "injected", label: "Recall activation",
+      summary: `Selected ${selectedIds.size} entr${selectedIds.size === 1 ? "y" : "ies"} from ${handledBookIds.size} attached book${handledBookIds.size === 1 ? "" : "s"}; native activation suppressed for the rest.`,
+      timestamp: Date.now(), phase: "inject", count: selectedIds.size,
+      entries: preview!.injectedNodes, tone: "success",
+    });
+    scheduleLiveStatePush(userId, chatId);
+    return { disabled, selected: [...selectedIds] };
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (liveChatId && liveUserId) {
+      const cached = previewCache.get(getPreviewCacheKey(liveUserId, liveChatId));
+      if (cached) {
+        cached.activationSource = "native";
+        cached.injectedNodes = [];
+        cached.injectedText = "";
+      }
+    }
+    recordNativeFallback(reason);
+    spindle.log.warn(`Lore Recall world-info interceptor failed; native activation will continue: ${reason}`);
+    return;
   }
 }, 95);
+} else {
+  spindle.log.warn("Lore Recall requires Lumiverse world-info exact selection support; native lorebook activation remains active.");
+}
 
 spindle.onFrontendMessage(async (payload, userId) => {
   setLastFrontendUserId(userId);

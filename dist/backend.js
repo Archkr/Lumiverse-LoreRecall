@@ -421,172 +421,6 @@ function titleCase(value) {
 function splitHierarchy(value) {
   return value.split(/(?:>|\/|::|\u2192|\|)/).map((segment) => segment.trim()).filter(Boolean);
 }
-function createAutoDetectRegex(pattern) {
-  const source = pattern.trim();
-  if (!source)
-    return null;
-  try {
-    if (source.startsWith("/") && source.lastIndexOf("/") > 0) {
-      const lastSlash = source.lastIndexOf("/");
-      return new RegExp(source.slice(1, lastSlash), source.slice(lastSlash + 1) || "i");
-    }
-    const escaped = source.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-    return new RegExp(`^${escaped}$`, "i");
-  } catch {
-    return null;
-  }
-}
-
-// src/backend/controller-json.ts
-var THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
-function sanitizeControllerText(value) {
-  return value.replace(THINK_BLOCK_RE, "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-}
-function extractGenerationContent(result) {
-  return result && typeof result === "object" && typeof result.content === "string" ? result.content : "";
-}
-function extractGenerationUsage(result) {
-  if (!result || typeof result !== "object")
-    return null;
-  const usage = result.usage;
-  return usage && typeof usage === "object" ? usage : null;
-}
-function extractGenerationReasoning(result) {
-  return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
-}
-function parseJsonValue(content) {
-  const cleaned = sanitizeControllerText(content);
-  if (!cleaned)
-    return null;
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      try {
-        return JSON.parse(objectMatch[0]);
-      } catch {}
-    }
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      try {
-        return JSON.parse(arrayMatch[0]);
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
-function normalizeArrayPayload(parsed, primaryKey) {
-  if (Array.isArray(parsed))
-    return { [primaryKey]: parsed };
-  if (!parsed || typeof parsed !== "object")
-    return null;
-  const record = parsed;
-  if (Array.isArray(record[primaryKey]))
-    return record;
-  if (Array.isArray(record.data))
-    return { [primaryKey]: record.data };
-  if (Array.isArray(record.items))
-    return { [primaryKey]: record.items };
-  const result = record.result;
-  if (result && typeof result === "object" && Array.isArray(result[primaryKey])) {
-    return { [primaryKey]: result[primaryKey] };
-  }
-  return null;
-}
-function buildStructuredJsonParameters(provider, schemaName, schema) {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
-    return {
-      responseMimeType: "application/json",
-      responseSchema: schema
-    };
-  }
-  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
-    return {
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: schemaName,
-          schema
-        }
-      }
-    };
-  }
-  return {};
-}
-function buildNoReasoningParameters(provider) {
-  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
-  if (normalizedProvider === "openrouter") {
-    return { reasoning: { effort: "none" } };
-  }
-  if (normalizedProvider === "nanogpt") {
-    return { reasoning_effort: "none" };
-  }
-  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
-    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
-  }
-  return { reasoning: { effort: "none" } };
-}
-function resolveControllerConnectionId(settings, fallbackConnectionId) {
-  if (settings.controllerConnectionId?.trim())
-    return settings.controllerConnectionId.trim();
-  if (fallbackConnectionId?.trim())
-    return fallbackConnectionId.trim();
-  return null;
-}
-async function runControllerJson(prompt, settings, userId, options = {}) {
-  const connectionId = resolveControllerConnectionId(settings, options.connectionId);
-  const connection = connectionId ? await spindle.connections.get(connectionId, userId).catch(() => null) : null;
-  const structuredParameters = options.primaryKey && options.schemaName && options.schema ? buildStructuredJsonParameters(connection?.provider ?? null, options.schemaName, options.schema) : {};
-  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
-  const result = await spindle.generate.quiet({
-    type: "quiet",
-    messages: [
-      ...options.systemPrompt ? [{ role: "system", content: options.systemPrompt }] : [],
-      { role: "user", content: prompt }
-    ],
-    parameters: {
-      temperature: options.temperatureOverride ?? settings.controllerTemperature,
-      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
-      ...noReasoningParameters,
-      ...structuredParameters
-    },
-    ...connectionId ? { connection_id: connectionId } : {},
-    userId,
-    signal: options.signal
-  });
-  const content = sanitizeControllerText(extractGenerationContent(result));
-  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
-  const parseSource = content || reasoning;
-  const parsedFrom = content ? "content" : reasoning ? "reasoning" : null;
-  const base = {
-    rawContent: content,
-    rawReasoning: reasoning,
-    parsedFrom,
-    provider: connection?.provider ?? null,
-    model: connection?.model ?? null,
-    connectionId,
-    finishReason: result && typeof result === "object" && typeof result.finish_reason === "string" ? result.finish_reason ?? null : null,
-    toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
-    usage: extractGenerationUsage(result)
-  };
-  if (!parseSource)
-    return { parsed: null, ...base };
-  const parsed = parseJsonValue(parseSource);
-  if (!options.primaryKey) {
-    return {
-      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
-      ...base
-    };
-  }
-  const normalized = normalizeArrayPayload(parsed, options.primaryKey);
-  if (normalized)
-    return { parsed: normalized, ...base };
-  return { parsed: null, ...base };
-}
 
 // src/categories.ts
 var ROOT_CATEGORIES = ["Characters", "Locations", "Items", "Factions", "Events", "Worldbuilding", "Other"];
@@ -1006,8 +840,6 @@ function countAssignedRootEntries(tree) {
 }
 function buildBookStatus(bookId, config, tree, entries, attachedToCharacter, selectedForCharacter) {
   const warnings = [];
-  if (attachedToCharacter)
-    warnings.push("Still attached natively");
   if (!config.enabled)
     warnings.push("Disabled for Lore Recall");
   if (config.permission === "write_only")
@@ -1050,12 +882,6 @@ async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId) {
   }))).filter((book) => !!book);
   return { runtimeBooks, staleIssues };
 }
-function computeSuggestedBookIds(allBooks, selectedBookIds, settings) {
-  const matcher = createAutoDetectRegex(settings.autoDetectPattern);
-  if (!matcher)
-    return [];
-  return allBooks.filter((book) => !selectedBookIds.includes(book.id)).filter((book) => matcher.test(book.name)).map((book) => book.id);
-}
 function normalizeEntryMetaForWrite(raw, seed) {
   const normalized = normalizeEntryRecallMeta(raw, seed);
   const fallback = defaultEntryRecallMeta(seed);
@@ -1072,6 +898,245 @@ function isReadableBook(config) {
 }
 function canEditBook(config) {
   return config.permission !== "read_only";
+}
+
+// src/backend/attached.ts
+function mapAttachedBookSources(input) {
+  const sources = {};
+  const add = (ids, source) => {
+    for (const id of ids)
+      if (id && !sources[id])
+        sources[id] = source;
+  };
+  add(input.character, "character");
+  if (input.persona)
+    add([input.persona], "persona");
+  add(input.chat, "chat");
+  add(input.global, "global");
+  return sources;
+}
+function indexedFromHost(entry, book, cached) {
+  const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
+    entryId: entry.id,
+    comment: entry.comment,
+    key: [...entry.key]
+  });
+  if (cached) {
+    return {
+      ...cached,
+      ...meta,
+      disabled: entry.disabled,
+      constant: entry.constant,
+      content: entry.content,
+      previewText: truncateText(entry.content, 220),
+      comment: entry.comment,
+      key: [...entry.key],
+      keysecondary: [...entry.keysecondary]
+    };
+  }
+  return {
+    entryId: entry.id,
+    worldBookId: book.summary.id,
+    worldBookName: book.summary.name,
+    comment: entry.comment,
+    key: [...entry.key],
+    keysecondary: [...entry.keysecondary],
+    disabled: entry.disabled,
+    constant: entry.constant,
+    content: entry.content,
+    previewText: truncateText(entry.content, 220),
+    updatedAt: book.summary.updatedAt,
+    groupName: "",
+    selective: false,
+    vectorized: false,
+    legacyTree: null,
+    ...meta
+  };
+}
+function overlayActiveEntries(books, entries) {
+  const activeByBook = new Map;
+  for (const entry of entries) {
+    const list = activeByBook.get(entry.world_book_id) ?? [];
+    list.push(entry);
+    activeByBook.set(entry.world_book_id, list);
+  }
+  return books.map((book) => {
+    const cachedById = new Map(book.cache.entries.map((entry) => [entry.entryId, entry]));
+    return {
+      ...book,
+      cache: {
+        ...book.cache,
+        entries: (activeByBook.get(book.summary.id) ?? []).filter((entry) => entry.content.trim()).map((entry) => indexedFromHost(entry, book, cachedById.get(entry.id)))
+      }
+    };
+  });
+}
+function recallEligibleBooks(books) {
+  return books.filter((book) => book.config.enabled && isReadableBook(book.config));
+}
+async function loadAttachedRuntimeBooks(entries, userId) {
+  const bookIds = [...new Set(entries.map((entry) => entry.world_book_id))];
+  const sources = {};
+  for (const entry of entries) {
+    if (!(entry.world_book_id in sources))
+      sources[entry.world_book_id] = entry.book_source ?? "attached";
+  }
+  const { runtimeBooks } = await getRuntimeBooks(bookIds, bookIds, userId);
+  return {
+    books: overlayActiveEntries(recallEligibleBooks(runtimeBooks), entries),
+    sources
+  };
+}
+
+// src/backend/controller-json.ts
+var THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
+function sanitizeControllerText(value) {
+  return value.replace(THINK_BLOCK_RE, "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+function extractGenerationContent(result) {
+  return result && typeof result === "object" && typeof result.content === "string" ? result.content : "";
+}
+function extractGenerationUsage(result) {
+  if (!result || typeof result !== "object")
+    return null;
+  const usage = result.usage;
+  return usage && typeof usage === "object" ? usage : null;
+}
+function extractGenerationReasoning(result) {
+  return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
+}
+function parseJsonValue(content) {
+  const cleaned = sanitizeControllerText(content);
+  if (!cleaned)
+    return null;
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      try {
+        return JSON.parse(objectMatch[0]);
+      } catch {}
+    }
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      try {
+        return JSON.parse(arrayMatch[0]);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+function normalizeArrayPayload(parsed, primaryKey) {
+  if (Array.isArray(parsed))
+    return { [primaryKey]: parsed };
+  if (!parsed || typeof parsed !== "object")
+    return null;
+  const record = parsed;
+  if (Array.isArray(record[primaryKey]))
+    return record;
+  if (Array.isArray(record.data))
+    return { [primaryKey]: record.data };
+  if (Array.isArray(record.items))
+    return { [primaryKey]: record.items };
+  const result = record.result;
+  if (result && typeof result === "object" && Array.isArray(result[primaryKey])) {
+    return { [primaryKey]: result[primaryKey] };
+  }
+  return null;
+}
+function buildStructuredJsonParameters(provider, schemaName, schema) {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+  if (normalizedProvider === "google" || normalizedProvider === "gemini") {
+    return {
+      responseMimeType: "application/json",
+      responseSchema: schema
+    };
+  }
+  if (normalizedProvider === "openai" || normalizedProvider === "openrouter") {
+    return {
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: schemaName,
+          schema
+        }
+      }
+    };
+  }
+  return {};
+}
+function buildNoReasoningParameters(provider) {
+  const normalizedProvider = provider?.trim().toLowerCase() ?? "";
+  if (normalizedProvider === "openrouter") {
+    return { reasoning: { effort: "none" } };
+  }
+  if (normalizedProvider === "nanogpt") {
+    return { reasoning_effort: "none" };
+  }
+  if (normalizedProvider === "google" || normalizedProvider === "google_vertex" || normalizedProvider === "gemini") {
+    return { thinkingConfig: { thinkingLevel: "minimal", includeThoughts: false } };
+  }
+  return { reasoning: { effort: "none" } };
+}
+function resolveControllerConnectionId(settings, fallbackConnectionId) {
+  if (settings.controllerConnectionId?.trim())
+    return settings.controllerConnectionId.trim();
+  if (fallbackConnectionId?.trim())
+    return fallbackConnectionId.trim();
+  return null;
+}
+async function runControllerJson(prompt, settings, userId, options = {}) {
+  const connectionId = resolveControllerConnectionId(settings, options.connectionId);
+  const connection = connectionId ? await spindle.connections.get(connectionId, userId).catch(() => null) : null;
+  const structuredParameters = options.primaryKey && options.schemaName && options.schema ? buildStructuredJsonParameters(connection?.provider ?? null, options.schemaName, options.schema) : {};
+  const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
+  const result = await spindle.generate.quiet({
+    type: "quiet",
+    messages: [
+      ...options.systemPrompt ? [{ role: "system", content: options.systemPrompt }] : [],
+      { role: "user", content: prompt }
+    ],
+    parameters: {
+      temperature: options.temperatureOverride ?? settings.controllerTemperature,
+      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
+      ...noReasoningParameters,
+      ...structuredParameters
+    },
+    ...connectionId ? { connection_id: connectionId } : {},
+    userId,
+    signal: options.signal
+  });
+  const content = sanitizeControllerText(extractGenerationContent(result));
+  const reasoning = sanitizeControllerText(extractGenerationReasoning(result));
+  const parseSource = content || reasoning;
+  const parsedFrom = content ? "content" : reasoning ? "reasoning" : null;
+  const base = {
+    rawContent: content,
+    rawReasoning: reasoning,
+    parsedFrom,
+    provider: connection?.provider ?? null,
+    model: connection?.model ?? null,
+    connectionId,
+    finishReason: result && typeof result === "object" && typeof result.finish_reason === "string" ? result.finish_reason ?? null : null,
+    toolCallsCount: result && typeof result === "object" && Array.isArray(result.tool_calls) ? result.tool_calls?.length ?? 0 : null,
+    usage: extractGenerationUsage(result)
+  };
+  if (!parseSource)
+    return { parsed: null, ...base };
+  const parsed = parseJsonValue(parseSource);
+  if (!options.primaryKey) {
+    return {
+      parsed: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null,
+      ...base
+    };
+  }
+  const normalized = normalizeArrayPayload(parsed, options.primaryKey);
+  if (normalized)
+    return { parsed: normalized, ...base };
+  return { parsed: null, ...base };
 }
 
 // src/backend/jev.ts
@@ -1653,6 +1718,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   const constants = collectReservedConstantEntries(readableBooks);
   const reservedConstantNodes = buildPreviewNodes(constants, new Map(readableBooks.map((book) => [book.summary.id, book])));
   const issues = [];
+  let retrievalComplete = true;
   let controllerUsed = false;
   const controllerAllowed = options.allowController !== false;
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
@@ -1663,6 +1729,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
     const remainingMs = modelDeadline - Date.now();
     if (remainingMs < 1000) {
       issues.push("Model selection ran out of time; remaining batches were skipped.");
+      retrievalComplete = false;
       return null;
     }
     const abort = new AbortController;
@@ -1675,6 +1742,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
       return response.parsed;
     } catch (error) {
       issues.push(error instanceof Error ? error.message : String(error));
+      retrievalComplete = false;
       return null;
     } finally {
       clearTimeout(timer);
@@ -1696,7 +1764,10 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   const routedCategories = Array.isArray(rawCategories) && rawCategories.every((value) => typeof value === "string" && categoriesPresent.includes(value)) ? [...new Set(rawCategories)] : [];
   if (categoriesPresent.length && controllerAllowed && (!Array.isArray(rawCategories) || rawCategories.some((value) => typeof value !== "string" || !categoriesPresent.includes(value)))) {
     issues.push("Category routing returned an invalid categories array.");
+    retrievalComplete = false;
   }
+  if (categoriesPresent.length && !controllerAllowed)
+    retrievalComplete = false;
   emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories", routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.", { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
   const routed = allEntries.filter((item) => routedCategories.includes(item.category));
   const batches = [];
@@ -1727,6 +1798,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
 `));
     if (!result || !Array.isArray(result.entryIds) || !result.entryIds.every((id) => typeof id === "string")) {
       issues.push(`Selection batch ${batchIndex + 1} returned no usable entryIds array.`);
+      retrievalComplete = false;
       continue;
     }
     const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
@@ -1734,6 +1806,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
     const invalid = requested.filter((id) => !byId.has(id));
     if (invalid.length) {
       issues.push(`Selection batch ${batchIndex + 1} returned ${invalid.length} unknown ID(s).`);
+      retrievalComplete = false;
       continue;
     }
     for (const id of requested)
@@ -1757,14 +1830,14 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   const selected = approved.slice(0, dynamicLimit);
   const injection = buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12);
   const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
-  emitProgress(report, { type: "item", item: createFeedItem("injected", "Injected entries", `Injected ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic).`, { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
+  emitProgress(report, { type: "item", item: createFeedItem("injected", "Cap result", `Prepared ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic) for activation.`, { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
   for (const issue of issues)
     emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue, { phase: "fallback", tone: "warn" }) });
-  const fallbackReason = issues.length ? issues.join(" ") : null;
+  const fallbackReason = !retrievalComplete && issues.length ? issues.join(" ") : null;
   emitProgress(report, {
     type: "finish",
     timestamp: Date.now(),
-    status: issues.length ? "fallback" : "completed",
+    status: retrievalComplete ? "completed" : "fallback",
     controllerUsed,
     resolvedConnectionId: controllerUsed ? connectionId : null,
     fallbackReason
@@ -1793,6 +1866,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
     jevRejectedEntries,
     fallbackReason,
     fallbackPath: issues,
+    retrievalComplete,
     selectedBookIds: readableBooks.map((book) => book.summary.id),
     steps: [],
     trace: [],
@@ -3438,22 +3512,13 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
   const diagnostics = [];
   const multiBookMode = !!characterConfig && runtimeBooks.length > 1;
   const readableBooks = runtimeBooks.filter((book) => book.config.enabled && book.config.permission !== "write_only");
-  if (characterConfig?.searchMode === "traversal" && characterConfig.selectiveRetrieval && characterConfig.traversalStepLimit < 3) {
-    diagnostics.push({
-      id: "selective-traversal-limit",
-      severity: "warn",
-      bookId: null,
-      title: "Traversal step limit is low for selective retrieval",
-      detail: "Selective retrieval in traversal mode works best with at least 3 traversal steps so Lore Recall can choose useful scopes before picking exact entries from their manifests."
-    });
-  }
   if (!readableBooks.length && runtimeBooks.length) {
     diagnostics.push({
       id: "no-readable-books",
       severity: "warn",
       bookId: null,
-      title: "No readable managed books",
-      detail: "All managed books are currently disabled or write-only, so Lore Recall has nothing it can search during retrieval."
+      title: "No attached books available to Recall",
+      detail: "Attached books are disabled or write-only in Lore Recall, so Lumiverse will activate them natively."
     });
   }
   if (settings?.controllerConnectionId?.trim()) {
@@ -3480,15 +3545,6 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
-    if (book.status.attachedToCharacter) {
-      diagnostics.push({
-        id: `attached:${book.summary.id}`,
-        severity: "warn",
-        bookId: book.summary.id,
-        title: "Managed book is still attached natively",
-        detail: `${book.summary.name} is attached to the character and may duplicate native world info activation.`
-      });
-    }
     if (book.status.treeMissing) {
       diagnostics.push({
         id: `tree:${book.summary.id}`,
@@ -3512,8 +3568,8 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         id: `disabled:${book.summary.id}`,
         severity: "info",
         bookId: book.summary.id,
-        title: "Managed book is disabled",
-        detail: `${book.summary.name} is still selected for the character, but Lore Recall has it disabled in book settings.`
+        title: "Book excluded from Recall",
+        detail: `${book.summary.name} is disabled in Lore Recall. Lumiverse will use native activation for this attached book.`
       });
     }
     if (book.config.permission === "write_only") {
@@ -3521,8 +3577,8 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         id: `writeonly:${book.summary.id}`,
         severity: "warn",
         bookId: book.summary.id,
-        title: "Managed book is write-only",
-        detail: `${book.summary.name} will not be searched during retrieval while write-only mode is active.`
+        title: "Book excluded from Recall",
+        detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`
       });
     }
     const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
@@ -3760,7 +3816,6 @@ async function applySuggestedBooks(characterId, bookIds, mode, userId) {
 }
 
 // src/backend/index.ts
-var LORE_RECALL_BREAKDOWN_NAME = "Retrieved Lore";
 var CONNECTION_CACHE_TTL_MS = 5000;
 var RETRIEVAL_FEED_SESSION_LIMIT = 25;
 var RETRIEVAL_FEED_PUSH_DELAY_MS = 180;
@@ -4007,11 +4062,6 @@ function scheduleLiveStatePush(userId, chatId) {
   }, RETRIEVAL_FEED_PUSH_DELAY_MS);
   scheduledStatePushes.set(key, handle);
 }
-function summarizeTrace(preview) {
-  if (!preview.trace.length)
-    return "no traversal trace";
-  return preview.trace.map((step) => `${step.step}:${step.phase}:${step.label}`).slice(0, 6).join(" | ");
-}
 async function buildState(userId, chatId) {
   const [allBooks, activeChat, settings, connections] = await Promise.all([
     listAllWorldBooks(userId),
@@ -4027,8 +4077,10 @@ async function buildState(userId, chatId) {
     activeCharacterId: activeChat?.character_id ?? null,
     activeCharacterName: null,
     globalSettings: settings,
+    hostSelectionAvailable: exactSelectionAvailable,
     characterConfig: null,
     allWorldBooks: sortedBooks,
+    attachedBookSources: {},
     managedEntries: {},
     bookConfigs: {},
     bookStatuses: {},
@@ -4041,26 +4093,24 @@ async function buildState(userId, chatId) {
     preview: cachedPreview,
     jevKeyStored: await hasJevKey(settings.jevProvider, userId)
   };
-  if (!activeChat?.character_id) {
+  if (!activeChat) {
     return { state: baseState };
   }
-  const character = await spindle.characters.get(activeChat.character_id, userId);
-  if (!character) {
-    return { state: baseState };
-  }
-  const rawCharacterConfig = await loadCharacterConfig(character.id, userId, character);
-  const validBookIds = new Set(allBooks.map((book) => book.id));
-  const selectedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => validBookIds.has(bookId));
-  const removedBookIds = rawCharacterConfig.managedBookIds.filter((bookId) => !validBookIds.has(bookId));
-  let characterConfig = rawCharacterConfig;
-  if (removedBookIds.length > 0) {
-    try {
-      await saveCharacterConfig(character.id, { managedBookIds: selectedBookIds }, userId, character);
-      characterConfig = { ...rawCharacterConfig, managedBookIds: selectedBookIds };
-    } catch (error) {}
-  }
-  const attachedWorldBookIds = character.world_book_ids;
-  const { runtimeBooks, staleIssues } = await getRuntimeBooks(selectedBookIds, attachedWorldBookIds, userId);
+  const character = activeChat.character_id ? await spindle.characters.get(activeChat.character_id, userId) : null;
+  const characterConfig = character ? await loadCharacterConfig(character.id, userId, character) : { ...DEFAULT_CHARACTER_CONFIG };
+  const globalBooksApi = spindle.world_books;
+  const [globalBookIds, activePersona] = await Promise.all([
+    globalBooksApi.getGlobal?.(userId).catch(() => []) ?? Promise.resolve([]),
+    spindle.personas.getActive(userId).catch(() => null)
+  ]);
+  const chatBookIds = activeChat.metadata?.chat_world_book_ids;
+  const attachedBookSources = mapAttachedBookSources({
+    character: character?.world_book_ids ?? [],
+    persona: activePersona?.attached_world_book_id,
+    chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
+    global: globalBookIds
+  });
+  const { runtimeBooks, staleIssues } = await getRuntimeBooks(sortedBooks.map((book) => book.id), Object.keys(attachedBookSources), userId);
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
   const bookConfigs = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.config]));
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
@@ -4087,29 +4137,28 @@ async function buildState(userId, chatId) {
       }
     ] : []
   ] : [];
-  const cleanupDiagnostics = removedBookIds.length > 0 ? [
-    {
-      id: "managed-book-cleanup",
-      severity: "info",
+  const diagnosticsResults = buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections).concat(previewDiagnostics);
+  if (!exactSelectionAvailable)
+    diagnosticsResults.unshift({
+      id: "host-selection-unavailable",
+      severity: "warn",
       bookId: null,
-      title: `Removed ${removedBookIds.length} stale managed-book reference${removedBookIds.length === 1 ? "" : "s"}`,
-      detail: "One or more lorebooks that were managed by this character were deleted in Lumiverse. Their references have been cleaned up automatically."
-    }
-  ] : [];
-  const diagnosticsResults = buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, connections).concat(cleanupDiagnostics, previewDiagnostics);
-  const suggestedBookIds = computeSuggestedBookIds(sortedBooks, selectedBookIds, settings);
+      title: "Lumiverse update needed for Lore Recall",
+      detail: "This Lumiverse build cannot activate Recall's exact entry picks. Native lorebook activation remains active."
+    });
   const nextState = {
     ...baseState,
-    activeCharacterId: character.id,
-    activeCharacterName: character.name,
+    activeCharacterId: character?.id ?? null,
+    activeCharacterName: character?.name ?? null,
     characterConfig,
+    attachedBookSources,
     managedEntries,
     bookConfigs,
     bookStatuses,
     treeIndexes,
     unassignedCounts,
     diagnosticsResults,
-    suggestedBookIds
+    suggestedBookIds: []
   };
   return {
     state: nextState
@@ -4279,122 +4328,173 @@ async function runTrackedOperation(userId, message, kind, runner, onSuccess) {
     activeTrackedOperations.delete(userId);
   }
 }
-spindle.registerInterceptor(async (messages, context) => {
-  let liveChatId = null;
-  let liveUserId = null;
-  let retrievalSessionId = null;
-  let retrievalSessionStarted = false;
-  let retrievalSessionFinished = false;
-  try {
-    const chatId = context && typeof context === "object" && typeof context.chatId === "string" ? context.chatId : null;
-    const connectionId = context && typeof context === "object" && typeof context.connectionId === "string" ? context.connectionId : null;
-    if (!chatId)
-      return messages;
-    liveChatId = chatId;
-    const userId = resolveUserId(chatId);
-    if (!userId) {
-      spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
-      return messages;
-    }
-    liveUserId = userId;
-    await ensureStorageFolders(userId);
-    const settings = await loadGlobalSettings(userId);
-    if (!settings.enabled)
-      return messages;
-    const chat = await spindle.chats.get(chatId, userId);
-    if (!chat?.character_id)
-      return messages;
-    const character = await spindle.characters.get(chat.character_id, userId);
-    if (!character)
-      return messages;
-    const config = await loadCharacterConfig(chat.character_id, userId, character);
-    if (!config.enabled || !config.managedBookIds.length)
-      return messages;
-    const attachedWorldBookIds = character.world_book_ids;
-    const { runtimeBooks } = await getRuntimeBooks(config.managedBookIds, attachedWorldBookIds, userId);
-    if (!runtimeBooks.length)
-      return messages;
-    const previewCacheKey = getPreviewCacheKey(userId, chatId);
-    processPendingDynamicFeedback(previewCacheKey, messages);
-    const dynamicFeedback = buildDynamicFeedbackSnapshot(previewCacheKey);
-    retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-    const handleProgress = (event) => {
-      if (!retrievalSessionId)
+var worldInfoApi = spindle;
+var exactSelectionAvailable = spindle.host?.capabilities?.["world-info-exact-selection-v1"] === 1;
+if (exactSelectionAvailable && typeof worldInfoApi.registerWorldInfoInterceptor === "function") {
+  worldInfoApi.registerWorldInfoInterceptor(async (context) => {
+    let liveChatId = null;
+    let liveUserId = null;
+    let retrievalSessionId = null;
+    let retrievalSessionStarted = false;
+    const recordNativeFallback = (reason) => {
+      if (!liveChatId || !liveUserId)
         return;
-      switch (event.type) {
-        case "start":
-          retrievalSessionStarted = true;
-          beginRetrievalSession(userId, chatId, retrievalSessionId, event);
-          scheduleLiveStatePush(userId, chatId);
-          return;
-        case "item":
-          if (!retrievalSessionStarted)
-            return;
-          appendRetrievalSessionItem(userId, chatId, retrievalSessionId, event.item);
-          scheduleLiveStatePush(userId, chatId);
-          return;
-        case "finish":
-          if (!retrievalSessionStarted)
-            return;
-          retrievalSessionFinished = true;
-          finishRetrievalSession(userId, chatId, retrievalSessionId, event);
-          scheduleLiveStatePush(userId, chatId);
-          return;
+      retrievalSessionId ??= `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      if (!retrievalSessionStarted) {
+        beginRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
+          type: "start",
+          mode: "collapsed",
+          timestamp: Date.now(),
+          label: "Native lorebook fallback",
+          summary: "Recall could not complete retrieval."
+        });
+        retrievalSessionStarted = true;
       }
-    };
-    const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId, {
-      connectionId,
-      isActual: true,
-      capturedAt: Date.now(),
-      reportProgress: handleProgress,
-      dynamicFeedback
-    });
-    previewCache.set(previewCacheKey, preview);
-    recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
-    scheduleLiveStatePush(userId, chatId);
-    if (preview) {
-      if (preview.mode === "traversal" && preview.fallbackReason) {
-        spindle.log.info(`Lore Recall traversal fell back for chat ${chatId}: ${preview.fallbackReason} [trace=${summarizeTrace(preview)}]`);
-      } else if (preview.mode === "traversal" && preview.controllerUsed) {
-        spindle.log.info(`Lore Recall traversal used controller for chat ${chatId}: scopes=${preview.retrievedScopes.length}, pulled=${preview.pulledNodes.length}, injected=${preview.injectedNodes.length}, connection=${preview.resolvedConnectionId ?? "default"}, trace=${summarizeTrace(preview)}`);
-      } else if (preview.mode === "collapsed" && preview.fallbackReason) {
-        spindle.log.info(`Lore Recall collapsed retrieval used fallback behavior for chat ${chatId}: ${preview.fallbackReason}`);
-      }
-    }
-    if (!preview?.injectedText.trim())
-      return messages;
-    const injected = { role: "system", content: preview.injectedText };
-    const result = {
-      messages: [injected, ...messages],
-      breakdown: [{ messageIndex: 0, name: LORE_RECALL_BREAKDOWN_NAME }]
-    };
-    return result;
-  } catch (error) {
-    if (liveChatId && liveUserId && retrievalSessionId && retrievalSessionStarted && !retrievalSessionFinished) {
-      const activeSession = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))?.sessions.find((session) => session.id === retrievalSessionId);
+      const current = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))?.sessions.find((session) => session.id === retrievalSessionId);
       appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
-        id: `issue:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        id: `native:${Date.now()}`,
         kind: "issue",
-        label: "Retrieval failed",
-        summary: error instanceof Error ? error.message : String(error),
+        label: "Native lorebook fallback",
+        summary: reason,
         timestamp: Date.now(),
         phase: "fallback",
-        tone: "error"
+        tone: "warn"
       });
       finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
         type: "finish",
         timestamp: Date.now(),
-        status: "failed",
-        controllerUsed: activeSession?.controllerUsed ?? false,
-        resolvedConnectionId: activeSession?.resolvedConnectionId ?? null,
-        fallbackReason: error instanceof Error ? error.message : String(error)
+        status: "fallback",
+        controllerUsed: current?.controllerUsed ?? false,
+        resolvedConnectionId: current?.resolvedConnectionId ?? null,
+        fallbackReason: reason
       });
       scheduleLiveStatePush(liveUserId, liveChatId);
+    };
+    try {
+      const chatId = context.chatId;
+      const connectionId = context.connectionId ?? null;
+      const messages = context.messages.map((message) => ({ role: message.role, content: message.content }));
+      if (!chatId)
+        return;
+      liveChatId = chatId;
+      const userId = context.userId ?? resolveUserId(chatId);
+      if (!userId) {
+        spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
+        return;
+      }
+      liveUserId = userId;
+      await ensureStorageFolders(userId);
+      const settings = await loadGlobalSettings(userId);
+      if (!settings.enabled)
+        return;
+      const previewCacheKey = getPreviewCacheKey(userId, chatId);
+      previewCache.set(previewCacheKey, null);
+      const chat = await spindle.chats.get(chatId, userId);
+      if (!chat)
+        return;
+      const character = chat.character_id ? await spindle.characters.get(chat.character_id, userId) : null;
+      const config = character ? await loadCharacterConfig(character.id, userId, character) : { ...DEFAULT_CHARACTER_CONFIG };
+      const { books: runtimeBooks, sources } = await loadAttachedRuntimeBooks(context.entries, userId);
+      if (!runtimeBooks.length)
+        return;
+      if (context.deadlineAt && Date.now() >= context.deadlineAt - 2000) {
+        recordNativeFallback("Recall ran out of time before reviewing attached books.");
+        return;
+      }
+      processPendingDynamicFeedback(previewCacheKey, messages);
+      const dynamicFeedback = buildDynamicFeedbackSnapshot(previewCacheKey);
+      retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const handleProgress = (event) => {
+        if (!retrievalSessionId)
+          return;
+        switch (event.type) {
+          case "start":
+            retrievalSessionStarted = true;
+            beginRetrievalSession(userId, chatId, retrievalSessionId, event);
+            scheduleLiveStatePush(userId, chatId);
+            return;
+          case "item":
+            if (!retrievalSessionStarted)
+              return;
+            appendRetrievalSessionItem(userId, chatId, retrievalSessionId, event.item);
+            scheduleLiveStatePush(userId, chatId);
+            return;
+          case "finish":
+            if (!retrievalSessionStarted)
+              return;
+            finishRetrievalSession(userId, chatId, retrievalSessionId, event);
+            scheduleLiveStatePush(userId, chatId);
+            return;
+        }
+      };
+      const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId, {
+        connectionId,
+        isActual: true,
+        capturedAt: Date.now(),
+        reportProgress: handleProgress,
+        dynamicFeedback
+      });
+      const exceededDeadline = !!context.deadlineAt && Date.now() >= context.deadlineAt - 2000;
+      const retrievalComplete = preview?.retrievalComplete === true && !exceededDeadline;
+      if (preview && exceededDeadline) {
+        preview.retrievalComplete = false;
+        preview.fallbackReason = "Recall exceeded the host activation deadline.";
+        preview.fallbackPath.push(preview.fallbackReason);
+      }
+      if (preview) {
+        preview.activationSource = retrievalComplete ? "recall" : "native";
+        preview.attachedBookSources = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, sources[book.summary.id] ?? "attached"]));
+        if (!retrievalComplete) {
+          preview.injectedNodes = [];
+          preview.injectedText = "";
+        }
+      }
+      previewCache.set(previewCacheKey, preview);
+      if (retrievalComplete)
+        recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
+      scheduleLiveStatePush(userId, chatId);
+      if (!retrievalComplete) {
+        recordNativeFallback(preview?.fallbackReason ?? "Recall could not complete retrieval.");
+        return;
+      }
+      const handledBookIds = new Set(runtimeBooks.map((book) => book.summary.id));
+      const selectedIds = new Set(preview.injectedNodes.map((node) => node.entryId));
+      preview.injectedText = context.entries.filter((entry) => selectedIds.has(entry.id)).map((entry) => entry.content).join(`
+
+`);
+      preview.estimatedTokens = Math.ceil(preview.injectedText.length / 4);
+      const disabled = context.entries.filter((entry) => handledBookIds.has(entry.world_book_id) && !selectedIds.has(entry.id)).map((entry) => entry.id);
+      appendRetrievalSessionItem(userId, chatId, retrievalSessionId, {
+        id: `activation:${Date.now()}`,
+        kind: "injected",
+        label: "Recall activation",
+        summary: `Selected ${selectedIds.size} entr${selectedIds.size === 1 ? "y" : "ies"} from ${handledBookIds.size} attached book${handledBookIds.size === 1 ? "" : "s"}; native activation suppressed for the rest.`,
+        timestamp: Date.now(),
+        phase: "inject",
+        count: selectedIds.size,
+        entries: preview.injectedNodes,
+        tone: "success"
+      });
+      scheduleLiveStatePush(userId, chatId);
+      return { disabled, selected: [...selectedIds] };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (liveChatId && liveUserId) {
+        const cached = previewCache.get(getPreviewCacheKey(liveUserId, liveChatId));
+        if (cached) {
+          cached.activationSource = "native";
+          cached.injectedNodes = [];
+          cached.injectedText = "";
+        }
+      }
+      recordNativeFallback(reason);
+      spindle.log.warn(`Lore Recall world-info interceptor failed; native activation will continue: ${reason}`);
+      return;
     }
-    spindle.log.warn(`Lore Recall interceptor failed: ${error instanceof Error ? error.message : String(error)}`);
-    return messages;
-  }
-}, 95);
+  }, 95);
+} else {
+  spindle.log.warn("Lore Recall requires Lumiverse world-info exact selection support; native lorebook activation remains active.");
+}
 spindle.onFrontendMessage(async (payload, userId) => {
   setLastFrontendUserId(userId);
   const message = payload;

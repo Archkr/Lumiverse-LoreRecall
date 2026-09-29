@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FrontendState } from "../types";
-import { filterBooks } from "./helpers";
+import { filterBooks, isRecallActive } from "./helpers";
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
   return {
@@ -13,6 +13,8 @@ function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
       { id: "date-c", name: "Date A Bullet", description: "third", updatedAt: 1 },
       { id: "other", name: "Other Book", description: "misc", updatedAt: 1 },
     ],
+    attachedBookSources: {},
+    hostSelectionAvailable: true,
     availableConnections: [],
     bookConfigs: {},
     bookStatuses: {},
@@ -58,6 +60,14 @@ function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
 }
 
 describe("filterBooks", () => {
+  test("retrieval status follows the global switch and host support, not legacy character enablement", () => {
+    const state = makeState();
+    state.characterConfig!.enabled = false;
+    expect(isRecallActive(state)).toBe(true);
+    expect(isRecallActive({ ...state, hostSelectionAvailable: false })).toBe(false);
+    expect(isRecallActive({ ...state, globalSettings: { ...state.globalSettings, enabled: false } })).toBe(false);
+  });
+
   test("searches every lorebook while a query is active", () => {
     const state = makeState({
       characterConfig: {

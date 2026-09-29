@@ -425,7 +425,6 @@ export function buildBookStatus(
   selectedForCharacter: boolean,
 ): BookStatus {
   const warnings: string[] = [];
-  if (attachedToCharacter) warnings.push("Still attached natively");
   if (!config.enabled) warnings.push("Disabled for Lore Recall");
   if (config.permission === "write_only") warnings.push("Excluded from retrieval");
   if (!treeHasContent(tree)) warnings.push("Missing tree");
