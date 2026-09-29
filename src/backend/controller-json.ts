@@ -22,7 +22,6 @@ export interface ControllerJsonOptions {
   schemaName?: string;
   schema?: Record<string, unknown>;
   systemPrompt?: string;
-  maxTokensOverride?: number;
   temperatureOverride?: number;
   disableReasoning?: boolean;
   connectionId?: string | null;
@@ -47,6 +46,28 @@ function extractGenerationUsage(result: unknown): Record<string, unknown> | null
   if (!result || typeof result !== "object") return null;
   const usage = (result as { usage?: unknown }).usage;
   return usage && typeof usage === "object" ? (usage as Record<string, unknown>) : null;
+}
+
+/** Token accounting may be available even when the provider exposes no reasoning text. */
+export function getControllerTokenUsage(usage: Record<string, unknown> | null): {
+  reasoningTokens: number | null;
+  textTokens: number | null;
+} {
+  const record = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const raw = record(usage?.provider_raw);
+  const sources = [usage ?? {}, raw];
+  const details = sources.flatMap((source) => [
+    record(source.output_tokens_details), record(source.completion_tokens_details), source,
+  ]);
+  const count = (key: string): number | null => {
+    for (const detail of details) {
+      const value = detail[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+    }
+    return null;
+  };
+  return { reasoningTokens: count("reasoning_tokens"), textTokens: count("text_tokens") };
 }
 
 function extractGenerationReasoning(result: unknown): string {
@@ -182,7 +203,6 @@ export async function runControllerJson(
     ],
     parameters: {
       temperature: options.temperatureOverride ?? settings.controllerTemperature,
-      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...noReasoningParameters,
       ...structuredParameters,
     },

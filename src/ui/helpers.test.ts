@@ -40,7 +40,6 @@ function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
       autoDetectPattern: "*recall*",
       controllerConnectionId: null,
       controllerTemperature: 0.2,
-      controllerMaxTokens: 8192,
       buildDetail: "lite",
       treeGranularity: 0,
       chunkTokens: 30000,

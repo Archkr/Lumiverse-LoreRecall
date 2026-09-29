@@ -3018,7 +3018,6 @@ export function setup(ctx: SpindleFrontendContext) {
 
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
-      ["controllerMaxTokens", "Controller max tokens"],
       ["chunkTokens", "LLM chunk size"],
     ] as const) {
       form.appendChild(

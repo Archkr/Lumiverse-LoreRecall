@@ -8,7 +8,6 @@ var DEFAULT_GLOBAL_SETTINGS = {
   autoDetectPattern: "*recall*",
   controllerConnectionId: null,
   controllerTemperature: 0.2,
-  controllerMaxTokens: 8192,
   buildDetail: "lite",
   treeGranularity: 0,
   chunkTokens: 30000,
@@ -111,7 +110,6 @@ function normalizeGlobalSettings(value) {
     autoDetectPattern: typeof next.autoDetectPattern === "string" && next.autoDetectPattern.trim() ? next.autoDetectPattern.trim() : DEFAULT_GLOBAL_SETTINGS.autoDetectPattern,
     controllerConnectionId: typeof next.controllerConnectionId === "string" && next.controllerConnectionId.trim() ? next.controllerConnectionId.trim() : null,
     controllerTemperature: clampFloat(typeof next.controllerTemperature === "number" ? next.controllerTemperature : DEFAULT_GLOBAL_SETTINGS.controllerTemperature, 0, 2),
-    controllerMaxTokens: clampInt(typeof next.controllerMaxTokens === "number" ? next.controllerMaxTokens : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens, 256, 32768),
     buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
@@ -1002,6 +1000,25 @@ function extractGenerationUsage(result) {
   const usage = result.usage;
   return usage && typeof usage === "object" ? usage : null;
 }
+function getControllerTokenUsage(usage) {
+  const record = (value) => value && typeof value === "object" ? value : {};
+  const raw = record(usage?.provider_raw);
+  const sources = [usage ?? {}, raw];
+  const details = sources.flatMap((source) => [
+    record(source.output_tokens_details),
+    record(source.completion_tokens_details),
+    source
+  ]);
+  const count = (key) => {
+    for (const detail of details) {
+      const value = detail[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0)
+        return value;
+    }
+    return null;
+  };
+  return { reasoningTokens: count("reasoning_tokens"), textTokens: count("text_tokens") };
+}
 function extractGenerationReasoning(result) {
   return result && typeof result === "object" && typeof result.reasoning === "string" ? result.reasoning : "";
 }
@@ -1101,7 +1118,6 @@ async function runControllerJson(prompt, settings, userId, options = {}) {
     ],
     parameters: {
       temperature: options.temperatureOverride ?? settings.controllerTemperature,
-      max_tokens: options.maxTokensOverride ?? settings.controllerMaxTokens,
       ...noReasoningParameters,
       ...structuredParameters
     },
@@ -2398,8 +2414,7 @@ async function subdivideLargeLeafNodes(tree, entries, granularity, settings, use
       ].join(`
 `);
       const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_subdivide", ASSIGNMENTS_SCHEMA, {
-        systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-        maxTokensOverride: Math.min(settings.controllerMaxTokens, 900)
+        systemPrompt: CATEGORIZATION_SYSTEM_PROMPT
       });
       const parsed = controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
       if (!parsed || !Array.isArray(parsed.assignments))
@@ -2464,10 +2479,12 @@ function buildControllerDebugPayload(input) {
     usage: input.usage ?? null,
     parsedFrom: input.parsedFrom ?? null,
     reasoningLength: input.reasoningLength ?? null,
+    reasoningTextLength: (input.rawReasoning ?? "").length,
+    reasoningTraceAvailable: !!input.rawReasoning?.trim(),
+    ...getControllerTokenUsage(input.usage ?? null),
     controllerSettings: {
       controllerConnectionId: input.settings.controllerConnectionId,
       controllerTemperature: input.settings.controllerTemperature,
-      controllerMaxTokens: input.settings.controllerMaxTokens,
       buildDetail: input.settings.buildDetail,
       treeGranularity: input.settings.treeGranularity,
       chunkTokens: input.settings.chunkTokens,
@@ -2612,8 +2629,7 @@ async function generateCategorySummary(tree, nodeIds, entries, settings, userId)
   ].filter(Boolean).join(`
 `);
   const controllerResult = await runControllerJson2(prompt, settings, userId, "summaries", "lore_recall_category_summaries", CATEGORY_SUMMARIES_SCHEMA, {
-    systemPrompt: SUMMARY_SYSTEM_PROMPT,
-    maxTokensOverride: Math.min(settings.controllerMaxTokens, 700)
+    systemPrompt: SUMMARY_SYSTEM_PROMPT
   });
   const parsed = controllerResult.parsed;
   if (!Array.isArray(parsed?.summaries)) {
@@ -2650,16 +2666,11 @@ function buildEntrySummaryPrompt(entries) {
   ].join(`
 `);
 }
-function computeEntrySummaryTokenBudget(settings, entryCount) {
-  const requested = Math.max(1800, entryCount * 320);
-  return Math.min(settings.controllerMaxTokens, requested);
-}
 async function generateEntrySummaryBatch(entries, settings, userId) {
   if (!entries.length)
     return [];
   const controllerResult = await runControllerJson2(buildEntrySummaryPrompt(entries), settings, userId, "entries", "lore_recall_entry_summaries", ENTRY_SUMMARIES_SCHEMA, {
-    systemPrompt: SUMMARY_SYSTEM_PROMPT,
-    maxTokensOverride: computeEntrySummaryTokenBudget(settings, entries.length)
+    systemPrompt: SUMMARY_SYSTEM_PROMPT
   });
   const parsed = controllerResult.parsed;
   if (!parsed || !Array.isArray(parsed.entries)) {
@@ -3076,8 +3087,7 @@ async function buildTreeWithLlm(bookIds, userId, operation) {
         for (let attempt = 0;attempt < 2; attempt += 1) {
           const prompt = buildPrompt(retryViolations);
           const controllerResult = await runControllerJson2(prompt, settings, userId, "assignments", "lore_recall_tree_assignments", ASSIGNMENTS_SCHEMA, {
-            systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-            maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200)
+            systemPrompt: CATEGORIZATION_SYSTEM_PROMPT
           });
           const parsed = controllerResult.parsed ?? normalizeAssignmentsPayload(parseJsonValue(controllerResult.rawContent || controllerResult.rawReasoning));
           if (!parsed || !Array.isArray(parsed.assignments)) {

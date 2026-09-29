@@ -4,7 +4,6 @@ var DEFAULT_GLOBAL_SETTINGS = {
   autoDetectPattern: "*recall*",
   controllerConnectionId: null,
   controllerTemperature: 0.2,
-  controllerMaxTokens: 8192,
   buildDetail: "lite",
   treeGranularity: 0,
   chunkTokens: 30000,
@@ -101,7 +100,6 @@ function normalizeGlobalSettings(value) {
     autoDetectPattern: typeof next.autoDetectPattern === "string" && next.autoDetectPattern.trim() ? next.autoDetectPattern.trim() : DEFAULT_GLOBAL_SETTINGS.autoDetectPattern,
     controllerConnectionId: typeof next.controllerConnectionId === "string" && next.controllerConnectionId.trim() ? next.controllerConnectionId.trim() : null,
     controllerTemperature: clampFloat(typeof next.controllerTemperature === "number" ? next.controllerTemperature : DEFAULT_GLOBAL_SETTINGS.controllerTemperature, 0, 2),
-    controllerMaxTokens: clampInt(typeof next.controllerMaxTokens === "number" ? next.controllerMaxTokens : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens, 256, 32768),
     buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(typeof next.treeGranularity === "number" ? next.treeGranularity : DEFAULT_GLOBAL_SETTINGS.treeGranularity, 0, 4),
     chunkTokens: clampInt(typeof next.chunkTokens === "number" ? next.chunkTokens : DEFAULT_GLOBAL_SETTINGS.chunkTokens, 1000, 120000),
@@ -5736,7 +5734,6 @@ function setup(ctx) {
     form.appendChild(createFieldNote(state.jevKeyStored ? "JEV is ready. Explicit rejections are removed; unanswered entries pass through." : "Add a key to enable JEV filtering. Model picks pass through until then."));
     for (const [key, label] of [
       ["controllerTemperature", "Controller temperature"],
-      ["controllerMaxTokens", "Controller max tokens"],
       ["chunkTokens", "LLM chunk size"]
     ]) {
       form.appendChild(createField(label, createNumberInput(globalDraft[key] ?? 0, (next) => {

@@ -18,7 +18,6 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalLoreRecallSettings = {
   autoDetectPattern: "*recall*",
   controllerConnectionId: null,
   controllerTemperature: 0.2,
-  controllerMaxTokens: 8192,
   buildDetail: "lite",
   treeGranularity: 0,
   chunkTokens: 30000,
@@ -158,13 +157,6 @@ export function normalizeGlobalSettings(value?: Partial<GlobalLoreRecallSettings
         : DEFAULT_GLOBAL_SETTINGS.controllerTemperature,
       0,
       2,
-    ),
-    controllerMaxTokens: clampInt(
-      typeof next.controllerMaxTokens === "number"
-        ? next.controllerMaxTokens
-        : DEFAULT_GLOBAL_SETTINGS.controllerMaxTokens,
-      256,
-      32768,
     ),
     buildDetail: next.buildDetail === "full" || next.buildDetail === "names" ? next.buildDetail : "lite",
     treeGranularity: clampInt(

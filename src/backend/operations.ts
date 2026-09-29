@@ -34,6 +34,7 @@ import type {
 } from "../types";
 import type { IndexedEntry, RuntimeBook } from "./contracts";
 import {
+  getControllerTokenUsage,
   normalizeArrayPayload,
   parseJsonValue,
   runControllerJson as runSharedControllerJson,
@@ -352,7 +353,6 @@ async function subdivideLargeLeafNodes(
         ASSIGNMENTS_SCHEMA,
         {
           systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-          maxTokensOverride: Math.min(settings.controllerMaxTokens, 900),
         },
       );
       const parsed =
@@ -446,10 +446,12 @@ function buildControllerDebugPayload(input: {
       usage: input.usage ?? null,
       parsedFrom: input.parsedFrom ?? null,
       reasoningLength: input.reasoningLength ?? null,
+      reasoningTextLength: (input.rawReasoning ?? "").length,
+      reasoningTraceAvailable: !!input.rawReasoning?.trim(),
+      ...getControllerTokenUsage(input.usage ?? null),
       controllerSettings: {
         controllerConnectionId: input.settings.controllerConnectionId,
         controllerTemperature: input.settings.controllerTemperature,
-        controllerMaxTokens: input.settings.controllerMaxTokens,
         buildDetail: input.settings.buildDetail,
         treeGranularity: input.settings.treeGranularity,
         chunkTokens: input.settings.chunkTokens,
@@ -672,7 +674,6 @@ async function generateCategorySummary(
     CATEGORY_SUMMARIES_SCHEMA,
     {
       systemPrompt: SUMMARY_SYSTEM_PROMPT,
-      maxTokensOverride: Math.min(settings.controllerMaxTokens, 700),
     },
   );
   const parsed = controllerResult.parsed;
@@ -711,19 +712,6 @@ function buildEntrySummaryPrompt(entries: IndexedEntry[]): string {
   ].join("\n");
 }
 
-/**
- * Compute a token budget that scales with batch size so multi-entry batches don't
- * silently truncate mid-JSON. Single entry needs ~1800 tokens of headroom; each
- * additional entry adds ~320. Always clamped to the user's controllerMaxTokens.
- */
-function computeEntrySummaryTokenBudget(
-  settings: GlobalLoreRecallSettings,
-  entryCount: number,
-): number {
-  const requested = Math.max(1800, entryCount * 320);
-  return Math.min(settings.controllerMaxTokens, requested);
-}
-
 async function generateEntrySummaryBatch(
   entries: IndexedEntry[],
   settings: GlobalLoreRecallSettings,
@@ -740,7 +728,6 @@ async function generateEntrySummaryBatch(
     ENTRY_SUMMARIES_SCHEMA,
     {
       systemPrompt: SUMMARY_SYSTEM_PROMPT,
-      maxTokensOverride: computeEntrySummaryTokenBudget(settings, entries.length),
     },
   );
   const parsed = controllerResult.parsed;
@@ -1260,7 +1247,6 @@ export async function buildTreeWithLlm(
             ASSIGNMENTS_SCHEMA,
             {
               systemPrompt: CATEGORIZATION_SYSTEM_PROMPT,
-              maxTokensOverride: Math.min(settings.controllerMaxTokens, 1200),
             },
           );
           const parsed =

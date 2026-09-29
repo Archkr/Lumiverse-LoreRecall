@@ -23,7 +23,6 @@ export interface GlobalLoreRecallSettings {
   autoDetectPattern: string;
   controllerConnectionId: string | null;
   controllerTemperature: number;
-  controllerMaxTokens: number;
   buildDetail: BuildDetail;
   treeGranularity: number;
   chunkTokens: number;
