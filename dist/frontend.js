@@ -3362,6 +3362,7 @@ function setup(ctx) {
   drawerTab.root.appendChild(drawerRoot);
   cleanups.push(() => drawerRoot.remove());
   let currentState = null;
+  let readyRetryTimer = null;
   let refreshTimer = null;
   let pendingChatId = null;
   let drawerFeedFilter = "all";
@@ -5006,7 +5007,7 @@ function setup(ctx) {
   }
   function renderSourcePicker(state) {
     const section = createElement("section", "lore-section");
-    const head = createSectionHead("Lorebooks", "Recall automatically uses lorebooks attached in Lumiverse. Select any book here to edit its tree.");
+    const head = createSectionHead("Lorebooks", "Only lorebooks attached in Lumiverse appear here. Select one to edit its tree.");
     section.appendChild(head);
     const tools = createElement("div", "lore-cluster");
     const filterInput = createTextInput(sourceFilter, "Filter lorebooks...", (v) => {
@@ -5019,7 +5020,7 @@ function setup(ctx) {
     section.appendChild(tools);
     const bookIds = filterBooks(state, sourceFilter);
     if (!bookIds.length) {
-      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
       return section;
     }
     const list = createElement("div", "lore-rows");
@@ -5070,7 +5071,7 @@ function setup(ctx) {
   }
   function renderSourcesPanel(state) {
     const section = createElement("section", "lore-section");
-    section.appendChild(createSectionHead("Sources", "Lumiverse attachments determine retrieval. Every book remains available for tree editing."));
+    section.appendChild(createSectionHead("Sources", "Lorebooks attached in Lumiverse appear here for retrieval and tree editing."));
     const tools = createElement("div", "lore-cluster");
     const searchWrap = createElement("div", "lore-search-wrap");
     searchWrap.appendChild(makeIconSpan("search", "lore-search-wrap-icon"));
@@ -5098,7 +5099,7 @@ function setup(ctx) {
     section.appendChild(tip);
     const bookIds = filterBooks(state, sourceFilter);
     if (!bookIds.length) {
-      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
       return section;
     }
     const listWrap = createElement("div", "lore-scroll-panel");
@@ -5154,7 +5155,7 @@ function setup(ctx) {
     const managed = getManagedBookIds();
     const builtCount = managed.filter((bookId) => hasBuiltTree(bookId)).length;
     const needsBuild = managed.length - builtCount;
-    summary.appendChild(createSectionHead("Build", "Build trees for any lorebook, attached or unattached."));
+    summary.appendChild(createSectionHead("Build", "Build trees for lorebooks attached in Lumiverse."));
     const metrics = createElement("div", "lore-metrics");
     const metric = (value, label) => {
       const item = createElement("div", "lore-metric");
@@ -6189,6 +6190,10 @@ function setup(ctx) {
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw;
     if (message.type === "state") {
+      if (readyRetryTimer) {
+        clearInterval(readyRetryTimer);
+        readyRetryTimer = null;
+      }
       currentState = {
         ...message.state,
         globalSettings: normalizeGlobalSettings(message.state.globalSettings),
@@ -6217,7 +6222,7 @@ function setup(ctx) {
       clearOptimisticOperation();
       pendingTrackedRequest = null;
       pushNotice({
-        id: `backend-error:${Date.now()}`,
+        id: `backend-error:${message.message}`,
         tone: "error",
         title: "Lore Recall error",
         message: message.message
@@ -6252,9 +6257,15 @@ function setup(ctx) {
     if (typeof nextChatId !== "undefined")
       scheduleRefresh(nextChatId);
   }));
+  readyRetryTimer = setInterval(() => {
+    if (!currentState)
+      sendToBackend(ctx, { type: "ready" });
+  }, 20000);
   sendToBackend(ctx, { type: "ready" });
   render();
   return () => {
+    if (readyRetryTimer)
+      clearInterval(readyRetryTimer);
     if (refreshTimer)
       clearTimeout(refreshTimer);
     clearOptimisticOperation();

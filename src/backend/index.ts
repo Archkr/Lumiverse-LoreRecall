@@ -14,8 +14,8 @@ import type {
   RetrievalSession,
 } from "../types";
 import type { RuntimeBook } from "./contracts";
-import { DEFAULT_CHARACTER_CONFIG } from "../shared";
-import { loadAttachedRuntimeBooks, mapAttachedBookSources, type ActiveLoreEntry } from "./attached";
+import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
+import { loadAttachedRuntimeBooks, mapAttachedBookSources, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
@@ -48,13 +48,11 @@ import {
   buildConnectionOption,
   getRuntimeBooks,
   invalidateWorldBookListCache,
-  listAllWorldBooks,
   loadCharacterConfig,
   loadGlobalSettings,
   saveBookConfig,
   saveCharacterConfig,
   saveGlobalSettings,
-  toBookSummary,
 } from "./storage";
 
 const CONNECTION_CACHE_TTL_MS = 5000;
@@ -363,17 +361,26 @@ function scheduleLiveStatePush(userId: string, chatId: string): void {
 }
 
 async function buildState(userId: string, chatId?: string | null): Promise<StateBuildEnvelope> {
-  const [allBooks, activeChat, settings, connections] = await Promise.all([
-    listAllWorldBooks(userId),
-    resolveActiveChat(userId, chatId),
-    loadGlobalSettings(userId),
+  const stateIssues: FrontendState["diagnosticsResults"] = [];
+  const [activeChat, settings, connections] = await Promise.all([
+    resolveActiveChat(userId, chatId).catch((error: unknown) => {
+      stateIssues.push({
+        id: "active-chat-unavailable", severity: "warn", bookId: null,
+        title: "Active chat could not be loaded",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }),
+    loadGlobalSettings(userId).catch((error: unknown) => {
+      stateIssues.push({
+        id: "settings-unavailable", severity: "warn", bookId: null,
+        title: "Lore Recall settings could not be loaded",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return { ...DEFAULT_GLOBAL_SETTINGS };
+    }),
     listConnectionsCached(userId),
   ]);
-
-  const sortedBooks = allBooks
-    .slice()
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map(toBookSummary);
 
   const cachedPreview = activeChat?.id ? (previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null) : null;
   const cachedRetrievalFeed = activeChat?.id
@@ -387,7 +394,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     globalSettings: settings,
     hostSelectionAvailable: exactSelectionAvailable,
     characterConfig: null,
-    allWorldBooks: sortedBooks,
+    allWorldBooks: [],
     attachedBookSources: {},
     managedEntries: {},
     bookConfigs: {},
@@ -395,11 +402,11 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     treeIndexes: {},
     unassignedCounts: {},
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
-    diagnosticsResults: [],
+    diagnosticsResults: stateIssues,
     suggestedBookIds: [],
     retrievalFeed: cachedRetrievalFeed,
     preview: cachedPreview,
-    jevKeyStored: await hasJevKey(settings.jevProvider, userId),
+    jevKeyStored: await hasJevKey(settings.jevProvider, userId).catch(() => false),
   };
 
   if (!activeChat) {
@@ -407,10 +414,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   }
 
   const character = activeChat.character_id
-    ? await spindle.characters.get(activeChat.character_id, userId)
+    ? await spindle.characters.get(activeChat.character_id, userId).catch(() => null)
     : null;
   const characterConfig = character
-    ? await loadCharacterConfig(character.id, userId, character)
+    ? await loadCharacterConfig(character.id, userId, character).catch(() => ({ ...DEFAULT_CHARACTER_CONFIG }))
     : { ...DEFAULT_CHARACTER_CONFIG };
   const globalBooksApi = spindle.world_books as typeof spindle.world_books & {
     getGlobal?: (userId?: string) => Promise<string[]>;
@@ -426,11 +433,17 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id): id is string => typeof id === "string") : [],
     global: globalBookIds,
   });
-  const { runtimeBooks, staleIssues } = await getRuntimeBooks(
-    sortedBooks.map((book) => book.id), Object.keys(attachedBookSources), userId,
+  const attachedBookIds = Object.keys(attachedBookSources);
+  const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(
+    attachedBookIds, attachedBookIds, userId, 15_000,
   );
+  const sortedBooks = runtimeBooks
+    .map((book) => book.summary)
+    .sort((left, right) => left.name.localeCompare(right.name));
 
-  const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
+  const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
+    book.summary.id, book.cache.entries.map(toWorkspaceEntry),
+  ]));
   const bookConfigs = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.config]));
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
@@ -464,9 +477,16 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
             : []),
         ]
       : [];
-  const diagnosticsResults = buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections).concat(
+  const diagnosticsResults = stateIssues.concat(buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections),
     previewDiagnostics,
   );
+  for (const [bookId, reason] of Object.entries(loadIssues)) {
+    diagnosticsResults.push({
+      id: `attached-book-load:${bookId}`, severity: "warn", bookId,
+      title: "Attached lorebook could not be loaded",
+      detail: `${reason} Lumiverse will handle this book natively until it can be loaded.`,
+    });
+  }
   if (!exactSelectionAvailable) diagnosticsResults.unshift({
     id: "host-selection-unavailable", severity: "warn", bookId: null,
     title: "Lumiverse update needed for Lore Recall",
@@ -1000,7 +1020,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
   } catch (error: unknown) {
     const description = error instanceof Error ? error.message : "Unknown Lore Recall error";
-    spindle.log.error(`Lore Recall error: ${description}`);
+    spindle.log.error(`Lore Recall ${message.type} error: ${error instanceof Error ? error.stack ?? description : description}`);
     send({ type: "error", message: description }, userId);
   }
 });

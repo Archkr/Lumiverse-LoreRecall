@@ -446,35 +446,63 @@ export async function getRuntimeBooks(
   selectedBookIds: string[],
   attachedBookIds: string[],
   userId: string,
-): Promise<{ runtimeBooks: RuntimeBook[]; staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }> }> {
+  maxWaitMs?: number,
+): Promise<{
+  runtimeBooks: RuntimeBook[];
+  staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }>;
+  loadIssues: Record<string, string>;
+}> {
   const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }> = {};
+  const loadIssues: Record<string, string> = {};
   const runtimeBooks = (
     await Promise.all(
       selectedBookIds.map(async (bookId) => {
-        const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
-        if (!cache) return null;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const load = async () => {
+            const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
+            if (!cache) throw new Error("This lorebook is no longer available.");
 
-        const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
-        staleIssues[bookId] = { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs };
-
-        return {
-          summary: {
-            id: cache.bookId,
-            name: cache.name,
-            description: cache.description,
-            updatedAt: cache.bookUpdatedAt,
-          },
-          cache,
-          config,
-          tree: loadedTree.tree,
-          status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true),
-        } satisfies RuntimeBook;
+            const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
+            return {
+              book: {
+                summary: {
+                  id: cache.bookId,
+                  name: cache.name,
+                  description: cache.description,
+                  updatedAt: cache.bookUpdatedAt,
+                },
+                cache,
+                config,
+                tree: loadedTree.tree,
+                status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true),
+              } satisfies RuntimeBook,
+              staleIssue: { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs },
+            };
+          };
+          const loaded = maxWaitMs
+            ? await Promise.race([
+                load(),
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error("Loading this lorebook timed out.")), maxWaitMs);
+                }),
+              ])
+            : await load();
+          staleIssues[bookId] = loaded.staleIssue;
+          return loaded.book;
+        } catch (error) {
+          loadIssues[bookId] = error instanceof Error ? error.message : String(error);
+          delete staleIssues[bookId];
+          return null;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }),
     )
   ).filter((book): book is RuntimeBook => !!book);
 
-  return { runtimeBooks, staleIssues };
+  return { runtimeBooks, staleIssues, loadIssues };
 }
 
 export function computeSuggestedBookIds(

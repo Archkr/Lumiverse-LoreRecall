@@ -1,4 +1,5 @@
 import type { RuntimeBook, IndexedEntry } from "./contracts";
+import type { ManagedBookEntryView } from "../types";
 import { EXTENSION_KEY, normalizeEntryRecallMeta, truncateText } from "../shared";
 import { getRuntimeBooks, isReadableBook } from "./storage";
 
@@ -31,6 +32,30 @@ export function mapAttachedBookSources(input: {
   add(input.chat, "chat");
   add(input.global, "global");
   return sources;
+}
+
+/** Workspace messages contain editable metadata, never full lore entry bodies. */
+export function toWorkspaceEntry(entry: IndexedEntry): ManagedBookEntryView {
+  return {
+    entryId: entry.entryId,
+    worldBookId: entry.worldBookId,
+    worldBookName: entry.worldBookName,
+    comment: entry.comment,
+    key: entry.key,
+    keysecondary: entry.keysecondary,
+    disabled: entry.disabled,
+    updatedAt: entry.updatedAt,
+    groupName: entry.groupName,
+    constant: entry.constant,
+    selective: entry.selective,
+    vectorized: entry.vectorized,
+    previewText: entry.previewText,
+    label: entry.label,
+    aliases: entry.aliases,
+    summary: entry.summary,
+    collapsedText: entry.collapsedText,
+    tags: entry.tags,
+  };
 }
 
 function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: IndexedEntry): IndexedEntry {

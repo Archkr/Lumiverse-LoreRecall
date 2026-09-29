@@ -27,7 +27,7 @@ The workspace and live retrieval feed show attached sources, routed categories, 
 - **Dynamic entry cap** limits entries after JEV filtering. Constants do not count against it.
 - **Context messages** controls how much recent chat the model uses for routing and selection.
 - **JEV approval threshold** defaults to `0.6`. Provider, model, and timeout are adjustable.
-- Existing trees, saved manual book selections, and version 2 snapshots remain available. Retrieval follows current Lumiverse attachments; unattached saved selections do not activate. Legacy top-level branches are placed under the closest fixed category while retaining their nested structure; ambiguous branches go under Other.
+- Existing trees, saved manual book selections, and version 2 snapshots remain available. The workspace shows only lorebooks attached to the current chat, persona, character, or globally; unattached saved selections do not activate. Legacy top-level branches are placed under the closest fixed category while retaining their nested structure; ambiguous branches go under Other.
 - Book and entry editing permissions continue to apply to tree changes and native flags.
 
 ## Development

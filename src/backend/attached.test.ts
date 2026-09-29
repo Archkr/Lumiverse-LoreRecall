@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_BOOK_CONFIG, createEmptyTreeIndex } from "../shared";
 import type { RuntimeBook, IndexedEntry } from "./contracts";
-import { mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks } from "./attached";
+import { mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
 
 function book(): RuntimeBook {
   const cached: IndexedEntry = {
@@ -58,5 +58,13 @@ describe("attached lorebooks", () => {
     expect(active.cache.entries[0]).toMatchObject({ content: "updated", disabled: true });
     expect(active.cache.entries[1]).toMatchObject({ content: "newly attached content", constant: true });
     expect(book().cache.entries[0].content).toBe("stale");
+  });
+
+  test("workspace entry data omits full lore content", () => {
+    const entry = book().cache.entries[0];
+    const view = toWorkspaceEntry(entry);
+    expect(view).toMatchObject({ entryId: "old", label: "Old", previewText: "stale" });
+    expect("content" in view).toBe(false);
+    expect("legacyTree" in view).toBe(false);
   });
 });

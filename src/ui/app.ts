@@ -149,6 +149,7 @@ export function setup(ctx: SpindleFrontendContext) {
   cleanups.push(() => drawerRoot.remove());
 
   let currentState: FrontendState | null = null;
+  let readyRetryTimer: ReturnType<typeof setInterval> | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChatId: string | null = null;
   let drawerFeedFilter: DrawerFeedFilter = "all";
@@ -2103,7 +2104,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const head = createSectionHead(
       "Lorebooks",
-      "Recall automatically uses lorebooks attached in Lumiverse. Select any book here to edit its tree.",
+      "Only lorebooks attached in Lumiverse appear here. Select one to edit its tree.",
     );
     section.appendChild(head);
 
@@ -2119,7 +2120,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const bookIds = filterBooks(state, sourceFilter);
     if (!bookIds.length) {
-      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
       return section;
     }
 
@@ -2196,7 +2197,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderSourcesPanel(state: FrontendState): HTMLElement {
     const section = createElement("section", "lore-section");
-    section.appendChild(createSectionHead("Sources", "Lumiverse attachments determine retrieval. Every book remains available for tree editing."));
+    section.appendChild(createSectionHead("Sources", "Lorebooks attached in Lumiverse appear here for retrieval and tree editing."));
 
     const tools = createElement("div", "lore-cluster");
     const searchWrap = createElement("div", "lore-search-wrap");
@@ -2233,7 +2234,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const bookIds = filterBooks(state, sourceFilter);
     if (!bookIds.length) {
-      section.appendChild(createEmpty("No matches", "No lorebooks match this filter."));
+      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
       return section;
     }
 
@@ -2291,7 +2292,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const managed = getManagedBookIds();
     const builtCount = managed.filter((bookId) => hasBuiltTree(bookId)).length;
     const needsBuild = managed.length - builtCount;
-    summary.appendChild(createSectionHead("Build", "Build trees for any lorebook, attached or unattached."));
+    summary.appendChild(createSectionHead("Build", "Build trees for lorebooks attached in Lumiverse."));
     const metrics = createElement("div", "lore-metrics");
     const metric = (value: string | number, label: string) => {
       const item = createElement("div", "lore-metric");
@@ -3759,6 +3760,10 @@ export function setup(ctx: SpindleFrontendContext) {
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw as BackendToFrontend;
     if (message.type === "state") {
+      if (readyRetryTimer) {
+        clearInterval(readyRetryTimer);
+        readyRetryTimer = null;
+      }
       currentState = {
         ...message.state,
         globalSettings: normalizeGlobalSettings(message.state.globalSettings),
@@ -3787,7 +3792,7 @@ export function setup(ctx: SpindleFrontendContext) {
       clearOptimisticOperation();
       pendingTrackedRequest = null;
       pushNotice({
-        id: `backend-error:${Date.now()}`,
+        id: `backend-error:${message.message}`,
         tone: "error",
         title: "Lore Recall error",
         message: message.message,
@@ -3826,10 +3831,17 @@ export function setup(ctx: SpindleFrontendContext) {
     }),
   );
 
+  // A frontend can mount while its WebSocket is still reconnecting. The host
+  // silently drops sends during that gap, so repeat the initial request until
+  // the first state arrives.
+  readyRetryTimer = setInterval(() => {
+    if (!currentState) sendToBackend(ctx, { type: "ready" });
+  }, 20_000);
   sendToBackend(ctx, { type: "ready" });
   render();
 
   return () => {
+    if (readyRetryTimer) clearInterval(readyRetryTimer);
     if (refreshTimer) clearTimeout(refreshTimer);
     clearOptimisticOperation();
     if (modalDismissUnsub) modalDismissUnsub();

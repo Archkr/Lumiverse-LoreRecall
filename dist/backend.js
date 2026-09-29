@@ -685,14 +685,6 @@ async function listAllEntries(worldBookId, userId) {
   }
   return entries;
 }
-function toBookSummary(book) {
-  return {
-    id: book.id,
-    name: book.name,
-    description: book.description,
-    updatedAt: book.updated_at
-  };
-}
 function buildConnectionOption(connection) {
   return {
     id: connection.id,
@@ -858,29 +850,52 @@ function buildBookStatus(bookId, config, tree, entries, attachedToCharacter, sel
     warnings
   };
 }
-async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId) {
+async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId, maxWaitMs) {
   const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues = {};
+  const loadIssues = {};
   const runtimeBooks = (await Promise.all(selectedBookIds.map(async (bookId) => {
-    const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
-    if (!cache)
+    let timer;
+    try {
+      const load = async () => {
+        const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
+        if (!cache)
+          throw new Error("This lorebook is no longer available.");
+        const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
+        return {
+          book: {
+            summary: {
+              id: cache.bookId,
+              name: cache.name,
+              description: cache.description,
+              updatedAt: cache.bookUpdatedAt
+            },
+            cache,
+            config,
+            tree: loadedTree.tree,
+            status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true)
+          },
+          staleIssue: { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs }
+        };
+      };
+      const loaded = maxWaitMs ? await Promise.race([
+        load(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Loading this lorebook timed out.")), maxWaitMs);
+        })
+      ]) : await load();
+      staleIssues[bookId] = loaded.staleIssue;
+      return loaded.book;
+    } catch (error) {
+      loadIssues[bookId] = error instanceof Error ? error.message : String(error);
+      delete staleIssues[bookId];
       return null;
-    const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
-    staleIssues[bookId] = { staleEntryRefs: loadedTree.staleEntryRefs, staleNodeRefs: loadedTree.staleNodeRefs };
-    return {
-      summary: {
-        id: cache.bookId,
-        name: cache.name,
-        description: cache.description,
-        updatedAt: cache.bookUpdatedAt
-      },
-      cache,
-      config,
-      tree: loadedTree.tree,
-      status: buildBookStatus(bookId, config, loadedTree.tree, cache.entries, attachedBookIdSet.has(bookId), true)
-    };
+    } finally {
+      if (timer)
+        clearTimeout(timer);
+    }
   }))).filter((book) => !!book);
-  return { runtimeBooks, staleIssues };
+  return { runtimeBooks, staleIssues, loadIssues };
 }
 function normalizeEntryMetaForWrite(raw, seed) {
   const normalized = normalizeEntryRecallMeta(raw, seed);
@@ -914,6 +929,28 @@ function mapAttachedBookSources(input) {
   add(input.chat, "chat");
   add(input.global, "global");
   return sources;
+}
+function toWorkspaceEntry(entry) {
+  return {
+    entryId: entry.entryId,
+    worldBookId: entry.worldBookId,
+    worldBookName: entry.worldBookName,
+    comment: entry.comment,
+    key: entry.key,
+    keysecondary: entry.keysecondary,
+    disabled: entry.disabled,
+    updatedAt: entry.updatedAt,
+    groupName: entry.groupName,
+    constant: entry.constant,
+    selective: entry.selective,
+    vectorized: entry.vectorized,
+    previewText: entry.previewText,
+    label: entry.label,
+    aliases: entry.aliases,
+    summary: entry.summary,
+    collapsedText: entry.collapsedText,
+    tags: entry.tags
+  };
 }
 function indexedFromHost(entry, book, cached) {
   const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
@@ -4063,13 +4100,30 @@ function scheduleLiveStatePush(userId, chatId) {
   scheduledStatePushes.set(key, handle);
 }
 async function buildState(userId, chatId) {
-  const [allBooks, activeChat, settings, connections] = await Promise.all([
-    listAllWorldBooks(userId),
-    resolveActiveChat(userId, chatId),
-    loadGlobalSettings(userId),
+  const stateIssues = [];
+  const [activeChat, settings, connections] = await Promise.all([
+    resolveActiveChat(userId, chatId).catch((error) => {
+      stateIssues.push({
+        id: "active-chat-unavailable",
+        severity: "warn",
+        bookId: null,
+        title: "Active chat could not be loaded",
+        detail: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }),
+    loadGlobalSettings(userId).catch((error) => {
+      stateIssues.push({
+        id: "settings-unavailable",
+        severity: "warn",
+        bookId: null,
+        title: "Lore Recall settings could not be loaded",
+        detail: error instanceof Error ? error.message : String(error)
+      });
+      return { ...DEFAULT_GLOBAL_SETTINGS };
+    }),
     listConnectionsCached(userId)
   ]);
-  const sortedBooks = allBooks.slice().sort((left, right) => left.name.localeCompare(right.name)).map(toBookSummary);
   const cachedPreview = activeChat?.id ? previewCache.get(getPreviewCacheKey(userId, activeChat.id)) ?? null : null;
   const cachedRetrievalFeed = activeChat?.id ? cloneRetrievalFeedState(retrievalFeedCache.get(getPreviewCacheKey(userId, activeChat.id))) : { sessions: [] };
   const baseState = {
@@ -4079,7 +4133,7 @@ async function buildState(userId, chatId) {
     globalSettings: settings,
     hostSelectionAvailable: exactSelectionAvailable,
     characterConfig: null,
-    allWorldBooks: sortedBooks,
+    allWorldBooks: [],
     attachedBookSources: {},
     managedEntries: {},
     bookConfigs: {},
@@ -4087,17 +4141,17 @@ async function buildState(userId, chatId) {
     treeIndexes: {},
     unassignedCounts: {},
     availableConnections: connections.map(buildConnectionOption).sort((left, right) => left.name.localeCompare(right.name)),
-    diagnosticsResults: [],
+    diagnosticsResults: stateIssues,
     suggestedBookIds: [],
     retrievalFeed: cachedRetrievalFeed,
     preview: cachedPreview,
-    jevKeyStored: await hasJevKey(settings.jevProvider, userId)
+    jevKeyStored: await hasJevKey(settings.jevProvider, userId).catch(() => false)
   };
   if (!activeChat) {
     return { state: baseState };
   }
-  const character = activeChat.character_id ? await spindle.characters.get(activeChat.character_id, userId) : null;
-  const characterConfig = character ? await loadCharacterConfig(character.id, userId, character) : { ...DEFAULT_CHARACTER_CONFIG };
+  const character = activeChat.character_id ? await spindle.characters.get(activeChat.character_id, userId).catch(() => null) : null;
+  const characterConfig = character ? await loadCharacterConfig(character.id, userId, character).catch(() => ({ ...DEFAULT_CHARACTER_CONFIG })) : { ...DEFAULT_CHARACTER_CONFIG };
   const globalBooksApi = spindle.world_books;
   const [globalBookIds, activePersona] = await Promise.all([
     globalBooksApi.getGlobal?.(userId).catch(() => []) ?? Promise.resolve([]),
@@ -4110,8 +4164,13 @@ async function buildState(userId, chatId) {
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
     global: globalBookIds
   });
-  const { runtimeBooks, staleIssues } = await getRuntimeBooks(sortedBooks.map((book) => book.id), Object.keys(attachedBookSources), userId);
-  const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.cache.entries]));
+  const attachedBookIds = Object.keys(attachedBookSources);
+  const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
+  const sortedBooks = runtimeBooks.map((book) => book.summary).sort((left, right) => left.name.localeCompare(right.name));
+  const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
+    book.summary.id,
+    book.cache.entries.map(toWorkspaceEntry)
+  ]));
   const bookConfigs = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.config]));
   const bookStatuses = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.status]));
   const treeIndexes = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, book.tree]));
@@ -4137,7 +4196,16 @@ async function buildState(userId, chatId) {
       }
     ] : []
   ] : [];
-  const diagnosticsResults = buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections).concat(previewDiagnostics);
+  const diagnosticsResults = stateIssues.concat(buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections), previewDiagnostics);
+  for (const [bookId, reason] of Object.entries(loadIssues)) {
+    diagnosticsResults.push({
+      id: `attached-book-load:${bookId}`,
+      severity: "warn",
+      bookId,
+      title: "Attached lorebook could not be loaded",
+      detail: `${reason} Lumiverse will handle this book natively until it can be loaded.`
+    });
+  }
   if (!exactSelectionAvailable)
     diagnosticsResults.unshift({
       id: "host-selection-unavailable",
@@ -4587,7 +4655,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
   } catch (error) {
     const description = error instanceof Error ? error.message : "Unknown Lore Recall error";
-    spindle.log.error(`Lore Recall error: ${description}`);
+    spindle.log.error(`Lore Recall ${message.type} error: ${error instanceof Error ? error.stack ?? description : description}`);
     send({ type: "error", message: description }, userId);
   }
 });
