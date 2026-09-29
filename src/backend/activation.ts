@@ -1,0 +1,150 @@
+import type { LlmMessageDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
+import type { RetrievalPreview } from "../types";
+import type { RuntimeBook } from "./contracts";
+
+export interface PreparedRecallRun {
+  id: string;
+  userId: string;
+  chatId: string;
+  createdAt: number;
+  handledBookIds: string[];
+  entries: WorldBookEntryDTO[];
+  sourceContents: Record<string, string>;
+  preview: RetrievalPreview;
+  runtimeBooks: RuntimeBook[];
+  sessionId: string;
+  status: "prepared" | "claimed" | "native";
+}
+
+export type RecallClaim =
+  | { run: PreparedRecallRun; rejected: []; reason: null }
+  | { run: null; rejected: PreparedRecallRun[]; reason: string | null };
+
+const RUN_TTL_MS = 5 * 60_000;
+
+/** Only one unclaimed run may take over a chat. Overlapping runs stay native. */
+export class RecallRunStore {
+  private readonly runs = new Map<string, PreparedRecallRun>();
+  private readonly turns = new Map<string, {
+    userId: string; chatId: string; createdAt: number;
+    status: "preparing" | "prepared" | "native" | "consumed" | "claimed";
+  }>();
+
+  begin(id: string, userId: string, chatId: string): void {
+    this.prune();
+    this.turns.set(id, { userId, chatId, createdAt: Date.now(), status: "preparing" });
+  }
+
+  stayNative(id: string): void {
+    const turn = this.turns.get(id);
+    if (turn && turn.status !== "consumed" && turn.status !== "claimed") turn.status = "native";
+  }
+
+  isPassThrough(id: string): boolean {
+    this.prune();
+    const turn = this.turns.get(id);
+    return !!turn && turn.status !== "claimed";
+  }
+
+  put(run: PreparedRecallRun): boolean {
+    this.prune();
+    const turn = this.turns.get(run.id);
+    if (turn && turn.status !== "preparing" && turn.status !== "prepared") return false;
+    this.turns.set(run.id, { userId: run.userId, chatId: run.chatId, createdAt: run.createdAt, status: "prepared" });
+    this.runs.set(run.id, run);
+    return true;
+  }
+
+  get(id: string): PreparedRecallRun | undefined {
+    this.prune();
+    return this.runs.get(id);
+  }
+
+  claim(userId: string, chatId: string, availableEntries: readonly { id: string; content: string; disabled?: boolean }[]): RecallClaim {
+    this.prune();
+    const candidates = [...this.turns.entries()].filter(([, turn]) =>
+      turn.userId === userId && turn.chatId === chatId && turn.status !== "claimed" && turn.status !== "consumed");
+    if (candidates.length !== 1) {
+      const rejected: PreparedRecallRun[] = [];
+      for (const [id, turn] of candidates) {
+        turn.status = "consumed";
+        const run = this.runs.get(id);
+        if (run) { run.status = "native"; rejected.push(run); }
+      }
+      return { run: null, rejected, reason: candidates.length > 1 ? "Overlapping generations prevented a safe Recall takeover." : null };
+    }
+    const [id, turn] = candidates[0];
+    const run = this.runs.get(id);
+    if (turn.status !== "prepared" || !run) {
+      turn.status = "consumed";
+      return { run: null, rejected: [], reason: null };
+    }
+    const available = new Map(availableEntries.map((entry) => [entry.id, entry]));
+    if (Object.entries(run.sourceContents).some(([id, content]) => {
+      const current = available.get(id);
+      return !current || current.disabled || current.content !== content;
+    })) {
+      run.status = "native";
+      turn.status = "consumed";
+      return { run: null, rejected: [run], reason: "A selected entry changed or became disabled before activation." };
+    }
+    run.status = "claimed";
+    turn.status = "claimed";
+    return { run, rejected: [], reason: null };
+  }
+
+  remove(id: string): void {
+    this.runs.delete(id);
+    this.turns.delete(id);
+  }
+
+  private prune(): void {
+    const now = Date.now();
+    for (const [id, turn] of this.turns) {
+      if (now - turn.createdAt > RUN_TTL_MS) this.remove(id);
+    }
+  }
+}
+
+export function suppressedNativeEntryIds(
+  run: PreparedRecallRun,
+  entries: readonly { id: string; world_book_id: string }[],
+): string[] {
+  const handled = new Set(run.handledBookIds);
+  return entries.filter((entry) => handled.has(entry.world_book_id)).map((entry) => entry.id);
+}
+
+function entryRole(role: string | null): LlmMessageDTO["role"] {
+  return role === "user" || role === "assistant" ? role : "system";
+}
+
+function insertionIndex(entry: WorldBookEntryDTO, messages: readonly LlmMessageDTO[]): number {
+  const history = messages.flatMap((message, index) =>
+    (message as LlmMessageDTO & { __isChatHistory?: boolean }).__isChatHistory ? [index] : []);
+  const firstHistory = history[0] ?? messages.length;
+  if (entry.position === 0) return 0;
+  if (entry.position === 4 && history.length) {
+    const depth = Math.max(0, Math.floor(entry.depth || 0));
+    return depth === 0 ? history[history.length - 1] + 1 : history[Math.max(0, history.length - depth)];
+  }
+  // The final prompt does not expose native author-note, marker, or outlet
+  // slots. Place those entries beside the other pre-history lore instead.
+  return firstHistory;
+}
+
+export function injectRecallEntries(
+  messages: readonly LlmMessageDTO[],
+  entries: readonly WorldBookEntryDTO[],
+): { messages: LlmMessageDTO[]; breakdown: { messageIndex: number; name: string }[] } {
+  const inserted = [...messages];
+  const planned = entries.map((entry, order) => ({ entry, order, index: insertionIndex(entry, messages) }))
+    .sort((left, right) => left.index - right.index || left.order - right.order);
+  const breakdown: { messageIndex: number; name: string }[] = [];
+  for (let offset = 0; offset < planned.length; offset++) {
+    const { entry, index } = planned[offset];
+    const messageIndex = index + offset;
+    inserted.splice(messageIndex, 0, { role: entryRole(entry.role), content: entry.content });
+    breakdown.push({ messageIndex, name: entry.comment?.trim() || "Lore Recall entry" });
+  }
+  return { messages: inserted, breakdown };
+}

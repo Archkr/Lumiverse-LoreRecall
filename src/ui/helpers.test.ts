@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FrontendState } from "../types";
-import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getSourceListPresentation, isRecallActive } from "./helpers";
+import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getRecallStatus, getSourceListPresentation, isRecallActive } from "./helpers";
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
   return {
@@ -67,6 +67,9 @@ describe("filterBooks", () => {
     expect(isRecallActive(state)).toBe(true);
     expect(isRecallActive({ ...state, hostSelectionAvailable: false })).toBe(false);
     expect(isRecallActive({ ...state, globalSettings: { ...state.globalSettings, enabled: false } })).toBe(false);
+    expect(getRecallStatus(state).label).toBe("Retrieval on");
+    expect(getRecallStatus({ ...state, hostSelectionAvailable: false }).label).toBe("Retrieval unavailable");
+    expect(getRecallStatus({ ...state, globalSettings: { ...state.globalSettings, enabled: false } }).label).toBe("Retrieval off");
   });
 
   test("searches every lorebook while a query is active", () => {

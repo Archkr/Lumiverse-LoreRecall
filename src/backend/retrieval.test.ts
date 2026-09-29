@@ -111,6 +111,16 @@ describe("category retrieval", () => {
     expect(result?.retrievalComplete).toBe(false);
   });
 
+  test("an expired pre-generation deadline falls back before model selection", async () => {
+    const prompts = host();
+    const result = await buildRetrievalPreview([{ role: "user", content: "Talk about the cast" }],
+      DEFAULT_GLOBAL_SETTINGS, DEFAULT_CHARACTER_CONFIG, [book([entry("cast-0")])], "user",
+      { deadlineAt: Date.now() - 1 });
+    expect(prompts).toHaveLength(0);
+    expect(result?.retrievalComplete).toBe(false);
+    expect(result?.fallbackReason).toContain("ran out of time");
+  });
+
   test("valid empty category and entry selections complete without native fallback", async () => {
     host({ emptyCategories: true });
     const noCategory = await preview([entry("cast-0")]);

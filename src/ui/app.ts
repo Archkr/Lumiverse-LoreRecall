@@ -44,8 +44,8 @@ import {
   getCategoryBreadcrumb,
   getCategoryOptions,
   getEntryBreadcrumb,
+  getRecallStatus,
   getSourceListPresentation,
-  isRecallActive,
   openSettingsWorkspace,
   readChatIdFromSettingsUpdate,
   truncateMiddle,
@@ -1755,10 +1755,15 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const feed = createElement("div", "lore-feed lore-feed-stream");
     if (!sessions.length) {
+      const empty = !state.hostSelectionAvailable
+        ? ["Lore Recall is unavailable", "Check the diagnostics and Lore Recall's extension permissions. Native lorebook activation remains active."]
+        : !state.globalSettings.enabled
+          ? ["Lore Recall is off", "Enable Lore Recall in Retrieval settings to start recording activity."]
+          : ["No retrieval activity yet", "Send a message to watch a compact stream of retrieval activity for this chat."];
       feed.appendChild(
         createEmpty(
-          "No retrieval activity yet",
-          "Send a message to watch a compact stream of retrieval activity for this chat.",
+          empty[0],
+          empty[1],
           null,
           "feed",
         ),
@@ -1892,7 +1897,6 @@ export function setup(ctx: SpindleFrontendContext) {
     const state = currentState;
     const managed = getManagedBookIds();
     const sourceList = state ? getSourceListPresentation(state, "") : null;
-    const enabled = isRecallActive(state);
     const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
 
     // --- Brand block --------------------------------------------------
@@ -1914,7 +1918,8 @@ export function setup(ctx: SpindleFrontendContext) {
     copy.appendChild(title);
 
     const meta = createElement("div", "lore-page-meta");
-    meta.appendChild(createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"));
+    const retrievalStatus = getRecallStatus(state);
+    meta.appendChild(createStatus(retrievalStatus.label, retrievalStatus.tone));
     if (state?.activeChatId) {
       meta.appendChild(createElement("span", "sep", "·"));
       meta.appendChild(createElement("span", "lore-mono", truncateMiddle(state.activeChatId)));
@@ -2065,7 +2070,6 @@ export function setup(ctx: SpindleFrontendContext) {
     const state = currentState;
     const selectedBook = getSelectedBookSummary();
     const managedCount = Object.keys(state?.attachedBookSources ?? {}).length;
-    const enabled = isRecallActive(state);
 
     const copy = createElement("div", "lore-stack");
     copy.style.gap = "0";
@@ -2105,7 +2109,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const actions = createElement("div", "lore-cluster");
     actions.append(
-      createStatus(enabled ? "Retrieval on" : "Retrieval off", enabled ? "on" : "off"),
+      createStatus(getRecallStatus(state).label, getRecallStatus(state).tone),
       createTag(`${managedCount} attached`, managedCount ? "good" : "accent"),
     );
     if (selectedBook) actions.appendChild(createTag(`Book: ${clipText(selectedBook.name, 26)}`, "accent"));

@@ -987,78 +987,6 @@ function buildAttachedWorkspaceState(scopes, loadedBooks, missingBookIds = []) {
     attachedBookScopes: existingScopes
   };
 }
-function indexedFromHost(entry, book, cached) {
-  const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
-    entryId: entry.id,
-    comment: entry.comment,
-    key: [...entry.key]
-  });
-  if (cached) {
-    return {
-      ...cached,
-      ...meta,
-      disabled: entry.disabled,
-      constant: entry.constant,
-      content: entry.content,
-      previewText: truncateText(entry.content, 220),
-      comment: entry.comment,
-      key: [...entry.key],
-      keysecondary: [...entry.keysecondary]
-    };
-  }
-  return {
-    entryId: entry.id,
-    worldBookId: book.summary.id,
-    worldBookName: book.summary.name,
-    comment: entry.comment,
-    key: [...entry.key],
-    keysecondary: [...entry.keysecondary],
-    disabled: entry.disabled,
-    constant: entry.constant,
-    content: entry.content,
-    previewText: truncateText(entry.content, 220),
-    updatedAt: book.summary.updatedAt,
-    groupName: "",
-    selective: false,
-    vectorized: false,
-    legacyTree: null,
-    ...meta
-  };
-}
-function overlayActiveEntries(books, entries) {
-  const activeByBook = new Map;
-  for (const entry of entries) {
-    const list = activeByBook.get(entry.world_book_id) ?? [];
-    list.push(entry);
-    activeByBook.set(entry.world_book_id, list);
-  }
-  return books.map((book) => {
-    const cachedById = new Map(book.cache.entries.map((entry) => [entry.entryId, entry]));
-    return {
-      ...book,
-      cache: {
-        ...book.cache,
-        entries: (activeByBook.get(book.summary.id) ?? []).filter((entry) => entry.content.trim()).map((entry) => indexedFromHost(entry, book, cachedById.get(entry.id)))
-      }
-    };
-  });
-}
-function recallEligibleBooks(books) {
-  return books.filter((book) => book.config.enabled && isReadableBook(book.config));
-}
-async function loadAttachedRuntimeBooks(entries, userId) {
-  const bookIds = [...new Set(entries.map((entry) => entry.world_book_id))];
-  const sources = {};
-  for (const entry of entries) {
-    if (!(entry.world_book_id in sources))
-      sources[entry.world_book_id] = entry.book_source ?? "attached";
-  }
-  const { runtimeBooks } = await getRuntimeBooks(bookIds, bookIds, userId);
-  return {
-    books: overlayActiveEntries(recallEligibleBooks(runtimeBooks), entries),
-    sources
-  };
-}
 
 // src/backend/controller-json.ts
 var THINK_BLOCK_RE = /<think[\s\S]*?<\/think>/gi;
@@ -1794,10 +1722,14 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   let controllerUsed = false;
   const controllerAllowed = options.allowController !== false;
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
-  const modelDeadline = Date.now() + 155000;
+  const modelDeadline = Math.min(Date.now() + 155000, options.deadlineAt ?? Infinity);
   const runModel = async (prompt) => {
     if (!controllerAllowed)
       return null;
+    if (options.signal?.aborted) {
+      retrievalComplete = false;
+      return null;
+    }
     const remainingMs = modelDeadline - Date.now();
     if (remainingMs < 1000) {
       issues.push("Model selection ran out of time; remaining batches were skipped.");
@@ -1805,6 +1737,8 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
       return null;
     }
     const abort = new AbortController;
+    const onAbort = () => abort.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30000));
     try {
       const response = await runControllerJson(prompt, settings, userId, { connectionId, temperatureOverride: 0.1, signal: abort.signal });
@@ -1818,6 +1752,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
       return null;
     } finally {
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
     }
   };
   const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
@@ -1947,6 +1882,116 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
     controllerUsed,
     resolvedConnectionId: controllerUsed ? connectionId : null
   };
+}
+
+// src/backend/activation.ts
+var RUN_TTL_MS = 5 * 60000;
+
+class RecallRunStore {
+  runs = new Map;
+  turns = new Map;
+  begin(id, userId, chatId) {
+    this.prune();
+    this.turns.set(id, { userId, chatId, createdAt: Date.now(), status: "preparing" });
+  }
+  stayNative(id) {
+    const turn = this.turns.get(id);
+    if (turn && turn.status !== "consumed" && turn.status !== "claimed")
+      turn.status = "native";
+  }
+  isPassThrough(id) {
+    this.prune();
+    const turn = this.turns.get(id);
+    return !!turn && turn.status !== "claimed";
+  }
+  put(run) {
+    this.prune();
+    const turn = this.turns.get(run.id);
+    if (turn && turn.status !== "preparing" && turn.status !== "prepared")
+      return false;
+    this.turns.set(run.id, { userId: run.userId, chatId: run.chatId, createdAt: run.createdAt, status: "prepared" });
+    this.runs.set(run.id, run);
+    return true;
+  }
+  get(id) {
+    this.prune();
+    return this.runs.get(id);
+  }
+  claim(userId, chatId, availableEntries) {
+    this.prune();
+    const candidates = [...this.turns.entries()].filter(([, turn]) => turn.userId === userId && turn.chatId === chatId && turn.status !== "claimed" && turn.status !== "consumed");
+    if (candidates.length !== 1) {
+      const rejected = [];
+      for (const [id, turn] of candidates) {
+        turn.status = "consumed";
+        const run = this.runs.get(id);
+        if (run) {
+          run.status = "native";
+          rejected.push(run);
+        }
+      }
+      return { run: null, rejected, reason: candidates.length > 1 ? "Overlapping generations prevented a safe Recall takeover." : null };
+    }
+    const [id, turn] = candidates[0];
+    const run = this.runs.get(id);
+    if (turn.status !== "prepared" || !run) {
+      turn.status = "consumed";
+      return { run: null, rejected: [], reason: null };
+    }
+    const available = new Map(availableEntries.map((entry) => [entry.id, entry]));
+    if (Object.entries(run.sourceContents).some(([id, content]) => {
+      const current = available.get(id);
+      return !current || current.disabled || current.content !== content;
+    })) {
+      run.status = "native";
+      turn.status = "consumed";
+      return { run: null, rejected: [run], reason: "A selected entry changed or became disabled before activation." };
+    }
+    run.status = "claimed";
+    turn.status = "claimed";
+    return { run, rejected: [], reason: null };
+  }
+  remove(id) {
+    this.runs.delete(id);
+    this.turns.delete(id);
+  }
+  prune() {
+    const now = Date.now();
+    for (const [id, turn] of this.turns) {
+      if (now - turn.createdAt > RUN_TTL_MS)
+        this.remove(id);
+    }
+  }
+}
+function suppressedNativeEntryIds(run, entries) {
+  const handled = new Set(run.handledBookIds);
+  return entries.filter((entry) => handled.has(entry.world_book_id)).map((entry) => entry.id);
+}
+function entryRole(role) {
+  return role === "user" || role === "assistant" ? role : "system";
+}
+function insertionIndex(entry, messages) {
+  const history = messages.flatMap((message, index) => message.__isChatHistory ? [index] : []);
+  const firstHistory = history[0] ?? messages.length;
+  if (entry.position === 0)
+    return 0;
+  if (entry.position === 4 && history.length) {
+    const depth = Math.max(0, Math.floor(entry.depth || 0));
+    return depth === 0 ? history[history.length - 1] + 1 : history[Math.max(0, history.length - depth)];
+  }
+  return firstHistory;
+}
+function injectRecallEntries(messages, entries) {
+  const inserted = [...messages];
+  const planned = entries.map((entry, order) => ({ entry, order, index: insertionIndex(entry, messages) })).sort((left, right) => left.index - right.index || left.order - right.order);
+  const breakdown = [];
+  for (let offset = 0;offset < planned.length; offset++) {
+    const { entry, index } = planned[offset];
+    const messageIndex = index + offset;
+    inserted.splice(messageIndex, 0, { role: entryRole(entry.role), content: entry.content });
+    breakdown.push({ messageIndex, name: entry.comment?.trim() || "Lore Recall entry" });
+  }
+  return { messages: inserted, breakdown };
 }
 
 // src/backend/granularity.ts
@@ -3897,11 +3942,46 @@ var previewCache = new Map;
 var retrievalFeedCache = new Map;
 var scheduledStatePushes = new Map;
 var dynamicFeedbackByChat = new Map;
+var preparedRecallRuns = new RecallRunStore;
 var DYNAMIC_FEEDBACK_RECENT_WINDOW = 3;
 async function resolveActiveChat(userId, chatId) {
   if (chatId)
     return spindle.chats.get(chatId, userId);
   return spindle.chats.getActive(userId);
+}
+async function getTurnAttachmentScopes(chat, userId, selectedPersonaId, activeCharacter, strict = true) {
+  const sourceCharacters = await Promise.all(attachedCharacterIds(chat.character_id, chat.metadata ?? {}).map((id) => id === activeCharacter?.id ? Promise.resolve(activeCharacter) : spindle.characters.get(id, userId).catch((error) => {
+    if (strict)
+      throw error;
+    return null;
+  })));
+  const globalBooksApi = spindle.world_books;
+  if (typeof globalBooksApi.getGlobal !== "function" && strict)
+    throw new Error("Global lorebook attachments are unavailable.");
+  const [globalBookIds, activePersona] = await Promise.all([
+    globalBooksApi.getGlobal?.(userId).catch((error) => {
+      if (strict)
+        throw error;
+      return [];
+    }) ?? Promise.resolve([]),
+    (selectedPersonaId ? spindle.personas.get(selectedPersonaId, userId) : spindle.personas.getActive(userId)).catch((error) => {
+      if (strict)
+        throw error;
+      return null;
+    })
+  ]);
+  const persona = chat.metadata?.temporary === true ? null : activePersona ?? await spindle.personas.getDefault(userId).catch((error) => {
+    if (strict)
+      throw error;
+    return null;
+  });
+  const chatBookIds = chat.metadata?.chat_world_book_ids;
+  return mapAttachedBookScopes({
+    character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
+    persona: persona?.attached_world_book_id,
+    chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
+    global: globalBookIds
+  });
 }
 async function listConnectionsCached(userId) {
   const cached = connectionCache.get(userId);
@@ -4166,7 +4246,7 @@ async function buildState(userId, chatId) {
     activeCharacterId: activeChat?.character_id ?? null,
     activeCharacterName: null,
     globalSettings: settings,
-    hostSelectionAvailable: exactSelectionAvailable,
+    hostSelectionAvailable: extensionTakeoverAvailable,
     characterConfig: null,
     allWorldBooks: [],
     attachedBookSources: {},
@@ -4188,19 +4268,15 @@ async function buildState(userId, chatId) {
   }
   const character = activeChat.character_id ? await spindle.characters.get(activeChat.character_id, userId).catch(() => null) : null;
   const characterConfig = character ? await loadCharacterConfig(character.id, userId, character).catch(() => ({ ...DEFAULT_CHARACTER_CONFIG })) : { ...DEFAULT_CHARACTER_CONFIG };
-  const sourceCharacters = await Promise.all(attachedCharacterIds(activeChat.character_id, activeChat.metadata ?? {}).map((id) => id === character?.id ? Promise.resolve(character) : spindle.characters.get(id, userId).catch(() => null)));
-  const globalBooksApi = spindle.world_books;
-  const [globalBookIds, activePersona] = await Promise.all([
-    globalBooksApi.getGlobal?.(userId).catch(() => []) ?? Promise.resolve([]),
-    spindle.personas.getActive(userId).catch(() => null)
-  ]);
-  const persona = activeChat.metadata?.temporary === true ? null : activePersona ?? await spindle.personas.getDefault(userId).catch(() => null);
-  const chatBookIds = activeChat.metadata?.chat_world_book_ids;
-  const attachedBookScopes = mapAttachedBookScopes({
-    character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
-    persona: persona?.attached_world_book_id,
-    chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
-    global: globalBookIds
+  const attachedBookScopes = await getTurnAttachmentScopes(activeChat, userId, null, character, false).catch((error) => {
+    stateIssues.push({
+      id: "attachment-sources-unavailable",
+      severity: "warn",
+      bookId: null,
+      title: "Attached lorebooks could not be listed",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+    return {};
   });
   const attachedBookIds = Object.keys(attachedBookScopes);
   const { runtimeBooks, staleIssues, loadIssues, missingBookIds } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
@@ -4255,13 +4331,13 @@ async function buildState(userId, chatId) {
       detail: `${reason} Lumiverse will handle this book natively until it can be loaded.`
     });
   }
-  if (!exactSelectionAvailable)
+  if (!extensionTakeoverAvailable)
     diagnosticsResults.unshift({
       id: "host-selection-unavailable",
       severity: "warn",
       bookId: null,
-      title: "Lumiverse update needed for Lore Recall",
-      detail: "This Lumiverse build cannot activate Recall's exact entry picks. Native lorebook activation remains active."
+      title: missingRecallHookPermissions().length ? "Lore Recall needs extension permissions" : "Lore Recall host support is unavailable",
+      detail: missingRecallHookPermissions().length ? "Grant these Lore Recall permissions in Extensions: " + missingRecallHookPermissions().join(", ") + ". Native lorebook activation remains active." : "This Lumiverse build does not expose the pre-generation and prompt hooks Lore Recall needs. Native lorebook activation remains active."
     });
   const nextState = {
     ...baseState,
@@ -4445,172 +4521,260 @@ async function runTrackedOperation(userId, message, kind, runner, onSuccess) {
     activeTrackedOperations.delete(userId);
   }
 }
-var worldInfoApi = spindle;
-var exactSelectionAvailable = spindle.host?.capabilities?.["world-info-exact-selection-v1"] === 1;
-if (exactSelectionAvailable && typeof worldInfoApi.registerWorldInfoInterceptor === "function") {
-  worldInfoApi.registerWorldInfoInterceptor(async (context) => {
-    let liveChatId = null;
-    let liveUserId = null;
-    let retrievalSessionId = null;
-    let retrievalSessionStarted = false;
-    const recordNativeFallback = (reason) => {
-      if (!liveChatId || !liveUserId)
-        return;
-      retrievalSessionId ??= `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-      if (!retrievalSessionStarted) {
-        beginRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
-          type: "start",
-          mode: "collapsed",
-          timestamp: Date.now(),
-          label: "Native lorebook fallback",
-          summary: "Recall could not complete retrieval."
-        });
-        retrievalSessionStarted = true;
-      }
-      const current = retrievalFeedCache.get(getPreviewCacheKey(liveUserId, liveChatId))?.sessions.find((session) => session.id === retrievalSessionId);
-      appendRetrievalSessionItem(liveUserId, liveChatId, retrievalSessionId, {
-        id: `native:${Date.now()}`,
-        kind: "issue",
-        label: "Native lorebook fallback",
-        summary: reason,
-        timestamp: Date.now(),
-        phase: "fallback",
-        tone: "warn"
-      });
-      finishRetrievalSession(liveUserId, liveChatId, retrievalSessionId, {
-        type: "finish",
-        timestamp: Date.now(),
-        status: "fallback",
-        controllerUsed: current?.controllerUsed ?? false,
-        resolvedConnectionId: current?.resolvedConnectionId ?? null,
-        fallbackReason: reason
-      });
-      scheduleLiveStatePush(liveUserId, liveChatId);
-    };
+var recallHostApi = spindle;
+var hostCapabilities = spindle.host?.capabilities;
+var requiredPromptInterceptorAvailable = (hostCapabilities?.["required-interceptors-v1"] ?? 0) >= 1;
+var extensionHookSupportAvailable = typeof recallHostApi.registerContextHandler === "function" && typeof recallHostApi.registerWorldInfoInterceptor === "function" && typeof recallHostApi.registerInterceptor === "function" && (recallHostApi.contracts?.preAssemblyGenerationContext ?? 0) >= 1;
+var extensionTakeoverAvailable = false;
+var recallHooksRegistered = false;
+function missingRecallHookPermissions() {
+  return ["generation", "context_handler", "interceptor"].filter((permission) => !spindle.permissions.has(permission));
+}
+function recordNativeFallback(userId, chatId, reason, existingSessionId) {
+  const sessionId = existingSessionId ?? "fallback:" + Date.now() + ":" + Math.random().toString(36).slice(2, 8);
+  const cached = previewCache.get(getPreviewCacheKey(userId, chatId));
+  if (cached) {
+    cached.activationSource = "native";
+    cached.injectedNodes = [];
+    cached.injectedText = "";
+  }
+  const existing = retrievalFeedCache.get(getPreviewCacheKey(userId, chatId))?.sessions.find((session) => session.id === sessionId);
+  if (!existing)
+    beginRetrievalSession(userId, chatId, sessionId, {
+      type: "start",
+      mode: "collapsed",
+      timestamp: Date.now(),
+      label: "Native lorebook fallback",
+      summary: "Lore Recall did not take over this turn."
+    });
+  appendRetrievalSessionItem(userId, chatId, sessionId, {
+    id: "native:" + Date.now(),
+    kind: "issue",
+    label: "Native lorebook fallback",
+    summary: reason,
+    timestamp: Date.now(),
+    phase: "fallback",
+    tone: "warn"
+  });
+  finishRetrievalSession(userId, chatId, sessionId, {
+    type: "finish",
+    timestamp: Date.now(),
+    status: "fallback",
+    controllerUsed: existing?.controllerUsed ?? false,
+    resolvedConnectionId: existing?.resolvedConnectionId ?? null,
+    fallbackReason: reason
+  });
+  scheduleLiveStatePush(userId, chatId);
+}
+function registerRecallHooks() {
+  extensionTakeoverAvailable = extensionHookSupportAvailable && !missingRecallHookPermissions().length;
+  if (!extensionTakeoverAvailable || recallHooksRegistered)
+    return;
+  recallHooksRegistered = true;
+  recallHostApi.registerContextHandler(async (rawContext, signal) => {
+    if (!extensionTakeoverAvailable)
+      return rawContext;
+    const context = rawContext;
+    const chatId = context.chatId;
+    const userId = context.userId ?? (chatId ? resolveUserId(chatId) : null);
+    if (!chatId || !userId)
+      return rawContext;
+    const runId = "recall:" + Date.now() + ":" + Math.random().toString(36).slice(2, 8);
+    const preparedContext = { ...context, loreRecallRunId: runId };
+    preparedRecallRuns.begin(runId, userId, chatId);
+    let staged = false;
+    const deadlineAt = Date.now() + 115000;
+    let sessionId;
     try {
-      const chatId = context.chatId;
-      const connectionId = context.connectionId ?? null;
-      const messages = context.messages.map((message) => ({ role: message.role, content: message.content }));
-      if (!chatId)
-        return;
-      liveChatId = chatId;
-      const userId = context.userId ?? resolveUserId(chatId);
-      if (!userId) {
-        spindle.log.warn(`Lore Recall skipped retrieval for chat ${chatId} because no user context was available yet.`);
-        return;
-      }
-      liveUserId = userId;
+      signal?.throwIfAborted();
       await ensureStorageFolders(userId);
       const settings = await loadGlobalSettings(userId);
       if (!settings.enabled)
-        return;
-      const previewCacheKey = getPreviewCacheKey(userId, chatId);
-      previewCache.set(previewCacheKey, null);
+        return preparedContext;
       const chat = await spindle.chats.get(chatId, userId);
       if (!chat)
-        return;
+        return preparedContext;
+      const scopes = await getTurnAttachmentScopes(chat, userId, context.personaId);
+      const attachedIds = Object.keys(scopes);
+      if (!attachedIds.length)
+        return preparedContext;
+      const { runtimeBooks } = await getRuntimeBooks(attachedIds, attachedIds, userId, 15000);
+      const readableBooks = runtimeBooks.filter((book) => book.config.enabled && isReadableBook(book.config));
+      if (!readableBooks.length)
+        return preparedContext;
       const character = chat.character_id ? await spindle.characters.get(chat.character_id, userId) : null;
       const config = character ? await loadCharacterConfig(character.id, userId, character) : { ...DEFAULT_CHARACTER_CONFIG };
-      const { books: runtimeBooks, sources } = await loadAttachedRuntimeBooks(context.entries, userId);
-      if (!runtimeBooks.length)
-        return;
-      if (context.deadlineAt && Date.now() >= context.deadlineAt - 2000) {
-        recordNativeFallback("Recall ran out of time before reviewing attached books.");
-        return;
-      }
-      processPendingDynamicFeedback(previewCacheKey, messages);
-      const dynamicFeedback = buildDynamicFeedbackSnapshot(previewCacheKey);
-      retrievalSessionId = `retrieval:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const chatMessages = await spindle.chat.getMessages(chatId);
+      const messages = chatMessages.map((message) => ({ role: message.role, content: message.content }));
+      const cacheKey = getPreviewCacheKey(userId, chatId);
+      previewCache.set(cacheKey, null);
+      if (!context.dryRun)
+        processPendingDynamicFeedback(cacheKey, messages);
+      sessionId = "retrieval:" + Date.now() + ":" + Math.random().toString(36).slice(2, 8);
+      const activeSessionId = sessionId;
       const handleProgress = (event) => {
-        if (!retrievalSessionId)
-          return;
         switch (event.type) {
           case "start":
-            retrievalSessionStarted = true;
-            beginRetrievalSession(userId, chatId, retrievalSessionId, event);
-            scheduleLiveStatePush(userId, chatId);
-            return;
+            beginRetrievalSession(userId, chatId, activeSessionId, event);
+            break;
           case "item":
-            if (!retrievalSessionStarted)
-              return;
-            appendRetrievalSessionItem(userId, chatId, retrievalSessionId, event.item);
-            scheduleLiveStatePush(userId, chatId);
-            return;
+            appendRetrievalSessionItem(userId, chatId, activeSessionId, event.item);
+            break;
           case "finish":
-            if (!retrievalSessionStarted)
-              return;
-            finishRetrievalSession(userId, chatId, retrievalSessionId, event);
-            scheduleLiveStatePush(userId, chatId);
-            return;
+            finishRetrievalSession(userId, chatId, activeSessionId, event);
+            break;
         }
+        scheduleLiveStatePush(userId, chatId);
       };
-      const preview = await buildRetrievalPreview(messages, settings, config, runtimeBooks, userId, {
-        connectionId,
-        isActual: true,
+      const preview = await buildRetrievalPreview(messages, settings, config, readableBooks, userId, {
+        connectionId: context.connectionId,
+        isActual: !context.dryRun,
         capturedAt: Date.now(),
         reportProgress: handleProgress,
-        dynamicFeedback
+        dynamicFeedback: buildDynamicFeedbackSnapshot(cacheKey),
+        signal,
+        deadlineAt
       });
-      const exceededDeadline = !!context.deadlineAt && Date.now() >= context.deadlineAt - 2000;
-      const retrievalComplete = preview?.retrievalComplete === true && !exceededDeadline;
-      if (preview && exceededDeadline) {
-        preview.retrievalComplete = false;
-        preview.fallbackReason = "Recall exceeded the host activation deadline.";
-        preview.fallbackPath.push(preview.fallbackReason);
-      }
+      signal?.throwIfAborted();
       if (preview) {
-        preview.activationSource = retrievalComplete ? "recall" : "native";
-        preview.attachedBookSources = Object.fromEntries(runtimeBooks.map((book) => [book.summary.id, sources[book.summary.id] ?? "attached"]));
-        if (!retrievalComplete) {
-          preview.injectedNodes = [];
-          preview.injectedText = "";
-        }
+        preview.attachedBookSources = Object.fromEntries(readableBooks.map((book) => [book.summary.id, scopes[book.summary.id]?.join(", ") ?? "attached"]));
+        previewCache.set(cacheKey, preview);
       }
-      previewCache.set(previewCacheKey, preview);
-      if (retrievalComplete)
-        recordDynamicInjection(previewCacheKey, preview, runtimeBooks);
-      scheduleLiveStatePush(userId, chatId);
-      if (!retrievalComplete) {
-        recordNativeFallback(preview?.fallbackReason ?? "Recall could not complete retrieval.");
-        return;
+      if (!preview?.retrievalComplete || Date.now() >= deadlineAt) {
+        recordNativeFallback(userId, chatId, Date.now() >= deadlineAt ? "Lore Recall exceeded its pre-generation deadline." : preview?.fallbackReason ?? "Lore Recall could not complete retrieval.", sessionId);
+        return preparedContext;
       }
-      const handledBookIds = new Set(runtimeBooks.map((book) => book.summary.id));
-      const selectedIds = new Set(preview.injectedNodes.map((node) => node.entryId));
-      preview.injectedText = context.entries.filter((entry) => selectedIds.has(entry.id)).map((entry) => entry.content).join(`
-
-`);
-      preview.estimatedTokens = Math.ceil(preview.injectedText.length / 4);
-      const disabled = context.entries.filter((entry) => handledBookIds.has(entry.world_book_id) && !selectedIds.has(entry.id)).map((entry) => entry.id);
-      appendRetrievalSessionItem(userId, chatId, retrievalSessionId, {
-        id: `activation:${Date.now()}`,
-        kind: "injected",
-        label: "Recall activation",
-        summary: `Selected ${selectedIds.size} entr${selectedIds.size === 1 ? "y" : "ies"} from ${handledBookIds.size} attached book${handledBookIds.size === 1 ? "" : "s"}; native activation suppressed for the rest.`,
-        timestamp: Date.now(),
-        phase: "inject",
-        count: selectedIds.size,
-        entries: preview.injectedNodes,
-        tone: "success"
+      const handledBookIds = readableBooks.map((book) => book.summary.id);
+      const handledSet = new Set(handledBookIds);
+      const selectedIds = [...new Set(preview.injectedNodes.map((node) => node.entryId))];
+      const selectedRows = await Promise.all(selectedIds.map((id) => spindle.world_books.entries.get(id, userId)));
+      signal?.throwIfAborted();
+      if (selectedRows.some((entry) => !entry || entry.disabled || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
+        recordNativeFallback(userId, chatId, "A selected entry changed or became unavailable.", sessionId);
+        return preparedContext;
+      }
+      const sourceEntries = selectedRows;
+      const sourceContents = Object.fromEntries(sourceEntries.map((entry) => [entry.id, entry.content]));
+      const entries = (await Promise.all(sourceEntries.map(async (entry) => ({
+        ...entry,
+        content: (await spindle.macros.resolve(entry.content, {
+          chatId,
+          characterId: chat.character_id,
+          userId,
+          commit: false
+        })).text
+      })))).filter((entry) => entry.content.trim());
+      signal?.throwIfAborted();
+      if (Date.now() >= deadlineAt) {
+        recordNativeFallback(userId, chatId, "Lore Recall exceeded its pre-generation deadline.", sessionId);
+        return preparedContext;
+      }
+      preview.activationSource = "preview";
+      staged = preparedRecallRuns.put({
+        id: runId,
+        userId,
+        chatId,
+        createdAt: Date.now(),
+        handledBookIds,
+        entries,
+        sourceContents,
+        preview,
+        runtimeBooks: readableBooks,
+        sessionId,
+        status: "prepared"
       });
-      scheduleLiveStatePush(userId, chatId);
-      return { disabled, selected: [...selectedIds] };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (liveChatId && liveUserId) {
-        const cached = previewCache.get(getPreviewCacheKey(liveUserId, liveChatId));
-        if (cached) {
-          cached.activationSource = "native";
-          cached.injectedNodes = [];
-          cached.injectedText = "";
-        }
+      if (!staged) {
+        recordNativeFallback(userId, chatId, "Overlapping generations prevented a safe Recall takeover.", sessionId);
       }
-      recordNativeFallback(reason);
-      spindle.log.warn(`Lore Recall world-info interceptor failed; native activation will continue: ${reason}`);
+      scheduleLiveStatePush(userId, chatId);
+      return preparedContext;
+    } catch (error) {
+      if (signal?.aborted)
+        return preparedContext;
+      const reason = error instanceof Error ? error.message : String(error);
+      recordNativeFallback(userId, chatId, reason, sessionId);
+      spindle.log.warn("Lore Recall preparation failed; native activation continues: " + reason);
+      return preparedContext;
+    } finally {
+      if (!staged)
+        preparedRecallRuns.stayNative(runId);
+    }
+  }, 95, { timeoutMs: 120000 });
+  recallHostApi.registerWorldInfoInterceptor(async (context) => {
+    if (!extensionTakeoverAvailable)
+      return;
+    const userId = context.userId ?? resolveUserId(context.chatId);
+    if (!userId)
+      return;
+    const claim = preparedRecallRuns.claim(userId, context.chatId, context.entries);
+    if (!claim.run) {
+      if (claim.reason) {
+        for (const run of claim.rejected)
+          recordNativeFallback(userId, context.chatId, claim.reason, run.sessionId);
+      }
       return;
     }
+    const disabled = suppressedNativeEntryIds(claim.run, context.entries);
+    return { disabled };
   }, 95);
-} else {
-  spindle.log.warn("Lore Recall requires Lumiverse world-info exact selection support; native lorebook activation remains active.");
+  recallHostApi.registerInterceptor(async (messages, rawContext) => {
+    const context = rawContext;
+    const runId = context.loreRecallRunId;
+    if (!runId)
+      return messages;
+    const run = preparedRecallRuns.get(runId);
+    if (!run) {
+      if (preparedRecallRuns.isPassThrough(runId)) {
+        preparedRecallRuns.remove(runId);
+        return messages;
+      }
+      throw new Error("Lore Recall's prepared selection expired after native activation.");
+    }
+    if (run.status !== "claimed") {
+      if (run.status === "prepared") {
+        recordNativeFallback(run.userId, run.chatId, "World-info activation did not run, so Recall did not take over.", run.sessionId);
+      }
+      preparedRecallRuns.remove(runId);
+      return messages;
+    }
+    const injected = injectRecallEntries(messages, run.entries);
+    const injectedIds = new Set(run.entries.map((entry) => entry.id));
+    run.preview.injectedNodes = run.preview.injectedNodes.filter((node) => injectedIds.has(node.entryId));
+    run.preview.activationSource = "recall";
+    run.preview.injectedText = run.entries.map((entry) => entry.content).join(`
+
+`);
+    run.preview.estimatedTokens = Math.ceil(run.preview.injectedText.length / 4);
+    previewCache.set(getPreviewCacheKey(run.userId, run.chatId), run.preview);
+    if (!context.dryRun)
+      recordDynamicInjection(getPreviewCacheKey(run.userId, run.chatId), run.preview, run.runtimeBooks);
+    appendRetrievalSessionItem(run.userId, run.chatId, run.sessionId, {
+      id: "activation:" + Date.now(),
+      kind: "injected",
+      label: "Recall activation",
+      summary: "Inserted " + run.entries.length + " selected entries from " + run.handledBookIds.length + " attached books.",
+      timestamp: Date.now(),
+      phase: "inject",
+      count: run.entries.length,
+      entries: run.preview.injectedNodes,
+      tone: "success",
+      details: run.entries.some((entry) => ![0, 1, 4].includes(entry.position)) ? ["Author-note, example, marker, and outlet positions are placed before chat history by Lore Recall."] : []
+    });
+    preparedRecallRuns.remove(runId);
+    scheduleLiveStatePush(run.userId, run.chatId);
+    return injected;
+  }, 95, requiredPromptInterceptorAvailable ? { required: true } : undefined);
+}
+registerRecallHooks();
+spindle.permissions.getGranted().then(registerRecallHooks).catch(() => {});
+spindle.permissions.onChanged(() => {
+  registerRecallHooks();
+  const userId = resolveUserId();
+  if (userId)
+    pushState(userId).catch(() => {});
+});
+if (!extensionHookSupportAvailable) {
+  spindle.log.warn("Lore Recall cannot register its pre-generation and prompt hooks; native lorebook activation remains active.");
 }
 spindle.onFrontendMessage(async (payload, userId) => {
   setLastFrontendUserId(userId);

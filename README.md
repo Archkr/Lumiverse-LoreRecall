@@ -1,10 +1,10 @@
 # Lore Recall
 
-Lore Recall retrieves relevant entries from lorebooks attached in Lumiverse. It organizes entries in a tree, routes each turn through seven top-level categories, lets a controller model select relevant entries, and uses JEV to filter those picks before activation at their normal lorebook positions.
+Lore Recall retrieves relevant entries from lorebooks attached in Lumiverse. It organizes entries in a tree, routes each turn through seven top-level categories, lets a controller model select relevant entries, and uses JEV to filter those picks before prompt injection.
 
 ## Install
 
-Install `https://github.com/archkr/Lumiverse-LoreRecall` through Lumiverse Extensions. Lore Recall requires a Lumiverse build with `world-info-exact-selection-v1` support and the permissions listed in `spindle.json`. Older builds leave native lorebook activation in place. For local development, run `bun install`, `bun run build`, and reload the extension.
+Install `https://github.com/archkr/Lumiverse-LoreRecall` through Lumiverse Extensions and grant the permissions listed in `spindle.json`. Lore Recall uses the existing context handler, world-info interceptor, and prompt interceptor hooks; it does not require `world-info-exact-selection-v1`. Builds without those hooks leave native lorebook activation in place. For local development, run `bun install`, `bun run build`, and reload the extension.
 
 ## Set up
 
@@ -18,7 +18,11 @@ Install `https://github.com/archkr/Lumiverse-LoreRecall` through Lumiverse Exten
 
 For each generation, the model picks all relevant top-level categories. Lore Recall reviews every enabled, non-constant entry in those categories in bounded batches. The model selects any number of entries per batch; an empty selection is valid. A failed batch contributes no entries and appears as an issue in the feed.
 
-JEV receives one yes/no relevance question for each selected entry. An explicit answer below the configured threshold rejects it. Missing answers and JEV failures let affected model picks pass through. If more entries survive than the character's dynamic cap, the strongest JEV approvals win; ties retain model order. Enabled constant entries activate separately, regardless of category routing and the dynamic cap. Lumiverse places selected entries at their stored lorebook positions. If model retrieval cannot finish, native lorebook activation runs for that turn.
+JEV receives one yes/no relevance question for each selected entry. An explicit answer below the configured threshold rejects it. Missing answers and JEV failures let affected model picks pass through. If more entries survive than the character's dynamic cap, the strongest JEV approvals win; ties retain model order. Enabled constant entries activate separately, regardless of category routing and the dynamic cap. Lore Recall inserts selected entries with their stored role, and honors before-prompt and chat-depth positions. Other native placement slots are placed beside the pre-history lore because those slots are unavailable after prompt assembly. If model retrieval cannot finish within the 120-second pre-generation window, native lorebook activation runs for that turn.
+
+On hosts that support required prompt interceptors, a failure after native activation is suppressed stops generation. Older hosts do not offer that last-resort guarantee; a late interceptor failure can leave that turn without the selected lore. The insertion step itself performs no model or network calls.
+
+Selected lore resolves character, user, and other placeholders before insertion. This resolve does not commit variable changes; lorebook macros that write persistent variables are not reproduced by this extension-managed path.
 
 The workspace and live retrieval feed show attached sources, routed categories, model picks, JEV decisions, final activation, and failure reasons. The tree is an organizer and provides category context; only the top-level categories are used for routing.
 

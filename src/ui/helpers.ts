@@ -5,6 +5,13 @@ export type DrawerFeedFilter = "all" | "entries" | "steps" | "issue";
 export function isRecallActive(state: FrontendState | null): boolean {
   return !!state?.globalSettings.enabled && !!state.hostSelectionAvailable;
 }
+
+export function getRecallStatus(state: FrontendState | null): { label: string; tone: "on" | "off" } {
+  if (state && !state.hostSelectionAvailable) return { label: "Retrieval unavailable", tone: "off" };
+  return isRecallActive(state)
+    ? { label: "Retrieval on", tone: "on" }
+    : { label: "Retrieval off", tone: "off" };
+}
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }

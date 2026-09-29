@@ -31,6 +31,8 @@ interface RetrievalPreviewOptions {
   isActual?: boolean;
   reportProgress?: (event: RetrievalProgressEvent) => void;
   dynamicFeedback?: DynamicRetrievalFeedbackSnapshot;
+  signal?: AbortSignal;
+  deadlineAt?: number;
 }
 
 interface ControllerSession {
@@ -4713,12 +4715,15 @@ async function buildCategoryRetrievalPreview(
   let controllerUsed = false;
   const controllerAllowed = options.allowController !== false;
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
-  const modelDeadline = Date.now() + 155_000;
+  const modelDeadline = Math.min(Date.now() + 155_000, options.deadlineAt ?? Infinity);
   const runModel = async (prompt: string): Promise<Record<string, unknown> | null> => {
     if (!controllerAllowed) return null;
+    if (options.signal?.aborted) { retrievalComplete = false; return null; }
     const remainingMs = modelDeadline - Date.now();
     if (remainingMs < 1000) { issues.push("Model selection ran out of time; remaining batches were skipped."); retrievalComplete = false; return null; }
     const abort = new AbortController();
+    const onAbort = () => abort.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30_000));
     try {
       const response = await runSharedControllerJson(prompt, settings, userId,
@@ -4730,7 +4735,7 @@ async function buildCategoryRetrievalPreview(
       issues.push(error instanceof Error ? error.message : String(error));
       retrievalComplete = false;
       return null;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); options.signal?.removeEventListener("abort", onAbort); }
   };
   const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
   const categoryResult = categoriesPresent.length ? await runModel([
