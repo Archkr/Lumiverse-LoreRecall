@@ -273,6 +273,47 @@ function filterBooks(state, filterText) {
   const query = filterText.trim().toLowerCase();
   return state.allWorldBooks.filter((book) => !query || `${book.name} ${book.description}`.toLowerCase().includes(query)).map((book) => book.id);
 }
+function getBookAttachmentScopes(state, bookId) {
+  const scopes = state.attachedBookScopes?.[bookId];
+  if (scopes)
+    return scopes;
+  const source = state.attachedBookSources[bookId];
+  return source === "character" || source === "persona" || source === "chat" || source === "global" ? [source] : [];
+}
+function attachmentScopeSummary(state) {
+  const order = ["global", "character", "chat", "persona"];
+  return order.map((scope) => {
+    const count = Object.keys(state.attachedBookSources).filter((bookId) => getBookAttachmentScopes(state, bookId).includes(scope)).length;
+    return count ? `${count} ${scope}` : null;
+  }).filter((label) => !!label).join(" · ");
+}
+function getSourceListPresentation(state, filterText) {
+  const bookIds = filterBooks(state, filterText).filter((id) => (id in state.attachedBookSources));
+  const visibleIds = new Set(state.allWorldBooks.map((book) => book.id));
+  const missingCount = Object.keys(state.attachedBookSources).filter((id) => !visibleIds.has(id)).length;
+  const extraCount = [...visibleIds].filter((id) => !(id in state.attachedBookSources)).length;
+  if (missingCount > 0 || extraCount > 0) {
+    const missingDetail = missingCount ? `${missingCount} attached lorebook${missingCount === 1 ? " is" : "s are"} missing from the list.` : "";
+    const extraDetail = extraCount ? `${extraCount} listed lorebook${extraCount === 1 ? " is" : "s are"} no longer attached.` : "";
+    return {
+      bookIds,
+      missingCount,
+      extraCount,
+      emptyTitle: "Lorebook list unavailable",
+      emptyDetail: `${missingDetail} ${extraDetail} Refresh Lore Recall.`.trim()
+    };
+  }
+  if (filterText.trim() && !bookIds.length) {
+    return { bookIds, missingCount: 0, extraCount: 0, emptyTitle: "No matching lorebooks", emptyDetail: "Change the filter to see attached lorebooks." };
+  }
+  return {
+    bookIds,
+    missingCount: 0,
+    extraCount: 0,
+    emptyTitle: "No attached lorebooks",
+    emptyDetail: "Attach a lorebook in Lumiverse to use it for retrieval."
+  };
+}
 function formatBuildSource(source) {
   if (!source)
     return "";
@@ -4858,6 +4899,7 @@ function setup(ctx) {
     drawerRoot.appendChild(shell);
     const state = currentState;
     const managed = getManagedBookIds();
+    const sourceList = state ? getSourceListPresentation(state, "") : null;
     const enabled = isRecallActive(state);
     const injectLimit = state?.characterConfig?.tokenBudget ?? 0;
     const head = createElement("div", "lore-page-head");
@@ -4918,11 +4960,17 @@ function setup(ctx) {
     }
     const sources = createElement("section", "lore-section");
     sources.appendChild(createSectionHead("Attached sources", managed.length ? `${Object.keys(state?.attachedBookSources ?? {}).length} attached · Recall follows Lumiverse attachments` : "No lorebooks available."));
-    if (!Object.keys(state?.attachedBookSources ?? {}).length) {
-      sources.appendChild(createEmpty("No books attached", "Attach a lorebook in Lumiverse to use it for retrieval.", createButton("Open workspace", "lore-btn lore-btn-sm", () => openWorkspace()), "book"));
+    if (state && Object.keys(state.attachedBookSources).length) {
+      sources.appendChild(createElement("div", "lore-sources-tip", attachmentScopeSummary(state)));
+    }
+    if (sourceList && (sourceList.missingCount || sourceList.extraCount) && sourceList.bookIds.length) {
+      sources.appendChild(createElement("div", "lore-sources-tip", sourceList.emptyDetail));
+    }
+    if (!sourceList?.bookIds.length) {
+      sources.appendChild(createEmpty(sourceList?.emptyTitle ?? "Loading attached lorebooks", sourceList?.emptyDetail ?? "Lore Recall is waiting for the current chat state.", createButton("Open workspace", "lore-btn lore-btn-sm", () => openWorkspace()), "book"));
     } else {
       const grid = createElement("div", "lore-source-grid");
-      for (const bookId of managed.filter((id) => state?.attachedBookSources[id])) {
+      for (const bookId of sourceList.bookIds) {
         const book = state?.allWorldBooks.find((item) => item.id === bookId);
         const status = state?.bookStatuses[bookId];
         const isWriteOnly = state?.bookConfigs[bookId]?.permission === "write_only";
@@ -4934,10 +4982,14 @@ function setup(ctx) {
         const pillBody = createElement("div", "lore-source-pill-body");
         pillBody.appendChild(createElement("div", "lore-source-pill-name", book?.name || bookId));
         const metaBits = [];
-        metaBits.push(`${status?.entryCount ?? 0}e`);
-        metaBits.push(`${status?.categoryCount ?? 0}c`);
-        if ((status?.unassignedCount ?? 0) > 0)
-          metaBits.push(`${status?.unassignedCount} unassigned`);
+        if (status) {
+          metaBits.push(`${status.entryCount}e`);
+          metaBits.push(`${status.categoryCount}c`);
+          if (status.unassignedCount > 0)
+            metaBits.push(`${status.unassignedCount} unassigned`);
+        } else {
+          metaBits.push("Details unavailable");
+        }
         pillBody.appendChild(createElement("div", "lore-source-pill-meta", metaBits.join(" · ")));
         pill.appendChild(pillBody);
         const tags = createElement("div", "lore-source-pill-tags");
@@ -4945,8 +4997,9 @@ function setup(ctx) {
           tags.appendChild(createTag("No tree", "warn"));
         if (isWriteOnly)
           tags.appendChild(createTag("Write only", "warn"));
-        if (state?.attachedBookSources[bookId])
-          tags.appendChild(createTag(state.attachedBookSources[bookId], "neutral"));
+        if (state)
+          for (const scope of getBookAttachmentScopes(state, bookId))
+            tags.appendChild(createTag(scope, "neutral"));
         pill.appendChild(tags);
         grid.appendChild(pill);
       }
@@ -4987,6 +5040,11 @@ function setup(ctx) {
       sub.appendChild(createElement("span", "sep", "·"));
       sub.appendChild(createElement("span", "lore-mono", truncateMiddle(state.activeChatId)));
     }
+    const scopeSummary = state ? attachmentScopeSummary(state) : "";
+    if (scopeSummary) {
+      sub.appendChild(createElement("span", "sep", "·"));
+      sub.appendChild(createElement("span", "", scopeSummary));
+    }
     copy.appendChild(sub);
     wrap.appendChild(copy);
     const actions = createElement("div", "lore-cluster");
@@ -5019,13 +5077,16 @@ function setup(ctx) {
     filterInput.className = "lore-input lore-search";
     tools.appendChild(filterInput);
     section.appendChild(tools);
-    const bookIds = filterBooks(state, sourceFilter);
-    if (!bookIds.length) {
-      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
+    const sourceList = getSourceListPresentation(state, sourceFilter);
+    if ((sourceList.missingCount || sourceList.extraCount) && sourceList.bookIds.length) {
+      section.appendChild(createElement("div", "lore-sources-tip", sourceList.emptyDetail));
+    }
+    if (!sourceList.bookIds.length) {
+      section.appendChild(createEmpty(sourceList.emptyTitle, sourceList.emptyDetail));
       return section;
     }
     const list = createElement("div", "lore-rows");
-    for (const bookId of bookIds) {
+    for (const bookId of sourceList.bookIds) {
       const book = state.allWorldBooks.find((item) => item.id === bookId);
       if (!book)
         continue;
@@ -5039,8 +5100,8 @@ function setup(ctx) {
       body.append(createElement("div", "lore-row-title", book.name), createElement("div", "lore-row-meta", clipText(state.bookConfigs[bookId]?.description || book.description || "No description.", 110)));
       row.appendChild(body);
       const tags = createElement("div", "lore-row-tags");
-      if (state.attachedBookSources[bookId])
-        tags.appendChild(createTag(`Attached: ${state.attachedBookSources[bookId]}`, "good"));
+      for (const scope of getBookAttachmentScopes(state, bookId))
+        tags.appendChild(createTag(`Attached: ${scope}`, "good"));
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
@@ -5069,7 +5130,7 @@ function setup(ctx) {
   }
   function renderWorkspaceRail(state) {
     const rail = createElement("aside", "lore-workspace-rail");
-    rail.append(createWorkspaceNavButton("sources", "Sources", `${filterBooks(state, sourceFilter).length} lorebooks`, "book"), createWorkspaceNavButton("build", "Build", `${getManagedBookIds().length} lorebook${getManagedBookIds().length === 1 ? "" : "s"}`, "branch"), createWorkspaceNavButton("retrieval", "Retrieval", state.activeCharacterName || "No active character", "feed"), createWorkspaceNavButton("book", "Book", getSelectedBookSummary()?.name || "Select a lorebook", "scope"), createWorkspaceNavButton("maintenance", "Maintenance", "Diagnostics, backup, advanced", "issue"));
+    rail.append(createWorkspaceNavButton("sources", "Sources", `${getSourceListPresentation(state, sourceFilter).bookIds.length} lorebooks`, "book"), createWorkspaceNavButton("build", "Build", `${getManagedBookIds().length} lorebook${getManagedBookIds().length === 1 ? "" : "s"}`, "branch"), createWorkspaceNavButton("retrieval", "Retrieval", state.activeCharacterName || "No active character", "feed"), createWorkspaceNavButton("book", "Book", getSelectedBookSummary()?.name || "Select a lorebook", "scope"), createWorkspaceNavButton("maintenance", "Maintenance", "Diagnostics, backup, advanced", "issue"));
     return rail;
   }
   function renderSourcesPanel(state) {
@@ -5100,15 +5161,18 @@ function setup(ctx) {
     tip.appendChild(makeIconSpan("refresh", "lore-sources-tip-icon"));
     tip.appendChild(createElement("span", "", "Don't see a lorebook you just created? Click refresh."));
     section.appendChild(tip);
-    const bookIds = filterBooks(state, sourceFilter);
-    if (!bookIds.length) {
-      section.appendChild(createEmpty("No attached lorebooks", "Attach a lorebook in Lumiverse, or change the filter."));
+    const sourceList = getSourceListPresentation(state, sourceFilter);
+    if ((sourceList.missingCount || sourceList.extraCount) && sourceList.bookIds.length) {
+      section.appendChild(createElement("div", "lore-sources-tip", sourceList.emptyDetail));
+    }
+    if (!sourceList.bookIds.length) {
+      section.appendChild(createEmpty(sourceList.emptyTitle, sourceList.emptyDetail));
       return section;
     }
     const listWrap = createElement("div", "lore-scroll-panel");
     const list = createElement("div", "lore-rows");
     const activeOperation = getActiveOperation();
-    for (const bookId of bookIds) {
+    for (const bookId of sourceList.bookIds) {
       const book = state.allWorldBooks.find((item) => item.id === bookId);
       if (!book)
         continue;
@@ -5124,8 +5188,8 @@ function setup(ctx) {
       body.appendChild(createElement("div", "lore-row-title", book.name));
       row.appendChild(body);
       const tags = createElement("div", "lore-row-tags");
-      if (state.attachedBookSources[bookId])
-        tags.appendChild(createTag(`Attached: ${state.attachedBookSources[bookId]}`, "good"));
+      for (const scope of getBookAttachmentScopes(state, bookId))
+        tags.appendChild(createTag(`Attached: ${scope}`, "good"));
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
@@ -5191,7 +5255,14 @@ function setup(ctx) {
     const managed = isManagedBook(selectedBookId);
     const tree = getBookTree(selectedBookId);
     const statusRow = createElement("div", "lore-cluster");
-    statusRow.append(createTag(state.attachedBookSources[selectedBookId] ? `Attached: ${state.attachedBookSources[selectedBookId]}` : "Unattached", state.attachedBookSources[selectedBookId] ? "good" : "neutral"), createTag(!status ? "Details unavailable" : hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"));
+    const scopes = getBookAttachmentScopes(state, selectedBookId);
+    if (scopes.length) {
+      for (const scope of scopes)
+        statusRow.appendChild(createTag(`Attached: ${scope}`, "good"));
+    } else {
+      statusRow.appendChild(createTag("Unattached", "neutral"));
+    }
+    statusRow.appendChild(createTag(!status ? "Details unavailable" : hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"));
     if (tree?.buildSource)
       statusRow.appendChild(createTag(`Last build: ${formatBuildSource(tree.buildSource)}`, "accent"));
     section.append(createElement("div", "lore-book-title", book?.name || selectedBookId), statusRow);

@@ -1,5 +1,5 @@
 import type { RuntimeBook, IndexedEntry } from "./contracts";
-import type { BookSummary, ManagedBookEntryView } from "../types";
+import type { AttachmentScope, BookSummary, ManagedBookEntryView } from "../types";
 import { EXTENSION_KEY, normalizeEntryRecallMeta, truncateText } from "../shared";
 import { getRuntimeBooks, isReadableBook } from "./storage";
 
@@ -17,21 +17,33 @@ export interface ActiveLoreEntry {
   readonly book_source?: string;
 }
 
-export function mapAttachedBookSources(input: {
+type AttachmentInput = {
   character: readonly string[];
   persona?: string | null;
   chat: readonly string[];
   global: readonly string[];
-}): Record<string, string> {
-  const sources: Record<string, string> = {};
-  const add = (ids: readonly string[], source: string) => {
-    for (const id of ids) if (id && !sources[id]) sources[id] = source;
+};
+
+export function mapAttachedBookScopes(input: AttachmentInput): Record<string, AttachmentScope[]> {
+  const scopes: Record<string, AttachmentScope[]> = {};
+  const add = (ids: readonly string[], scope: AttachmentScope) => {
+    for (const id of ids) {
+      if (!id) continue;
+      const bookScopes = scopes[id] ?? (scopes[id] = []);
+      if (!bookScopes.includes(scope)) bookScopes.push(scope);
+    }
   };
   add(input.character, "character");
   if (input.persona) add([input.persona], "persona");
   add(input.chat, "chat");
   add(input.global, "global");
-  return sources;
+  return scopes;
+}
+
+export function mapAttachedBookSources(input: AttachmentInput): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(mapAttachedBookScopes(input)).map(([id, scopes]) => [id, scopes[0]]),
+  );
 }
 
 /** Match Lumiverse's group lorebook scope when a chat merges character cards. */
@@ -86,6 +98,18 @@ export function attachedWorkspaceBooks(
   return attachedBookIds
     .map((id) => loadedById.get(id) ?? { id, name: id, description: "Details unavailable", updatedAt: 0 })
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function buildAttachedWorkspaceState(
+  scopes: Record<string, AttachmentScope[]>,
+  loadedBooks: readonly RuntimeBook[],
+): Pick<import("../types").FrontendState, "allWorldBooks" | "attachedBookSources" | "attachedBookScopes"> {
+  const bookIds = Object.keys(scopes);
+  return {
+    allWorldBooks: attachedWorkspaceBooks(bookIds, loadedBooks),
+    attachedBookSources: Object.fromEntries(bookIds.map((id) => [id, scopes[id][0]])),
+    attachedBookScopes: scopes,
+  };
 }
 
 function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: IndexedEntry): IndexedEntry {

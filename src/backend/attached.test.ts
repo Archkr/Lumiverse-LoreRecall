@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_BOOK_CONFIG, createEmptyTreeIndex } from "../shared";
 import type { RuntimeBook, IndexedEntry } from "./contracts";
-import { attachedCharacterIds, attachedWorkspaceBooks, mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
+import { attachedCharacterIds, attachedWorkspaceBooks, buildAttachedWorkspaceState, mapAttachedBookScopes, mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
 
 function book(): RuntimeBook {
   const cached: IndexedEntry = {
@@ -69,11 +69,28 @@ describe("attached lorebooks", () => {
   });
 
   test("keeps attached books visible when their details cannot be read", () => {
-    const visible = attachedWorkspaceBooks(["unreadable", "book"], [book()]);
-    expect(visible).toEqual([
+    const scopes = mapAttachedBookScopes({ character: ["book"], persona: null, chat: [], global: ["unreadable", "book"] });
+    const state = buildAttachedWorkspaceState(scopes, [book()]);
+    expect(state.allWorldBooks).toEqual([
       { id: "book", name: "Book", description: "", updatedAt: 1 },
       { id: "unreadable", name: "unreadable", description: "Details unavailable", updatedAt: 0 },
     ]);
+    expect(state.attachedBookSources).toEqual({ book: "character", unreadable: "global" });
+    expect(state.attachedBookScopes.book).toEqual(["character", "global"]);
+    expect(attachedWorkspaceBooks(["unreadable", "book"], [book()])).toEqual(state.allWorldBooks);
+  });
+
+  test("counts six distinct attachments while retaining three global links", () => {
+    const scopes = mapAttachedBookScopes({
+      character: ["character-one", "shared"],
+      persona: "persona-one", chat: ["chat-one"],
+      global: ["global-one", "global-two", "shared"],
+    });
+    const state = buildAttachedWorkspaceState(scopes, []);
+    expect(state.allWorldBooks).toHaveLength(6);
+    expect(Object.keys(state.attachedBookSources)).toHaveLength(6);
+    expect(Object.values(state.attachedBookScopes).filter((sources) => sources.includes("global"))).toHaveLength(3);
+    expect(state.attachedBookScopes.shared).toEqual(["character", "global"]);
   });
 
   test("includes group member books only when Lumiverse merges their lore", () => {

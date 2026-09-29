@@ -1,4 +1,4 @@
-import type { BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
+import type { AttachmentScope, BookTreeIndex, FrontendState, ManagedBookEntryView } from "../types";
 
 export type DrawerFeedFilter = "all" | "entries" | "steps" | "issue";
 
@@ -103,6 +103,61 @@ export function filterBooks(state: FrontendState | null, filterText: string): st
   return state.allWorldBooks
     .filter((book) => !query || `${book.name} ${book.description}`.toLowerCase().includes(query))
     .map((book) => book.id);
+}
+
+export function getBookAttachmentScopes(state: FrontendState, bookId: string): AttachmentScope[] {
+  const scopes = state.attachedBookScopes?.[bookId];
+  if (scopes) return scopes;
+  const source = state.attachedBookSources[bookId];
+  return source === "character" || source === "persona" || source === "chat" || source === "global"
+    ? [source]
+    : [];
+}
+
+export function attachmentScopeSummary(state: FrontendState): string {
+  const order: AttachmentScope[] = ["global", "character", "chat", "persona"];
+  return order
+    .map((scope) => {
+      const count = Object.keys(state.attachedBookSources)
+        .filter((bookId) => getBookAttachmentScopes(state, bookId).includes(scope)).length;
+      return count ? `${count} ${scope}` : null;
+    })
+    .filter((label): label is string => !!label)
+    .join(" · ");
+}
+
+export function getSourceListPresentation(state: FrontendState, filterText: string): {
+  bookIds: string[];
+  missingCount: number;
+  extraCount: number;
+  emptyTitle: string;
+  emptyDetail: string;
+} {
+  const bookIds = filterBooks(state, filterText).filter((id) => id in state.attachedBookSources);
+  const visibleIds = new Set(state.allWorldBooks.map((book) => book.id));
+  const missingCount = Object.keys(state.attachedBookSources).filter((id) => !visibleIds.has(id)).length;
+  const extraCount = [...visibleIds].filter((id) => !(id in state.attachedBookSources)).length;
+  if (missingCount > 0 || extraCount > 0) {
+    const missingDetail = missingCount
+      ? `${missingCount} attached lorebook${missingCount === 1 ? " is" : "s are"} missing from the list.`
+      : "";
+    const extraDetail = extraCount
+      ? `${extraCount} listed lorebook${extraCount === 1 ? " is" : "s are"} no longer attached.`
+      : "";
+    return {
+      bookIds, missingCount, extraCount,
+      emptyTitle: "Lorebook list unavailable",
+      emptyDetail: `${missingDetail} ${extraDetail} Refresh Lore Recall.`.trim(),
+    };
+  }
+  if (filterText.trim() && !bookIds.length) {
+    return { bookIds, missingCount: 0, extraCount: 0, emptyTitle: "No matching lorebooks", emptyDetail: "Change the filter to see attached lorebooks." };
+  }
+  return {
+    bookIds, missingCount: 0, extraCount: 0,
+    emptyTitle: "No attached lorebooks",
+    emptyDetail: "Attach a lorebook in Lumiverse to use it for retrieval.",
+  };
 }
 
 export function formatMode(mode: string | null | undefined): string {

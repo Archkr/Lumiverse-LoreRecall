@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FrontendState } from "../types";
-import { filterBooks, isRecallActive } from "./helpers";
+import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getSourceListPresentation, isRecallActive } from "./helpers";
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
   return {
@@ -14,6 +14,7 @@ function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
       { id: "other", name: "Other Book", description: "misc", updatedAt: 1 },
     ],
     attachedBookSources: {},
+    attachedBookScopes: {},
     hostSelectionAvailable: true,
     availableConnections: [],
     bookConfigs: {},
@@ -107,5 +108,46 @@ describe("filterBooks", () => {
 
   test("shows all books on empty query when there is no curated set", () => {
     expect(filterBooks(makeState(), "")).toEqual(["date-a", "date-b", "date-c", "other"]);
+  });
+});
+
+describe("attached source presentation", () => {
+  test("shows all six distinct books and the three global attachments", () => {
+    const state = makeState({
+      allWorldBooks: ["g1", "g2", "shared", "c1", "p1", "chat1"].map((id) => ({ id, name: id, description: "", updatedAt: 1 })),
+      attachedBookSources: { g1: "global", g2: "global", shared: "character", c1: "character", p1: "persona", chat1: "chat" },
+      attachedBookScopes: { g1: ["global"], g2: ["global"], shared: ["character", "global"], c1: ["character"], p1: ["persona"], chat1: ["chat"] },
+    });
+    expect(getSourceListPresentation(state, "").bookIds).toHaveLength(6);
+    expect(getSourceListPresentation(state, "").missingCount).toBe(0);
+    expect(attachmentScopeSummary(state)).toBe("3 global · 2 character · 1 chat · 1 persona");
+    expect(getBookAttachmentScopes(state, "shared")).toEqual(["character", "global"]);
+  });
+
+  test("reports missing attachment rows as a data error instead of no books", () => {
+    const state = makeState({
+      allWorldBooks: [], attachedBookSources: { g1: "global" }, attachedBookScopes: { g1: ["global"] },
+    });
+    const presentation = getSourceListPresentation(state, "");
+    expect(presentation).toMatchObject({ bookIds: [], missingCount: 1, emptyTitle: "Lorebook list unavailable" });
+    expect(presentation.emptyDetail).toContain("1 attached lorebook is missing");
+  });
+
+  test("does not show stale unattached rows when the inventory disagrees", () => {
+    const state = makeState({
+      allWorldBooks: [{ id: "old", name: "Old", description: "", updatedAt: 1 }],
+      attachedBookSources: {}, attachedBookScopes: {},
+    });
+    expect(getSourceListPresentation(state, "")).toMatchObject({
+      bookIds: [], extraCount: 1, emptyTitle: "Lorebook list unavailable",
+    });
+  });
+
+  test("distinguishes an empty search from missing attached books", () => {
+    const state = makeState({
+      allWorldBooks: [{ id: "date-a", name: "Date A Live V1", description: "", updatedAt: 1 }],
+      attachedBookSources: { "date-a": "global" }, attachedBookScopes: { "date-a": ["global"] },
+    });
+    expect(getSourceListPresentation(state, "unmatched")).toMatchObject({ missingCount: 0, emptyTitle: "No matching lorebooks" });
   });
 });

@@ -77,6 +77,8 @@ export interface BookSummary {
   updatedAt: number;
 }
 
+export type AttachmentScope = "character" | "persona" | "chat" | "global";
+
 export interface ManagedBookEntryView extends EntryRecallMeta {
   entryId: string;
   worldBookId: string;
@@ -375,6 +377,7 @@ export interface FrontendState {
   characterConfig: CharacterRetrievalConfig | null;
   allWorldBooks: BookSummary[];
   attachedBookSources: Record<string, string>;
+  attachedBookScopes: Record<string, AttachmentScope[]>;
   managedEntries: Record<string, ManagedBookEntryView[]>;
   bookConfigs: Record<string, BookRetrievalConfig>;
   bookStatuses: Record<string, BookStatus>;

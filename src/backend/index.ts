@@ -15,7 +15,7 @@ import type {
 } from "../types";
 import type { RuntimeBook } from "./contracts";
 import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
-import { attachedCharacterIds, attachedWorkspaceBooks, loadAttachedRuntimeBooks, mapAttachedBookSources, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
+import { attachedCharacterIds, buildAttachedWorkspaceState, loadAttachedRuntimeBooks, mapAttachedBookScopes, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
@@ -396,6 +396,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     characterConfig: null,
     allWorldBooks: [],
     attachedBookSources: {},
+    attachedBookScopes: {},
     managedEntries: {},
     bookConfigs: {},
     bookStatuses: {},
@@ -434,17 +435,18 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     ? null
     : activePersona ?? await spindle.personas.getDefault(userId).catch(() => null);
   const chatBookIds = activeChat.metadata?.chat_world_book_ids;
-  const attachedBookSources = mapAttachedBookSources({
+  const attachedBookScopes = mapAttachedBookScopes({
     character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
     persona: persona?.attached_world_book_id,
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id): id is string => typeof id === "string") : [],
     global: globalBookIds,
   });
-  const attachedBookIds = Object.keys(attachedBookSources);
+  const attachedBookIds = Object.keys(attachedBookScopes);
   const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(
     attachedBookIds, attachedBookIds, userId, 15_000,
   );
-  const sortedBooks = attachedWorkspaceBooks(attachedBookIds, runtimeBooks);
+  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks);
+  const { attachedBookSources } = attachmentState;
 
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
     book.summary.id, book.cache.entries.map(toWorkspaceEntry),
@@ -500,10 +502,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
 
   const nextState: FrontendState = {
     ...baseState,
+    ...attachmentState,
     activeCharacterId: character?.id ?? null,
     activeCharacterName: character?.name ?? null,
     characterConfig,
-    attachedBookSources,
     managedEntries,
     bookConfigs,
     bookStatuses,

@@ -916,19 +916,23 @@ function canEditBook(config) {
 }
 
 // src/backend/attached.ts
-function mapAttachedBookSources(input) {
-  const sources = {};
-  const add = (ids, source) => {
-    for (const id of ids)
-      if (id && !sources[id])
-        sources[id] = source;
+function mapAttachedBookScopes(input) {
+  const scopes = {};
+  const add = (ids, scope) => {
+    for (const id of ids) {
+      if (!id)
+        continue;
+      const bookScopes = scopes[id] ?? (scopes[id] = []);
+      if (!bookScopes.includes(scope))
+        bookScopes.push(scope);
+    }
   };
   add(input.character, "character");
   if (input.persona)
     add([input.persona], "persona");
   add(input.chat, "chat");
   add(input.global, "global");
-  return sources;
+  return scopes;
 }
 function attachedCharacterIds(activeCharacterId, metadata) {
   if (!activeCharacterId)
@@ -969,6 +973,14 @@ function toWorkspaceEntry(entry) {
 function attachedWorkspaceBooks(attachedBookIds, loadedBooks) {
   const loadedById = new Map(loadedBooks.map((book) => [book.summary.id, book.summary]));
   return attachedBookIds.map((id) => loadedById.get(id) ?? { id, name: id, description: "Details unavailable", updatedAt: 0 }).sort((left, right) => left.name.localeCompare(right.name));
+}
+function buildAttachedWorkspaceState(scopes, loadedBooks) {
+  const bookIds = Object.keys(scopes);
+  return {
+    allWorldBooks: attachedWorkspaceBooks(bookIds, loadedBooks),
+    attachedBookSources: Object.fromEntries(bookIds.map((id) => [id, scopes[id][0]])),
+    attachedBookScopes: scopes
+  };
 }
 function indexedFromHost(entry, book, cached) {
   const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
@@ -4153,6 +4165,7 @@ async function buildState(userId, chatId) {
     characterConfig: null,
     allWorldBooks: [],
     attachedBookSources: {},
+    attachedBookScopes: {},
     managedEntries: {},
     bookConfigs: {},
     bookStatuses: {},
@@ -4178,15 +4191,16 @@ async function buildState(userId, chatId) {
   ]);
   const persona = activeChat.metadata?.temporary === true ? null : activePersona ?? await spindle.personas.getDefault(userId).catch(() => null);
   const chatBookIds = activeChat.metadata?.chat_world_book_ids;
-  const attachedBookSources = mapAttachedBookSources({
+  const attachedBookScopes = mapAttachedBookScopes({
     character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
     persona: persona?.attached_world_book_id,
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
     global: globalBookIds
   });
-  const attachedBookIds = Object.keys(attachedBookSources);
+  const attachedBookIds = Object.keys(attachedBookScopes);
   const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
-  const sortedBooks = attachedWorkspaceBooks(attachedBookIds, runtimeBooks);
+  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks);
+  const { attachedBookSources } = attachmentState;
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
     book.summary.id,
     book.cache.entries.map(toWorkspaceEntry)
@@ -4236,10 +4250,10 @@ async function buildState(userId, chatId) {
     });
   const nextState = {
     ...baseState,
+    ...attachmentState,
     activeCharacterId: character?.id ?? null,
     activeCharacterName: character?.name ?? null,
     characterConfig,
-    attachedBookSources,
     managedEntries,
     bookConfigs,
     bookStatuses,
