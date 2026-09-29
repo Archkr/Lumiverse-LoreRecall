@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_BOOK_CONFIG, createEmptyTreeIndex } from "../shared";
 import type { RuntimeBook, IndexedEntry } from "./contracts";
-import { mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
+import { attachedCharacterIds, attachedWorkspaceBooks, mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
 
 function book(): RuntimeBook {
   const cached: IndexedEntry = {
@@ -66,5 +66,23 @@ describe("attached lorebooks", () => {
     expect(view).toMatchObject({ entryId: "old", label: "Old", previewText: "stale" });
     expect("content" in view).toBe(false);
     expect("legacyTree" in view).toBe(false);
+  });
+
+  test("keeps attached books visible when their details cannot be read", () => {
+    const visible = attachedWorkspaceBooks(["unreadable", "book"], [book()]);
+    expect(visible).toEqual([
+      { id: "book", name: "Book", description: "", updatedAt: 1 },
+      { id: "unreadable", name: "unreadable", description: "Details unavailable", updatedAt: 0 },
+    ]);
+  });
+
+  test("includes group member books only when Lumiverse merges their lore", () => {
+    const metadata = { group: true, character_ids: ["narrator", "lore", "muted"],
+      muted_character_ids: ["muted"], group_card_mode: "merge_ignore_muted" };
+    expect(attachedCharacterIds("narrator", metadata)).toEqual(["narrator", "lore"]);
+    expect(attachedCharacterIds("narrator", { ...metadata, group_lorebook_mode: "active_character" }))
+      .toEqual(["narrator"]);
+    expect(attachedCharacterIds("narrator", { ...metadata, group_lorebook_mode: "all" }))
+      .toEqual(["narrator", "lore", "muted"]);
   });
 });

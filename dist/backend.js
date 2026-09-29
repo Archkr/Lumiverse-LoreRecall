@@ -930,6 +930,20 @@ function mapAttachedBookSources(input) {
   add(input.global, "global");
   return sources;
 }
+function attachedCharacterIds(activeCharacterId, metadata) {
+  if (!activeCharacterId)
+    return [];
+  if (metadata.group !== true && metadata.group !== 1)
+    return [activeCharacterId];
+  const configuredMode = metadata.group_lorebook_mode;
+  const cardMode = metadata.group_card_mode;
+  const mode = configuredMode === "all" || configuredMode === "all_unmuted" || configuredMode === "active_character" ? configuredMode : cardMode === "merge" ? "all" : cardMode === "merge_ignore_muted" ? "all_unmuted" : "active_character";
+  if (mode === "active_character")
+    return [activeCharacterId];
+  const muted = mode === "all_unmuted" && Array.isArray(metadata.muted_character_ids) ? new Set(metadata.muted_character_ids.filter((id) => typeof id === "string")) : new Set;
+  const members = Array.isArray(metadata.character_ids) ? metadata.character_ids.filter((id) => typeof id === "string" && !!id && !muted.has(id)) : [];
+  return members.length ? [...new Set(members)] : [activeCharacterId];
+}
 function toWorkspaceEntry(entry) {
   return {
     entryId: entry.entryId,
@@ -951,6 +965,10 @@ function toWorkspaceEntry(entry) {
     collapsedText: entry.collapsedText,
     tags: entry.tags
   };
+}
+function attachedWorkspaceBooks(attachedBookIds, loadedBooks) {
+  const loadedById = new Map(loadedBooks.map((book) => [book.summary.id, book.summary]));
+  return attachedBookIds.map((id) => loadedById.get(id) ?? { id, name: id, description: "Details unavailable", updatedAt: 0 }).sort((left, right) => left.name.localeCompare(right.name));
 }
 function indexedFromHost(entry, book, cached) {
   const meta = normalizeEntryRecallMeta(entry.extensions[EXTENSION_KEY], {
@@ -4152,21 +4170,23 @@ async function buildState(userId, chatId) {
   }
   const character = activeChat.character_id ? await spindle.characters.get(activeChat.character_id, userId).catch(() => null) : null;
   const characterConfig = character ? await loadCharacterConfig(character.id, userId, character).catch(() => ({ ...DEFAULT_CHARACTER_CONFIG })) : { ...DEFAULT_CHARACTER_CONFIG };
+  const sourceCharacters = await Promise.all(attachedCharacterIds(activeChat.character_id, activeChat.metadata ?? {}).map((id) => id === character?.id ? Promise.resolve(character) : spindle.characters.get(id, userId).catch(() => null)));
   const globalBooksApi = spindle.world_books;
   const [globalBookIds, activePersona] = await Promise.all([
     globalBooksApi.getGlobal?.(userId).catch(() => []) ?? Promise.resolve([]),
     spindle.personas.getActive(userId).catch(() => null)
   ]);
+  const persona = activeChat.metadata?.temporary === true ? null : activePersona ?? await spindle.personas.getDefault(userId).catch(() => null);
   const chatBookIds = activeChat.metadata?.chat_world_book_ids;
   const attachedBookSources = mapAttachedBookSources({
-    character: character?.world_book_ids ?? [],
-    persona: activePersona?.attached_world_book_id,
+    character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
+    persona: persona?.attached_world_book_id,
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id) => typeof id === "string") : [],
     global: globalBookIds
   });
   const attachedBookIds = Object.keys(attachedBookSources);
   const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
-  const sortedBooks = runtimeBooks.map((book) => book.summary).sort((left, right) => left.name.localeCompare(right.name));
+  const sortedBooks = attachedWorkspaceBooks(attachedBookIds, runtimeBooks);
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
     book.summary.id,
     book.cache.entries.map(toWorkspaceEntry)

@@ -15,7 +15,7 @@ import type {
 } from "../types";
 import type { RuntimeBook } from "./contracts";
 import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
-import { loadAttachedRuntimeBooks, mapAttachedBookSources, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
+import { attachedCharacterIds, attachedWorkspaceBooks, loadAttachedRuntimeBooks, mapAttachedBookSources, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
@@ -419,6 +419,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const characterConfig = character
     ? await loadCharacterConfig(character.id, userId, character).catch(() => ({ ...DEFAULT_CHARACTER_CONFIG }))
     : { ...DEFAULT_CHARACTER_CONFIG };
+  const sourceCharacters = await Promise.all(
+    attachedCharacterIds(activeChat.character_id, activeChat.metadata ?? {}).map((id) =>
+      id === character?.id ? Promise.resolve(character) : spindle.characters.get(id, userId).catch(() => null)),
+  );
   const globalBooksApi = spindle.world_books as typeof spindle.world_books & {
     getGlobal?: (userId?: string) => Promise<string[]>;
   };
@@ -426,10 +430,13 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     globalBooksApi.getGlobal?.(userId).catch(() => [] as string[]) ?? Promise.resolve([] as string[]),
     spindle.personas.getActive(userId).catch(() => null),
   ]);
+  const persona = activeChat.metadata?.temporary === true
+    ? null
+    : activePersona ?? await spindle.personas.getDefault(userId).catch(() => null);
   const chatBookIds = activeChat.metadata?.chat_world_book_ids;
   const attachedBookSources = mapAttachedBookSources({
-    character: character?.world_book_ids ?? [],
-    persona: activePersona?.attached_world_book_id,
+    character: sourceCharacters.flatMap((source) => source?.world_book_ids ?? []),
+    persona: persona?.attached_world_book_id,
     chat: Array.isArray(chatBookIds) ? chatBookIds.filter((id): id is string => typeof id === "string") : [],
     global: globalBookIds,
   });
@@ -437,9 +444,7 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
   const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(
     attachedBookIds, attachedBookIds, userId, 15_000,
   );
-  const sortedBooks = runtimeBooks
-    .map((book) => book.summary)
-    .sort((left, right) => left.name.localeCompare(right.name));
+  const sortedBooks = attachedWorkspaceBooks(attachedBookIds, runtimeBooks);
 
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
     book.summary.id, book.cache.entries.map(toWorkspaceEntry),

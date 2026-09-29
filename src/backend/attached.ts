@@ -1,5 +1,5 @@
 import type { RuntimeBook, IndexedEntry } from "./contracts";
-import type { ManagedBookEntryView } from "../types";
+import type { BookSummary, ManagedBookEntryView } from "../types";
 import { EXTENSION_KEY, normalizeEntryRecallMeta, truncateText } from "../shared";
 import { getRuntimeBooks, isReadableBook } from "./storage";
 
@@ -34,6 +34,25 @@ export function mapAttachedBookSources(input: {
   return sources;
 }
 
+/** Match Lumiverse's group lorebook scope when a chat merges character cards. */
+export function attachedCharacterIds(activeCharacterId: string | null, metadata: Record<string, unknown>): string[] {
+  if (!activeCharacterId) return [];
+  if (metadata.group !== true && metadata.group !== 1) return [activeCharacterId];
+  const configuredMode = metadata.group_lorebook_mode;
+  const cardMode = metadata.group_card_mode;
+  const mode = configuredMode === "all" || configuredMode === "all_unmuted" || configuredMode === "active_character"
+    ? configuredMode
+    : cardMode === "merge" ? "all" : cardMode === "merge_ignore_muted" ? "all_unmuted" : "active_character";
+  if (mode === "active_character") return [activeCharacterId];
+  const muted = mode === "all_unmuted" && Array.isArray(metadata.muted_character_ids)
+    ? new Set(metadata.muted_character_ids.filter((id): id is string => typeof id === "string"))
+    : new Set<string>();
+  const members = Array.isArray(metadata.character_ids)
+    ? metadata.character_ids.filter((id): id is string => typeof id === "string" && !!id && !muted.has(id))
+    : [];
+  return members.length ? [...new Set(members)] : [activeCharacterId];
+}
+
 /** Workspace messages contain editable metadata, never full lore entry bodies. */
 export function toWorkspaceEntry(entry: IndexedEntry): ManagedBookEntryView {
   return {
@@ -56,6 +75,17 @@ export function toWorkspaceEntry(entry: IndexedEntry): ManagedBookEntryView {
     collapsedText: entry.collapsedText,
     tags: entry.tags,
   };
+}
+
+/** Attachment inventory remains visible even when a book's details fail to load. */
+export function attachedWorkspaceBooks(
+  attachedBookIds: readonly string[],
+  loadedBooks: readonly RuntimeBook[],
+): BookSummary[] {
+  const loadedById = new Map(loadedBooks.map((book) => [book.summary.id, book.summary]));
+  return attachedBookIds
+    .map((id) => loadedById.get(id) ?? { id, name: id, description: "Details unavailable", updatedAt: 0 })
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: IndexedEntry): IndexedEntry {

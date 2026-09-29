@@ -44,7 +44,6 @@ import {
   getEntryBreadcrumb,
   isRecallActive,
   openSettingsWorkspace,
-  readChatId,
   readChatIdFromSettingsUpdate,
   truncateMiddle,
 } from "./helpers";
@@ -178,6 +177,14 @@ export function setup(ctx: SpindleFrontendContext) {
   let pendingTrackedRequest: TrackedFrontendMessage | null = null;
   let optimisticOperationId: string | null = null;
   let optimisticOperationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function getLiveChatId(): string | null {
+    try {
+      return ctx.getActiveChat().chatId;
+    } catch {
+      return currentState?.activeChatId ?? null;
+    }
+  }
 
   function getManagedBookIds(): string[] {
     return currentState?.allWorldBooks.map((book) => book.id) ?? [];
@@ -617,7 +624,7 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function scheduleRefresh(chatId?: string | null): void {
-    pendingChatId = typeof chatId === "undefined" ? currentState?.activeChatId ?? null : chatId;
+    pendingChatId = typeof chatId === "undefined" ? getLiveChatId() : chatId;
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       sendToBackend(ctx, { type: "refresh", chatId: pendingChatId });
@@ -1918,7 +1925,7 @@ export function setup(ctx: SpindleFrontendContext) {
     refreshBtn.setAttribute("aria-label", "Refresh");
     refreshBtn.innerHTML = iconHtml("refresh");
     refreshBtn.addEventListener("click", () =>
-      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null }),
+      sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() }),
     );
     headActions.appendChild(refreshBtn);
     head.appendChild(headActions);
@@ -2152,6 +2159,7 @@ export function setup(ctx: SpindleFrontendContext) {
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
+      if (!status) tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
       row.appendChild(tags);
 
@@ -2220,7 +2228,7 @@ export function setup(ctx: SpindleFrontendContext) {
     refreshBtn.setAttribute("aria-label", "Refresh lorebook list");
     refreshBtn.innerHTML = iconHtml("refresh");
     refreshBtn.addEventListener("click", () => {
-      sendToBackend(ctx, { type: "refresh", chatId: state.activeChatId });
+      sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() });
     });
     tools.appendChild(refreshBtn);
 
@@ -2263,6 +2271,7 @@ export function setup(ctx: SpindleFrontendContext) {
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
+      if (!status) tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
       if (hasTree) tags.appendChild(createTag("Built", "accent"));
       row.appendChild(tags);
@@ -2334,7 +2343,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const statusRow = createElement("div", "lore-cluster");
     statusRow.append(
       createTag(state.attachedBookSources[selectedBookId] ? `Attached: ${state.attachedBookSources[selectedBookId]}` : "Unattached", state.attachedBookSources[selectedBookId] ? "good" : "neutral"),
-      createTag(hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"),
+      createTag(!status ? "Details unavailable" : hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"),
     );
     if (tree?.buildSource) statusRow.appendChild(createTag(`Last build: ${formatBuildSource(tree.buildSource)}`, "accent"));
     section.append(
@@ -2353,7 +2362,9 @@ export function setup(ctx: SpindleFrontendContext) {
       if (getActiveOperation()) rebuild.disabled = true;
       cluster.appendChild(rebuild);
     }
-    cluster.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace()));
+    const openTree = createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace());
+    openTree.disabled = !status;
+    cluster.appendChild(openTree);
     actions.appendChild(cluster);
     wrap.appendChild(actions);
 
@@ -2381,6 +2392,7 @@ export function setup(ctx: SpindleFrontendContext) {
     kind: "metadata" | "llm",
   ): string | null {
     const status = state.bookStatuses[bookId];
+    if (!status) return "Lorebook details could not be loaded.";
     if (state.bookConfigs[bookId]?.permission === "read_only") {
       return "Book is read-only.";
     }
@@ -2403,6 +2415,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function describeBookBuildStatus(state: FrontendState, bookId: string): string {
     const status = state.bookStatuses[bookId];
+    if (!status) return "Details unavailable";
     const tree = getBookTree(bookId);
     const entryCount = status?.entryCount ?? 0;
     const built = hasBuiltTree(bookId);
@@ -2441,7 +2454,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const check = createElement("input") as HTMLInputElement;
     check.type = "checkbox";
     check.checked = isSelected;
-    check.disabled = !!activeOperation || isReadOnly;
+    check.disabled = !!activeOperation || isReadOnly || !state.bookStatuses[bookId];
     check.addEventListener("change", () => {
       if (check.checked) buildSelection.add(bookId);
       else buildSelection.delete(bookId);
@@ -2536,10 +2549,11 @@ export function setup(ctx: SpindleFrontendContext) {
     section.appendChild(list);
 
     // Selection / bulk action bar
-    const selectedIds = managedBookIds.filter((id) => buildSelection.has(id));
+    const availableIds = managedBookIds.filter((id) => !!state.bookStatuses[id]);
+    const selectedIds = availableIds.filter((id) => buildSelection.has(id));
     const selectedCount = selectedIds.length;
-    const targetIds = selectedCount > 0 ? selectedIds : managedBookIds;
-    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${managedBookIds.length}`;
+    const targetIds = selectedCount > 0 ? selectedIds : availableIds;
+    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${availableIds.length}`;
 
     const metadataMessage: TrackedFrontendMessage = {
       type: "build_tree_from_metadata",
@@ -2559,10 +2573,10 @@ export function setup(ctx: SpindleFrontendContext) {
     );
 
     // Aggregate per-book blockers for the bulk action
-    const allTargetsHaveNoEntries = targetIds.every(
+    const allTargetsHaveNoEntries = targetIds.length > 0 && targetIds.every(
       (id) => (state.bookStatuses[id]?.entryCount ?? 0) === 0,
     );
-    const allTargetsReadOnly = targetIds.every(
+    const allTargetsReadOnly = targetIds.length > 0 && targetIds.every(
       (id) => state.bookConfigs[id]?.permission === "read_only",
     );
     const noEntriesReason = allTargetsHaveNoEntries
@@ -2571,10 +2585,11 @@ export function setup(ctx: SpindleFrontendContext) {
     const readOnlyReason = allTargetsReadOnly
       ? `${targetIds.length === 1 ? "This book is" : "All targeted books are"} read-only — Lore Recall can't rebuild their trees.`
       : null;
+    const unavailableReason = targetIds.length === 0 ? "No attached lorebook details are available yet." : null;
     const metaBlocker =
-      readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
+      unavailableReason ?? readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
     const llmBlocker =
-      readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
+      unavailableReason ?? readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
 
     const bulkBar = createElement("div", "lore-build-bulkbar");
     const bulkLabel = createElement("div", "lore-build-bulkbar-label");
@@ -2596,7 +2611,7 @@ export function setup(ctx: SpindleFrontendContext) {
       selectAllBtn.type = "button";
       selectAllBtn.textContent = "Select all";
       selectAllBtn.addEventListener("click", () => {
-        for (const id of managedBookIds) buildSelection.add(id);
+        for (const id of availableIds) buildSelection.add(id);
         render();
       });
       bulkLabel.appendChild(selectAllBtn);
@@ -3610,7 +3625,7 @@ export function setup(ctx: SpindleFrontendContext) {
     refreshBtn.setAttribute("aria-label", "Refresh");
     refreshBtn.innerHTML = iconHtml("refresh");
     refreshBtn.addEventListener("click", () =>
-      sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null }),
+      sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() }),
     );
     const closeBtn = createElement("button", "lore-btn lore-btn-sm lore-btn-icon-only") as HTMLButtonElement;
     closeBtn.type = "button";
@@ -3760,10 +3775,6 @@ export function setup(ctx: SpindleFrontendContext) {
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw as BackendToFrontend;
     if (message.type === "state") {
-      if (readyRetryTimer) {
-        clearInterval(readyRetryTimer);
-        readyRetryTimer = null;
-      }
       currentState = {
         ...message.state,
         globalSettings: normalizeGlobalSettings(message.state.globalSettings),
@@ -3814,6 +3825,12 @@ export function setup(ctx: SpindleFrontendContext) {
 
   for (const eventName of [
     "CHAT_CHANGED",
+    "CHAT_SWITCHED",
+    "CHARACTER_EDITED",
+    "CHARACTER_LIBRARY_CHANGED",
+    "PERSONA_CHANGED",
+    "WORLD_BOOK_CHANGED",
+    "WORLD_BOOK_LIBRARY_CHANGED",
     "MESSAGE_SENT",
     "MESSAGE_EDITED",
     "MESSAGE_DELETED",
@@ -3821,7 +3838,7 @@ export function setup(ctx: SpindleFrontendContext) {
     "GENERATION_ENDED",
     "GENERATION_STOPPED",
   ]) {
-    cleanups.push(ctx.events.on(eventName, (payload: unknown) => scheduleRefresh(readChatId(payload))));
+    cleanups.push(ctx.events.on(eventName, () => scheduleRefresh(getLiveChatId())));
   }
 
   cleanups.push(
@@ -3832,12 +3849,15 @@ export function setup(ctx: SpindleFrontendContext) {
   );
 
   // A frontend can mount while its WebSocket is still reconnecting. The host
-  // silently drops sends during that gap, so repeat the initial request until
-  // the first state arrives.
+  // silently drops sends during that gap. Also recover if the first state was
+  // built before the active chat became available in the frontend.
   readyRetryTimer = setInterval(() => {
-    if (!currentState) sendToBackend(ctx, { type: "ready" });
+    const chatId = getLiveChatId();
+    if (!currentState || (chatId && currentState.activeChatId !== chatId)) {
+      sendToBackend(ctx, { type: "ready", chatId });
+    }
   }, 20_000);
-  sendToBackend(ctx, { type: "ready" });
+  sendToBackend(ctx, { type: "ready", chatId: getLiveChatId() });
   render();
 
   return () => {

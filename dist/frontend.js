@@ -208,12 +208,6 @@ function truncateMiddle(value, lead = 10, tail = 8) {
     return value;
   return `${value.slice(0, lead)}...${value.slice(-tail)}`;
 }
-function readChatId(payload) {
-  if (!payload || typeof payload !== "object")
-    return null;
-  const value = payload;
-  return typeof value.chatId === "string" && value.chatId.trim() ? value.chatId : null;
-}
 function readChatIdFromSettingsUpdate(payload) {
   if (!payload || typeof payload !== "object")
     return;
@@ -3391,6 +3385,13 @@ function setup(ctx) {
   let pendingTrackedRequest = null;
   let optimisticOperationId = null;
   let optimisticOperationTimer = null;
+  function getLiveChatId() {
+    try {
+      return ctx.getActiveChat().chatId;
+    } catch {
+      return currentState?.activeChatId ?? null;
+    }
+  }
   function getManagedBookIds() {
     return currentState?.allWorldBooks.map((book) => book.id) ?? [];
   }
@@ -3805,7 +3806,7 @@ function setup(ctx) {
     return null;
   }
   function scheduleRefresh(chatId) {
-    pendingChatId = typeof chatId === "undefined" ? currentState?.activeChatId ?? null : chatId;
+    pendingChatId = typeof chatId === "undefined" ? getLiveChatId() : chatId;
     if (refreshTimer)
       clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
@@ -4883,7 +4884,7 @@ function setup(ctx) {
     refreshBtn.title = "Refresh";
     refreshBtn.setAttribute("aria-label", "Refresh");
     refreshBtn.innerHTML = iconHtml("refresh");
-    refreshBtn.addEventListener("click", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null }));
+    refreshBtn.addEventListener("click", () => sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() }));
     headActions.appendChild(refreshBtn);
     head.appendChild(headActions);
     shell.appendChild(head);
@@ -5043,6 +5044,8 @@ function setup(ctx) {
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
+      if (!status)
+        tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing)
         tags.appendChild(createTag("No tree", "warn"));
       row.appendChild(tags);
@@ -5089,7 +5092,7 @@ function setup(ctx) {
     refreshBtn.setAttribute("aria-label", "Refresh lorebook list");
     refreshBtn.innerHTML = iconHtml("refresh");
     refreshBtn.addEventListener("click", () => {
-      sendToBackend(ctx, { type: "refresh", chatId: state.activeChatId });
+      sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() });
     });
     tools.appendChild(refreshBtn);
     section.appendChild(tools);
@@ -5126,6 +5129,8 @@ function setup(ctx) {
       if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
         tags.appendChild(createTag("Native activation", "warn"));
       }
+      if (!status)
+        tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing)
         tags.appendChild(createTag("No tree", "warn"));
       if (hasTree)
@@ -5186,7 +5191,7 @@ function setup(ctx) {
     const managed = isManagedBook(selectedBookId);
     const tree = getBookTree(selectedBookId);
     const statusRow = createElement("div", "lore-cluster");
-    statusRow.append(createTag(state.attachedBookSources[selectedBookId] ? `Attached: ${state.attachedBookSources[selectedBookId]}` : "Unattached", state.attachedBookSources[selectedBookId] ? "good" : "neutral"), createTag(hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"));
+    statusRow.append(createTag(state.attachedBookSources[selectedBookId] ? `Attached: ${state.attachedBookSources[selectedBookId]}` : "Unattached", state.attachedBookSources[selectedBookId] ? "good" : "neutral"), createTag(!status ? "Details unavailable" : hasBuiltTree(selectedBookId) ? "Tree ready" : "No tree", hasBuiltTree(selectedBookId) ? "good" : "warn"));
     if (tree?.buildSource)
       statusRow.appendChild(createTag(`Last build: ${formatBuildSource(tree.buildSource)}`, "accent"));
     section.append(createElement("div", "lore-book-title", book?.name || selectedBookId), statusRow);
@@ -5201,7 +5206,9 @@ function setup(ctx) {
         rebuild.disabled = true;
       cluster.appendChild(rebuild);
     }
-    cluster.appendChild(createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace()));
+    const openTree = createButton("Open tree workspace", "lore-btn lore-btn-primary lore-btn-sm", () => openWorkspace());
+    openTree.disabled = !status;
+    cluster.appendChild(openTree);
     actions.appendChild(cluster);
     wrap.appendChild(actions);
     return wrap;
@@ -5223,6 +5230,8 @@ function setup(ctx) {
   }
   function getBookBuildBlocker(state, bookId, kind) {
     const status = state.bookStatuses[bookId];
+    if (!status)
+      return "Lorebook details could not be loaded.";
     if (state.bookConfigs[bookId]?.permission === "read_only") {
       return "Book is read-only.";
     }
@@ -5241,6 +5250,8 @@ function setup(ctx) {
   }
   function describeBookBuildStatus(state, bookId) {
     const status = state.bookStatuses[bookId];
+    if (!status)
+      return "Details unavailable";
     const tree = getBookTree(bookId);
     const entryCount = status?.entryCount ?? 0;
     const built = hasBuiltTree(bookId);
@@ -5270,7 +5281,7 @@ function setup(ctx) {
     const check = createElement("input");
     check.type = "checkbox";
     check.checked = isSelected;
-    check.disabled = !!activeOperation || isReadOnly;
+    check.disabled = !!activeOperation || isReadOnly || !state.bookStatuses[bookId];
     check.addEventListener("change", () => {
       if (check.checked)
         buildSelection.add(bookId);
@@ -5338,10 +5349,11 @@ function setup(ctx) {
       list.appendChild(renderBookBuildRow(state, bookId, activeOperation));
     }
     section.appendChild(list);
-    const selectedIds = managedBookIds.filter((id) => buildSelection.has(id));
+    const availableIds = managedBookIds.filter((id) => !!state.bookStatuses[id]);
+    const selectedIds = availableIds.filter((id) => buildSelection.has(id));
     const selectedCount = selectedIds.length;
-    const targetIds = selectedCount > 0 ? selectedIds : managedBookIds;
-    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${managedBookIds.length}`;
+    const targetIds = selectedCount > 0 ? selectedIds : availableIds;
+    const targetLabel = selectedCount > 0 ? `${selectedCount} selected` : `all ${availableIds.length}`;
     const metadataMessage = {
       type: "build_tree_from_metadata",
       bookIds: targetIds,
@@ -5354,12 +5366,13 @@ function setup(ctx) {
     };
     const metadataWarnings = getPreflightWarnings(metadataMessage).filter((warning) => !warning.includes("still running"));
     const llmWarnings = getPreflightWarnings(llmMessage).filter((warning) => !warning.includes("still running"));
-    const allTargetsHaveNoEntries = targetIds.every((id) => (state.bookStatuses[id]?.entryCount ?? 0) === 0);
-    const allTargetsReadOnly = targetIds.every((id) => state.bookConfigs[id]?.permission === "read_only");
+    const allTargetsHaveNoEntries = targetIds.length > 0 && targetIds.every((id) => (state.bookStatuses[id]?.entryCount ?? 0) === 0);
+    const allTargetsReadOnly = targetIds.length > 0 && targetIds.every((id) => state.bookConfigs[id]?.permission === "read_only");
     const noEntriesReason = allTargetsHaveNoEntries ? `${targetIds.length === 1 ? "This book has" : "All targeted books have"} no entries yet — add lorebook entries before building.` : null;
     const readOnlyReason = allTargetsReadOnly ? `${targetIds.length === 1 ? "This book is" : "All targeted books are"} read-only — Lore Recall can't rebuild their trees.` : null;
-    const metaBlocker = readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
-    const llmBlocker = readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
+    const unavailableReason = targetIds.length === 0 ? "No attached lorebook details are available yet." : null;
+    const metaBlocker = unavailableReason ?? readOnlyReason ?? noEntriesReason ?? (metadataWarnings.length ? metadataWarnings[0] : null);
+    const llmBlocker = unavailableReason ?? readOnlyReason ?? noEntriesReason ?? (llmWarnings.length ? llmWarnings[0] : null);
     const bulkBar = createElement("div", "lore-build-bulkbar");
     const bulkLabel = createElement("div", "lore-build-bulkbar-label");
     if (selectedCount > 0) {
@@ -5378,7 +5391,7 @@ function setup(ctx) {
       selectAllBtn.type = "button";
       selectAllBtn.textContent = "Select all";
       selectAllBtn.addEventListener("click", () => {
-        for (const id of managedBookIds)
+        for (const id of availableIds)
           buildSelection.add(id);
         render();
       });
@@ -6090,7 +6103,7 @@ function setup(ctx) {
     refreshBtn.title = "Refresh";
     refreshBtn.setAttribute("aria-label", "Refresh");
     refreshBtn.innerHTML = iconHtml("refresh");
-    refreshBtn.addEventListener("click", () => sendToBackend(ctx, { type: "refresh", chatId: currentState?.activeChatId ?? null }));
+    refreshBtn.addEventListener("click", () => sendToBackend(ctx, { type: "refresh", chatId: getLiveChatId() }));
     const closeBtn = createElement("button", "lore-btn lore-btn-sm lore-btn-icon-only");
     closeBtn.type = "button";
     closeBtn.title = "Close workspace";
@@ -6190,10 +6203,6 @@ function setup(ctx) {
   const onBackendMessage = ctx.onBackendMessage((raw) => {
     const message = raw;
     if (message.type === "state") {
-      if (readyRetryTimer) {
-        clearInterval(readyRetryTimer);
-        readyRetryTimer = null;
-      }
       currentState = {
         ...message.state,
         globalSettings: normalizeGlobalSettings(message.state.globalSettings),
@@ -6243,6 +6252,12 @@ function setup(ctx) {
   cleanups.push(onBackendMessage);
   for (const eventName of [
     "CHAT_CHANGED",
+    "CHAT_SWITCHED",
+    "CHARACTER_EDITED",
+    "CHARACTER_LIBRARY_CHANGED",
+    "PERSONA_CHANGED",
+    "WORLD_BOOK_CHANGED",
+    "WORLD_BOOK_LIBRARY_CHANGED",
     "MESSAGE_SENT",
     "MESSAGE_EDITED",
     "MESSAGE_DELETED",
@@ -6250,7 +6265,7 @@ function setup(ctx) {
     "GENERATION_ENDED",
     "GENERATION_STOPPED"
   ]) {
-    cleanups.push(ctx.events.on(eventName, (payload) => scheduleRefresh(readChatId(payload))));
+    cleanups.push(ctx.events.on(eventName, () => scheduleRefresh(getLiveChatId())));
   }
   cleanups.push(ctx.events.on("SETTINGS_UPDATED", (payload) => {
     const nextChatId = readChatIdFromSettingsUpdate(payload);
@@ -6258,10 +6273,12 @@ function setup(ctx) {
       scheduleRefresh(nextChatId);
   }));
   readyRetryTimer = setInterval(() => {
-    if (!currentState)
-      sendToBackend(ctx, { type: "ready" });
+    const chatId = getLiveChatId();
+    if (!currentState || chatId && currentState.activeChatId !== chatId) {
+      sendToBackend(ctx, { type: "ready", chatId });
+    }
   }, 20000);
-  sendToBackend(ctx, { type: "ready" });
+  sendToBackend(ctx, { type: "ready", chatId: getLiveChatId() });
   render();
   return () => {
     if (readyRetryTimer)
