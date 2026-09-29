@@ -93,6 +93,19 @@ describe("attached lorebooks", () => {
     expect(state.attachedBookScopes.shared).toEqual(["character", "global"]);
   });
 
+  test("omits stale global IDs but keeps the three existing global books", () => {
+    const presentIds = ["calamities", "arcs", "v4"];
+    const missingIds = ["deleted-one", "deleted-two", "deleted-three"];
+    const scopes = mapAttachedBookScopes({
+      character: [], persona: null, chat: [], global: [...missingIds, ...presentIds],
+    });
+    const loaded = presentIds.map((id) => ({ ...book(), summary: { ...book().summary, id, name: id } }));
+    const state = buildAttachedWorkspaceState(scopes, loaded, missingIds);
+    expect(state.allWorldBooks.map((item) => item.id)).toEqual([...presentIds].sort());
+    expect(Object.keys(state.attachedBookSources)).toEqual(presentIds);
+    expect(Object.values(state.attachedBookScopes).filter((sources) => sources.includes("global"))).toHaveLength(3);
+  });
+
   test("includes group member books only when Lumiverse merges their lore", () => {
     const metadata = { group: true, character_ids: ["narrator", "lore", "muted"],
       muted_character_ids: ["muted"], group_card_mode: "merge_ignore_muted" };

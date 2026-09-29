@@ -17,6 +17,7 @@ describe("attached workspace book loading", () => {
         get: async (id: string) => {
           requested.push(id);
           if (id === "broken") throw new Error("Book storage failed");
+          if (id === "missing") return null;
           return { id, name: "Ready", description: "", updated_at: 1 };
         },
         entries: { list: async () => { throw new Error("Cached entries should be used"); } },
@@ -31,13 +32,15 @@ describe("attached workspace book loading", () => {
     };
 
     const sources = mapAttachedBookSources({
-      character: ["ready"], persona: "broken", chat: [], global: [],
+      character: ["ready"], persona: "broken", chat: [], global: ["missing"],
     });
     const attachedIds = Object.keys(sources);
     const result = await getRuntimeBooks(attachedIds, attachedIds, "user", 100);
-    expect(requested).toEqual(["ready", "broken"]);
+    expect(requested).toEqual(["ready", "broken", "missing"]);
     expect(result.runtimeBooks.map((book) => book.summary.id)).toEqual(["ready"]);
     expect(result.loadIssues.broken).toBe("Book storage failed");
+    expect(result.loadIssues.missing).toBe("This lorebook is no longer available.");
+    expect(result.missingBookIds).toEqual(["missing"]);
   });
 
   test("a stalled attached book stops holding the workspace state", async () => {
@@ -49,5 +52,6 @@ describe("attached workspace book loading", () => {
     const result = await getRuntimeBooks(["stalled"], ["stalled"], "user", 5);
     expect(result.runtimeBooks).toEqual([]);
     expect(result.loadIssues.stalled).toBe("Loading this lorebook timed out.");
+    expect(result.missingBookIds).toEqual([]);
   });
 });

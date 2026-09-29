@@ -103,12 +103,15 @@ export function attachedWorkspaceBooks(
 export function buildAttachedWorkspaceState(
   scopes: Record<string, AttachmentScope[]>,
   loadedBooks: readonly RuntimeBook[],
+  missingBookIds: readonly string[] = [],
 ): Pick<import("../types").FrontendState, "allWorldBooks" | "attachedBookSources" | "attachedBookScopes"> {
-  const bookIds = Object.keys(scopes);
+  const missing = new Set(missingBookIds);
+  const bookIds = Object.keys(scopes).filter((id) => !missing.has(id));
+  const existingScopes = Object.fromEntries(bookIds.map((id) => [id, scopes[id]]));
   return {
     allWorldBooks: attachedWorkspaceBooks(bookIds, loadedBooks),
     attachedBookSources: Object.fromEntries(bookIds.map((id) => [id, scopes[id][0]])),
-    attachedBookScopes: scopes,
+    attachedBookScopes: existingScopes,
   };
 }
 

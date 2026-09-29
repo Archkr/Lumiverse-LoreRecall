@@ -451,10 +451,12 @@ export async function getRuntimeBooks(
   runtimeBooks: RuntimeBook[];
   staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }>;
   loadIssues: Record<string, string>;
+  missingBookIds: string[];
 }> {
   const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues: Record<string, { staleEntryRefs: number; staleNodeRefs: number }> = {};
   const loadIssues: Record<string, string> = {};
+  const missingBookIds = new Set<string>();
   const runtimeBooks = (
     await Promise.all(
       selectedBookIds.map(async (bookId) => {
@@ -462,7 +464,10 @@ export async function getRuntimeBooks(
         try {
           const load = async () => {
             const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
-            if (!cache) throw new Error("This lorebook is no longer available.");
+            if (!cache) {
+              missingBookIds.add(bookId);
+              throw new Error("This lorebook is no longer available.");
+            }
 
             const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
             return {
@@ -502,7 +507,7 @@ export async function getRuntimeBooks(
     )
   ).filter((book): book is RuntimeBook => !!book);
 
-  return { runtimeBooks, staleIssues, loadIssues };
+  return { runtimeBooks, staleIssues, loadIssues, missingBookIds: selectedBookIds.filter((id) => missingBookIds.has(id)) };
 }
 
 export function computeSuggestedBookIds(

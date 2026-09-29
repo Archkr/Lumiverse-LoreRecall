@@ -854,13 +854,16 @@ async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId, maxWait
   const attachedBookIdSet = new Set(attachedBookIds);
   const staleIssues = {};
   const loadIssues = {};
+  const missingBookIds = new Set;
   const runtimeBooks = (await Promise.all(selectedBookIds.map(async (bookId) => {
     let timer;
     try {
       const load = async () => {
         const [cache, config] = await Promise.all([loadBookCache(bookId, userId), loadBookConfig(bookId, userId)]);
-        if (!cache)
+        if (!cache) {
+          missingBookIds.add(bookId);
           throw new Error("This lorebook is no longer available.");
+        }
         const loadedTree = await loadTreeIndex(bookId, cache.entries, userId);
         return {
           book: {
@@ -895,7 +898,7 @@ async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId, maxWait
         clearTimeout(timer);
     }
   }))).filter((book) => !!book);
-  return { runtimeBooks, staleIssues, loadIssues };
+  return { runtimeBooks, staleIssues, loadIssues, missingBookIds: selectedBookIds.filter((id) => missingBookIds.has(id)) };
 }
 function normalizeEntryMetaForWrite(raw, seed) {
   const normalized = normalizeEntryRecallMeta(raw, seed);
@@ -974,12 +977,14 @@ function attachedWorkspaceBooks(attachedBookIds, loadedBooks) {
   const loadedById = new Map(loadedBooks.map((book) => [book.summary.id, book.summary]));
   return attachedBookIds.map((id) => loadedById.get(id) ?? { id, name: id, description: "Details unavailable", updatedAt: 0 }).sort((left, right) => left.name.localeCompare(right.name));
 }
-function buildAttachedWorkspaceState(scopes, loadedBooks) {
-  const bookIds = Object.keys(scopes);
+function buildAttachedWorkspaceState(scopes, loadedBooks, missingBookIds = []) {
+  const missing = new Set(missingBookIds);
+  const bookIds = Object.keys(scopes).filter((id) => !missing.has(id));
+  const existingScopes = Object.fromEntries(bookIds.map((id) => [id, scopes[id]]));
   return {
     allWorldBooks: attachedWorkspaceBooks(bookIds, loadedBooks),
     attachedBookSources: Object.fromEntries(bookIds.map((id) => [id, scopes[id][0]])),
-    attachedBookScopes: scopes
+    attachedBookScopes: existingScopes
   };
 }
 function indexedFromHost(entry, book, cached) {
@@ -4198,8 +4203,8 @@ async function buildState(userId, chatId) {
     global: globalBookIds
   });
   const attachedBookIds = Object.keys(attachedBookScopes);
-  const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
-  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks);
+  const { runtimeBooks, staleIssues, loadIssues, missingBookIds } = await getRuntimeBooks(attachedBookIds, attachedBookIds, userId, 15000);
+  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks, missingBookIds);
   const { attachedBookSources } = attachmentState;
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
     book.summary.id,
@@ -4232,6 +4237,16 @@ async function buildState(userId, chatId) {
   ] : [];
   const diagnosticsResults = stateIssues.concat(buildDiagnostics(runtimeBooks.filter((book) => attachedBookSources[book.summary.id]), staleIssues, settings, characterConfig, connections), previewDiagnostics);
   for (const [bookId, reason] of Object.entries(loadIssues)) {
+    if (missingBookIds.includes(bookId)) {
+      diagnosticsResults.push({
+        id: `stale-attached-book:${bookId}`,
+        severity: "info",
+        bookId,
+        title: "Stale lorebook attachment omitted",
+        detail: "Lumiverse still has this ID in its saved attachments, but the lorebook no longer exists."
+      });
+      continue;
+    }
     diagnosticsResults.push({
       id: `attached-book-load:${bookId}`,
       severity: "warn",

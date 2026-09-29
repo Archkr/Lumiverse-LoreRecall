@@ -442,10 +442,10 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     global: globalBookIds,
   });
   const attachedBookIds = Object.keys(attachedBookScopes);
-  const { runtimeBooks, staleIssues, loadIssues } = await getRuntimeBooks(
+  const { runtimeBooks, staleIssues, loadIssues, missingBookIds } = await getRuntimeBooks(
     attachedBookIds, attachedBookIds, userId, 15_000,
   );
-  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks);
+  const attachmentState = buildAttachedWorkspaceState(attachedBookScopes, runtimeBooks, missingBookIds);
   const { attachedBookSources } = attachmentState;
 
   const managedEntries = Object.fromEntries(runtimeBooks.map((book) => [
@@ -488,6 +488,14 @@ async function buildState(userId: string, chatId?: string | null): Promise<State
     previewDiagnostics,
   );
   for (const [bookId, reason] of Object.entries(loadIssues)) {
+    if (missingBookIds.includes(bookId)) {
+      diagnosticsResults.push({
+        id: `stale-attached-book:${bookId}`, severity: "info", bookId,
+        title: "Stale lorebook attachment omitted",
+        detail: "Lumiverse still has this ID in its saved attachments, but the lorebook no longer exists.",
+      });
+      continue;
+    }
     diagnosticsResults.push({
       id: `attached-book-load:${bookId}`, severity: "warn", bookId,
       title: "Attached lorebook could not be loaded",
