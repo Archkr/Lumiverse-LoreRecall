@@ -17,7 +17,7 @@ import type { RuntimeBook } from "./contracts";
 import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
 import { attachedCharacterIds, buildAttachedWorkspaceState, mapAttachedBookScopes, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
-import { injectRecallEntries, RecallRunStore, suppressedNativeEntryIds } from "./activation";
+import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, RecallRunStore, suppressedNativeEntryIds } from "./activation";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
   type OperationContext,
@@ -799,9 +799,7 @@ function recordNativeFallback(userId: string, chatId: string, reason: string, ex
   const sessionId = existingSessionId ?? "fallback:" + Date.now() + ":" + Math.random().toString(36).slice(2, 8);
   const cached = previewCache.get(getPreviewCacheKey(userId, chatId));
   if (cached) {
-    cached.activationSource = "native";
-    cached.injectedNodes = [];
-    cached.injectedText = "";
+    markRecallNativeFallback(cached, reason);
   }
   const existing = retrievalFeedCache.get(getPreviewCacheKey(userId, chatId))
     ?.sessions.find((session) => session.id === sessionId);
@@ -979,11 +977,7 @@ function registerRecallHooks(): void {
       return messages;
     }
     const injected = injectRecallEntries(messages, run.entries);
-    const injectedIds = new Set(run.entries.map((entry) => entry.id));
-    run.preview.injectedNodes = run.preview.injectedNodes.filter((node) => injectedIds.has(node.entryId));
-    run.preview.activationSource = "recall";
-    run.preview.injectedText = run.entries.map((entry) => entry.content).join("\n\n");
-    run.preview.estimatedTokens = Math.ceil(run.preview.injectedText.length / 4);
+    finalizeRecallActivation(run.preview, run.entries);
     previewCache.set(getPreviewCacheKey(run.userId, run.chatId), run.preview);
     if (!context.dryRun) recordDynamicInjection(
       getPreviewCacheKey(run.userId, run.chatId), run.preview, run.runtimeBooks);

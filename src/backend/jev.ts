@@ -44,6 +44,7 @@ export interface JevFilterResult { verdicts: JevVerdict[]; error: string | null 
 /** One question per candidate. Missing or malformed answers fail open. */
 export async function filterWithJev(
   entries: IndexedEntry[], conversation: string, settings: GlobalLoreRecallSettings, userId: string,
+  options: { deadlineAt?: number; signal?: AbortSignal } = {},
 ): Promise<JevFilterResult> {
   if (!entries.length) return { verdicts: [], error: null };
   const key = await readJevKey(settings.jevProvider, userId);
@@ -56,9 +57,9 @@ export async function filterWithJev(
 
   const verdicts: JevVerdict[] = [];
   const provider = PROVIDERS[settings.jevProvider];
-  const deadline = Date.now() + 20_000;
+  const deadline = Math.min(Date.now() + 20_000, options.deadlineAt ?? Infinity);
   for (let offset = 0; offset < entries.length; offset += 32) {
-    if (deadline - Date.now() < 1000) {
+    if (options.signal?.aborted || deadline - Date.now() < 1000) {
       return { verdicts: [...verdicts, ...entries.slice(offset).map((entry) => ({
         entryId: entry.entryId, approved: true, confidence: null, answered: false,
       }))], error: "JEV ran out of time; remaining model picks passed through." };

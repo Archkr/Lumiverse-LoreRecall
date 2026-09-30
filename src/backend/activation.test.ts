@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { LlmMessageDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
 import type { RetrievalPreview } from "../types";
 import type { RuntimeBook } from "./contracts";
-import { injectRecallEntries, RecallRunStore, suppressedNativeEntryIds, type PreparedRecallRun } from "./activation";
+import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, RecallRunStore, suppressedNativeEntryIds, type PreparedRecallRun } from "./activation";
 
 function entry(id: string, position = 0, role: string | null = null, depth = 0): WorldBookEntryDTO {
   return {
@@ -22,6 +22,24 @@ function run(id: string, entries: WorldBookEntryDTO[] = [entry("chosen")]): Prep
 }
 
 describe("extension-managed activation", () => {
+  test("activation counts and text agree with surviving entries, and native fallback clears only activation", () => {
+    const dynamic = { entryId: "dynamic", reasons: ["model_selected"] };
+    const constant = { entryId: "constant", reasons: ["constant"] };
+    const preview = { injectedNodes: [dynamic, constant], reservedConstantNodes: [constant],
+      modelSelectedEntries: [dynamic], trace: [], steps: [] } as unknown as RetrievalPreview;
+    finalizeRecallActivation(preview, [{ id: "dynamic", content: "Dynamic lore" }, { id: "constant", content: "Constant lore" }]);
+    expect(preview.selectionSummary).toBe("Activated 1 dynamic, 1 constant entries.");
+    expect(preview.injectedText).toBe("Dynamic lore\n\nConstant lore");
+    expect(preview.injectedNodes).toHaveLength(2);
+    expect(preview.trace.at(-1)?.label).toBe("Recall activation");
+    markRecallNativeFallback(preview, "Model retrieval failed.");
+    expect(preview.injectedNodes).toEqual([]);
+    expect(preview.injectedText).toBe("");
+    expect(preview.estimatedTokens).toBe(0);
+    expect(preview.selectionSummary).toBe("Native fallback; Recall activated no entries.");
+    expect(preview.preparedNodes).toHaveLength(2);
+    expect(preview.modelSelectedEntries).toHaveLength(1);
+  });
   test("a completed empty selection still suppresses managed books", () => {
     const store = new RecallRunStore();
     store.put(run("empty", []));

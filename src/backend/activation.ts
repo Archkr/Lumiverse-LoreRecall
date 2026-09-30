@@ -22,6 +22,32 @@ export type RecallClaim =
 
 const RUN_TTL_MS = 5 * 60_000;
 
+export function markRecallNativeFallback(preview: RetrievalPreview, reason: string): void {
+  preview.preparedNodes ??= preview.injectedNodes;
+  preview.activationSource = "native";
+  preview.injectedNodes = [];
+  preview.injectedText = "";
+  preview.estimatedTokens = 0;
+  preview.selectionSummary = "Native fallback; Recall activated no entries.";
+  preview.trace.push({ step: preview.trace.length + 1, phase: "fallback", label: "Native activation", summary: reason });
+  preview.steps.push(`Native activation: ${reason}`);
+}
+
+export function finalizeRecallActivation(preview: RetrievalPreview, entries: readonly { id: string; content: string }[]): void {
+  preview.preparedNodes ??= preview.injectedNodes;
+  const ids = new Set(entries.map((entry) => entry.id));
+  preview.injectedNodes = preview.injectedNodes.filter((node) => ids.has(node.entryId));
+  const constantIds = new Set(preview.reservedConstantNodes.map((node) => node.entryId));
+  const constants = entries.filter((entry) => constantIds.has(entry.id)).length;
+  const dynamic = entries.length - constants;
+  preview.activationSource = "recall";
+  preview.injectedText = entries.map((entry) => entry.content).join("\n\n");
+  preview.estimatedTokens = Math.ceil(preview.injectedText.length / 4);
+  preview.selectionSummary = `Activated ${dynamic} dynamic, ${constants} constant entries.`;
+  preview.trace.push({ step: preview.trace.length + 1, phase: "inject", label: "Recall activation", summary: preview.selectionSummary });
+  preview.steps.push(`Recall activation: ${preview.selectionSummary}`);
+}
+
 /** Only one unclaimed run may take over a chat. Overlapping runs stay native. */
 export class RecallRunStore {
   private readonly runs = new Map<string, PreparedRecallRun>();

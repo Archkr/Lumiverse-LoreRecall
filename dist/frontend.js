@@ -4157,8 +4157,16 @@ function setup(ctx) {
       recentConversation: preview.recentConversation,
       queryText: preview.queryText,
       selectionSummary: preview.selectionSummary ?? null,
-      pullLimit: currentState?.characterConfig?.maxResults ?? null,
-      injectLimit: currentState?.characterConfig?.tokenBudget ?? null,
+      activationSource: preview.activationSource ?? "preview",
+      retrievalComplete: preview.retrievalComplete ?? null,
+      dynamicInjectionCap: currentState?.characterConfig?.tokenBudget ?? null,
+      routedCategories: preview.routedCategories ?? [],
+      attachedBookSources: preview.attachedBookSources ?? {},
+      selectionBatches: preview.selectionBatches ?? [],
+      modelSelectedEntries: preview.modelSelectedEntries ?? [],
+      jevApprovedEntries: preview.jevApprovedEntries ?? [],
+      jevRejectedEntries: preview.jevRejectedEntries ?? [],
+      preparedNodes: preview.preparedNodes ?? [],
       reservedConstantCount: preview.reservedConstantCount ?? 0,
       remainingDynamicSlots: preview.remainingDynamicSlots ?? null,
       trace: preview.trace,
@@ -4180,6 +4188,7 @@ function setup(ctx) {
         worldBookName: scope.worldBookName,
         breadcrumb: scope.breadcrumb,
         manifestEntryCount: scope.manifestEntryCount,
+        reviewedEntryCount: scope.reviewedEntryCount ?? null,
         selectedEntryIds: scope.selectedEntryIds
       })),
       searchEvents: (preview.searchEvents ?? []).map((event) => ({
@@ -4471,7 +4480,7 @@ function setup(ctx) {
     const section = createElement("section", "lore-section");
     section.appendChild(createSectionHead("Last retrieval", "Most recent captured retrieval for this chat."));
     const meta = createElement("div", "lore-cluster");
-    meta.append(createTag("Category routing", "accent"), createTag(preview.activationSource === "native" ? "Native fallback" : "Recall activation", preview.activationSource === "native" ? "warn" : "good"), createTag(preview.controllerUsed ? "Model used" : "Model unavailable", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
+    meta.append(createTag("Category routing", "accent"), createTag(preview.activationSource === "native" ? "Native fallback" : preview.activationSource === "recall" ? "Recall activation" : "Prepared selection", preview.activationSource === "native" ? "warn" : "good"), createTag(preview.controllerUsed ? "Model used" : "Model unavailable", preview.controllerUsed ? "good" : "warn"), createTag(`Captured ${formatCapturedAt(preview.capturedAt)}`), createTag(`Reserved constants: ${preview.reservedConstantCount ?? 0}`, (preview.reservedConstantCount ?? 0) > 0 ? "warn" : "accent"), createTag(`Dynamic cap: ${preview.remainingDynamicSlots ?? 0}`, "accent"));
     section.appendChild(meta);
     if (preview.attachedBookSources && Object.keys(preview.attachedBookSources).length) {
       const sourceLabels = Object.entries(preview.attachedBookSources).map(([bookId, source]) => `${currentState?.allWorldBooks.find((book) => book.id === bookId)?.name ?? bookId} (${source})`);

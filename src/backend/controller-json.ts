@@ -183,6 +183,7 @@ export async function runControllerJson(
   userId: string,
   options: ControllerJsonOptions = {},
 ): Promise<ControllerJsonResult> {
+  options.signal?.throwIfAborted();
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
   const connection =
     connectionId
@@ -195,6 +196,7 @@ export async function runControllerJson(
   const noReasoningParameters =
     options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
 
+  options.signal?.throwIfAborted();
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [

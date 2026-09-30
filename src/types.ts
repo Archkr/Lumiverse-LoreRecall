@@ -187,6 +187,7 @@ export interface PreviewScopeManifest {
   worldBookName: string;
   breadcrumb: string;
   manifestEntryCount: number;
+  reviewedEntryCount?: number;
   selectedEntryIds: string[];
 }
 
@@ -206,6 +207,7 @@ export interface TraversalTraceStep {
   bookId?: string | null;
   nodeId?: string | null;
   entryCount?: number | null;
+  durationMs?: number | null;
 }
 
 export interface NativeEntryFlagPatch {
@@ -249,6 +251,26 @@ export interface RetrievalPreview {
   retrievalComplete?: boolean;
   activationSource?: "recall" | "native" | "preview";
   attachedBookSources?: Record<string, string>;
+  preparedNodes?: PreviewNode[];
+  selectionBatches?: SelectionBatchDiagnostic[];
+}
+
+export interface SelectionBatchDiagnostic {
+  batch: number;
+  candidateCount: number;
+  candidateEntryIds: string[];
+  status: "completed" | "failed" | "timed_out" | "cancelled" | "skipped";
+  selectedEntryIds: string[];
+  durationMs: number;
+  error: string | null;
+  attempts: Array<{
+    durationMs: number;
+    error: string | null;
+    finishReason: string | null;
+    responseLength: number;
+    reasoningTokens: number | null;
+    textTokens: number | null;
+  }>;
 }
 
 export type RetrievalFeedItemKind = "trace" | "scope" | "search" | "manifest" | "reserved" | "pulled" | "injected" | "issue";

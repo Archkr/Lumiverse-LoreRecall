@@ -16,7 +16,7 @@ Install `https://github.com/archkr/Lumiverse-LoreRecall` through Lumiverse Exten
 
 ## Retrieval
 
-For each generation, the model picks all relevant top-level categories. Lore Recall reviews every enabled, non-constant entry in those categories in bounded batches. The model selects any number of entries per batch; an empty selection is valid. A failed batch contributes no entries and appears as an issue in the feed.
+For each generation, the model picks all relevant top-level categories. Lore Recall reviews every enabled, non-constant entry in those categories in bounded batches, running up to three batches concurrently under one selection deadline. Transient request failures or malformed selections retry once while time remains. The model selects any number of entries per batch; an empty selection is valid and is never retried. A failed batch contributes no entries and appears as an issue in the feed. If any batch remains incomplete, the turn uses native activation; partial model picks remain available in diagnostics.
 
 Lore Recall sets no output-token limits on controller requests, including tree assignments and summaries. Legacy `controllerMaxTokens` settings are ignored. The selected Lumiverse connection and provider determine the available output budget. Input batch sizes, retrieval timeouts, and the dynamic injection cap still apply.
 
@@ -27,6 +27,8 @@ On hosts that support required prompt interceptors, a failure after native activ
 Selected lore resolves character, user, and other placeholders before insertion. This resolve does not commit variable changes; lorebook macros that write persistent variables are not reproduced by this extension-managed path.
 
 The workspace and live retrieval feed show attached sources, routed categories, model picks, JEV decisions, final activation, and failure reasons. The tree is an organizer and provides category context; only the top-level categories are used for routing.
+
+Copied retrieval reports include each batch's candidates, attempts, duration, outcome, selected IDs, finish reason, and available token usage. Prepared picks and actual activation are reported separately. Native fallback clears Recall's activation count and text while retaining the model decisions that explain the failure.
 
 ## Settings and data
 

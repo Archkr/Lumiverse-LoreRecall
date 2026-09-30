@@ -1106,10 +1106,12 @@ function resolveControllerConnectionId(settings, fallbackConnectionId) {
   return null;
 }
 async function runControllerJson(prompt, settings, userId, options = {}) {
+  options.signal?.throwIfAborted();
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
   const connection = connectionId ? await spindle.connections.get(connectionId, userId).catch(() => null) : null;
   const structuredParameters = options.primaryKey && options.schemaName && options.schema ? buildStructuredJsonParameters(connection?.provider ?? null, options.schemaName, options.schema) : {};
   const noReasoningParameters = options.disableReasoning !== false ? buildNoReasoningParameters(connection?.provider ?? null) : {};
+  options.signal?.throwIfAborted();
   const result = await spindle.generate.quiet({
     type: "quiet",
     messages: [
@@ -1189,7 +1191,7 @@ async function clearJevKey(provider, userId) {
     throw new Error("Encrypted secret storage is unavailable.");
   await enclave().delete(secretSlot(provider), userId);
 }
-async function filterWithJev(entries, conversation, settings, userId) {
+async function filterWithJev(entries, conversation, settings, userId, options = {}) {
   if (!entries.length)
     return { verdicts: [], error: null };
   const key = await readJevKey(settings.jevProvider, userId);
@@ -1204,9 +1206,9 @@ async function filterWithJev(entries, conversation, settings, userId) {
     return fallback("JEV network permission is unavailable; model picks passed through.");
   const verdicts = [];
   const provider = PROVIDERS[settings.jevProvider];
-  const deadline = Date.now() + 20000;
+  const deadline = Math.min(Date.now() + 20000, options.deadlineAt ?? Infinity);
   for (let offset = 0;offset < entries.length; offset += 32) {
-    if (deadline - Date.now() < 1000) {
+    if (options.signal?.aborted || deadline - Date.now() < 1000) {
       return { verdicts: [...verdicts, ...entries.slice(offset).map((entry) => ({
         entryId: entry.entryId,
         approved: true,
@@ -1280,6 +1282,112 @@ async function filterWithJev(entries, conversation, settings, userId) {
     }
   }
   return { verdicts, error: null };
+}
+
+// src/backend/model-selection.ts
+class ModelSelectionSession {
+  settings;
+  userId;
+  connectionId;
+  deadlineAt;
+  parentSignal;
+  abort = new AbortController;
+  controllerUsed = false;
+  stopReason = null;
+  timer;
+  onParentAbort = () => this.stop("cancelled");
+  constructor(settings, userId, connectionId, deadlineAt, parentSignal) {
+    this.settings = settings;
+    this.userId = userId;
+    this.connectionId = connectionId;
+    this.deadlineAt = deadlineAt;
+    this.parentSignal = parentSignal;
+    this.timer = setTimeout(() => this.stop("timed_out"), Math.max(0, deadlineAt - Date.now()));
+    parentSignal?.addEventListener("abort", this.onParentAbort, { once: true });
+    if (parentSignal?.aborted)
+      this.stop("cancelled");
+  }
+  stop(reason) {
+    if (this.stopReason)
+      return;
+    this.stopReason = reason;
+    this.abort.abort();
+  }
+  dispose() {
+    clearTimeout(this.timer);
+    this.parentSignal?.removeEventListener("abort", this.onParentAbort);
+  }
+  async run(prompt, validate) {
+    const startedAt = Date.now();
+    const attempts = [];
+    let error = null;
+    for (let attempt = 0;attempt < 2; attempt++) {
+      if (this.deadlineAt - Date.now() < 1000)
+        this.stop("timed_out");
+      if (this.stopReason)
+        return {
+          parsed: null,
+          status: attempts.length ? this.stopReason : "skipped",
+          error: this.stopReason === "timed_out" ? "Model selection deadline reached." : "Model selection cancelled.",
+          attempts,
+          durationMs: Date.now() - startedAt
+        };
+      const attemptStartedAt = Date.now();
+      let onAbort = () => {};
+      let detail = { durationMs: 0, error: null, finishReason: null, responseLength: 0, reasoningTokens: null, textTokens: null };
+      try {
+        const cancelled = new Promise((_, reject) => {
+          onAbort = () => reject(new Error(this.stopReason === "timed_out" ? "Model selection deadline reached." : "Model selection cancelled."));
+          this.abort.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        this.controllerUsed = true;
+        const response = await Promise.race([
+          runControllerJson(prompt, this.settings, this.userId, {
+            connectionId: this.connectionId,
+            temperatureOverride: 0.1,
+            signal: this.abort.signal
+          }),
+          cancelled
+        ]);
+        if (Date.now() >= this.deadlineAt)
+          this.stop("timed_out");
+        if (this.stopReason)
+          throw new Error(this.stopReason === "timed_out" ? "Model selection deadline reached." : "Model selection cancelled.");
+        detail = {
+          ...detail,
+          finishReason: response.finishReason,
+          responseLength: response.rawContent.length,
+          ...getControllerTokenUsage(response.usage)
+        };
+        error = validate(response.parsed);
+        if (!error) {
+          attempts.push({ ...detail, durationMs: Date.now() - attemptStartedAt });
+          return { parsed: response.parsed, status: "completed", error: null, attempts, durationMs: Date.now() - startedAt };
+        }
+      } catch (caught) {
+        error = caught instanceof Error ? caught.message : String(caught);
+      } finally {
+        this.abort.signal.removeEventListener("abort", onAbort);
+      }
+      attempts.push({ ...detail, error, durationMs: Date.now() - attemptStartedAt });
+      if (this.stopReason)
+        break;
+      if (!/aborted|timeout|timed out|temporar|429|502|503|504|JSON|array|unknown ID/i.test(error ?? ""))
+        break;
+    }
+    return { parsed: null, status: this.stopReason ?? "failed", error, attempts, durationMs: Date.now() - startedAt };
+  }
+}
+async function mapSelectionBatches(batches, select) {
+  const results = new Array(batches.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(3, batches.length) }, async () => {
+    while (next < batches.length) {
+      const index = next++;
+      results[index] = await select(batches[index], index);
+    }
+  }));
+  return results;
 }
 
 // src/backend/retrieval.ts
@@ -1429,6 +1537,9 @@ var SEARCH_STOPWORDS = new Set([
   "you",
   "your"
 ]);
+function getTraceReporter(trace) {
+  return trace[TRACE_REPORTER];
+}
 function emitProgress(reporter, event) {
   if (!reporter)
     return;
@@ -1456,6 +1567,35 @@ function createFeedItem(kind, label, summary, options = {}) {
     tone: options.tone,
     durationMs: typeof options.durationMs === "number" ? options.durationMs : null
   };
+}
+function emitTraceFeedItem(trace, label, summary, options = {}) {
+  const reporter = getTraceReporter(trace);
+  if (!reporter)
+    return;
+  emitProgress(reporter, {
+    type: "item",
+    item: createFeedItem("trace", label, summary, options)
+  });
+}
+function pushTrace(trace, phase, label, summary, extra = {}) {
+  trace.push({
+    step: trace.length + 1,
+    phase,
+    label,
+    summary,
+    bookId: extra.bookId ?? null,
+    nodeId: extra.nodeId ?? null,
+    entryCount: extra.entryCount ?? null,
+    durationMs: extra.durationMs ?? null
+  });
+  if (phase === "fallback") {
+    emitTraceFeedItem(trace, label, summary, {
+      phase,
+      count: typeof extra.entryCount === "number" ? extra.entryCount : null,
+      tone: "warn",
+      durationMs: typeof extra.durationMs === "number" ? extra.durationMs : null
+    });
+  }
 }
 function stripSearchMarkup(value) {
   return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -1655,6 +1795,14 @@ var SUPPORT_CONTEXT_TERMS = new Set([
   "weapon",
   "weapons"
 ]);
+function formatFallbackMessage(reason) {
+  const text = reason.trim();
+  return /[.!?]$/.test(text) ? text : text + ".";
+}
+function buildFallbackReason(fallbackPath) {
+  return fallbackPath.length ? fallbackPath.map(formatFallbackMessage).join(`
+`) : null;
+}
 function buildPreviewNodes(selected, booksById) {
   return selected.map((item) => {
     const book = booksById.get(item.entry.worldBookId);
@@ -1735,173 +1883,233 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   const reservedConstantNodes = buildPreviewNodes(constants, new Map(readableBooks.map((book) => [book.summary.id, book])));
   const issues = [];
   let retrievalComplete = true;
-  let controllerUsed = false;
   const controllerAllowed = options.allowController !== false;
   const connectionId = resolveControllerConnectionId(settings, options.connectionId);
-  const modelDeadline = Math.min(Date.now() + 155000, options.deadlineAt ?? Infinity);
-  const runModel = async (prompt) => {
-    if (!controllerAllowed)
-      return null;
-    if (options.signal?.aborted) {
-      retrievalComplete = false;
-      return null;
-    }
-    const remainingMs = modelDeadline - Date.now();
-    if (remainingMs < 1000) {
-      issues.push("Model selection ran out of time; remaining batches were skipped.");
-      retrievalComplete = false;
-      return null;
-    }
-    const abort = new AbortController;
-    const onAbort = () => abort.abort(options.signal?.reason);
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => abort.abort(), Math.min(remainingMs, 30000));
-    try {
-      const response = await runControllerJson(prompt, settings, userId, { connectionId, temperatureOverride: 0.1, signal: abort.signal });
-      if (!response.parsed)
-        throw new Error("Model returned no valid JSON.");
-      controllerUsed = true;
-      return response.parsed;
-    } catch (error) {
-      issues.push(error instanceof Error ? error.message : String(error));
-      retrievalComplete = false;
-      return null;
-    } finally {
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-    }
-  };
-  const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
-  const categoryResult = categoriesPresent.length ? await runModel([
-    'Choose every top-level lore category relevant to the next reply. Return only JSON: {"categories":["Characters"]}.',
-    "Use only the category names listed. An empty array is valid.",
-    buildPromptContext(recentConversation),
-    "Categories:",
-    ...categoriesPresent.map((category) => {
-      const group = allEntries.filter((item) => item.category === category);
-      return `- ${category}: ${group.length} entries; examples: ${group.slice(0, 8).map((item) => item.entry.label).join(", ")}`;
-    })
-  ].join(`
-`)) : { categories: [] };
-  const rawCategories = categoryResult?.categories;
-  const routedCategories = Array.isArray(rawCategories) && rawCategories.every((value) => typeof value === "string" && categoriesPresent.includes(value)) ? [...new Set(rawCategories)] : [];
-  if (categoriesPresent.length && controllerAllowed && (!Array.isArray(rawCategories) || rawCategories.some((value) => typeof value !== "string" || !categoriesPresent.includes(value)))) {
-    issues.push("Category routing returned an invalid categories array.");
-    retrievalComplete = false;
-  }
-  if (categoriesPresent.length && !controllerAllowed)
-    retrievalComplete = false;
-  emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories", routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.", { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
-  const routed = allEntries.filter((item) => routedCategories.includes(item.category));
-  const batches = [];
-  let batch = [];
-  let chars = 0;
-  for (const item of routed) {
-    const cost = Math.min(700, item.entry.summary.length + item.entry.previewText.length + 180);
-    if (batch.length && (chars + cost > 18000 || batch.length >= 60)) {
-      batches.push(batch);
-      batch = [];
-      chars = 0;
-    }
-    batch.push(item);
-    chars += cost;
-  }
-  if (batch.length)
-    batches.push(batch);
-  const selectedEntries = [];
-  for (let batchIndex = 0;batchIndex < batches.length; batchIndex++) {
-    const candidates = batches[batchIndex];
-    const result = await runModel([
-      'Select ALL lore entries relevant to the next reply. Return only JSON: {"entryIds":["id"]}.',
-      "Use only IDs from this batch. An empty array is valid. Do not impose a count limit.",
+  const deadlineAt = Math.min(Date.now() + 155000, options.deadlineAt ?? Infinity);
+  const modelDeadline = deadlineAt - Math.min(5000, Math.max(0, deadlineAt - Date.now()) * 0.05);
+  const model = new ModelSelectionSession(settings, userId, connectionId, modelDeadline, options.signal);
+  const trace = [];
+  try {
+    const categoriesPresent = ROOT_CATEGORIES.filter((category) => allEntries.some((item) => item.category === category));
+    const categoryCall = categoriesPresent.length && controllerAllowed ? await model.run([
+      'Choose every top-level lore category relevant to the next reply. Return only JSON: {"categories":["Characters"]}.',
+      "Use only the category names listed. An empty array is valid.",
       buildPromptContext(recentConversation),
-      `Batch ${batchIndex + 1} of ${batches.length}:`,
-      ...candidates.map(({ entry, category }) => `- id=${JSON.stringify(entry.entryId)}; category=${category}; book=${entry.worldBookName}; label=${entry.label}; aliases=${entry.aliases.join(", ")}; keys=${entry.key.join(", ")}; summary=${truncateText(entry.summary, 240)}; preview=${truncateText(entry.previewText, 300)}`)
+      "Categories:",
+      ...categoriesPresent.map((category) => {
+        const group = allEntries.filter((item) => item.category === category);
+        return `- ${category}: ${group.length} entries; examples: ${group.slice(0, 8).map((item) => item.entry.label).join(", ")}`;
+      })
     ].join(`
-`));
-    if (!result || !Array.isArray(result.entryIds) || !result.entryIds.every((id) => typeof id === "string")) {
-      issues.push(`Selection batch ${batchIndex + 1} returned no usable entryIds array.`);
+`), (parsed) => Array.isArray(parsed?.categories) && parsed.categories.every((value) => typeof value === "string" && categoriesPresent.includes(value)) ? null : "Category routing returned an invalid categories array.") : null;
+    const rawCategories = categoriesPresent.length ? categoryCall?.parsed?.categories : [];
+    const routedCategories = Array.isArray(rawCategories) && rawCategories.every((value) => typeof value === "string" && categoriesPresent.includes(value)) ? [...new Set(rawCategories)] : [];
+    if (categoriesPresent.length && controllerAllowed && categoryCall?.status !== "completed") {
+      issues.push(`Category routing: ${categoryCall?.error ?? "No model result."}`);
       retrievalComplete = false;
-      continue;
     }
-    const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
-    const requested = [...new Set(result.entryIds)];
-    const invalid = requested.filter((id) => !byId.has(id));
-    if (invalid.length) {
-      issues.push(`Selection batch ${batchIndex + 1} returned ${invalid.length} unknown ID(s).`);
+    if (categoriesPresent.length && !controllerAllowed) {
       retrievalComplete = false;
-      continue;
+      issues.push("Model selection is disabled; native activation continues.");
     }
-    for (const id of requested)
-      selectedEntries.push({ entry: byId.get(id), score: 0, reasons: ["model_selected"] });
+    pushTrace(trace, "choose_scope", "Category routing", categoryCall?.error ?? `Selected ${routedCategories.length} of ${categoriesPresent.length} categories.`, { durationMs: categoryCall?.durationMs });
+    emitProgress(report, { type: "item", item: createFeedItem("scope", "Routed categories", routedCategories.length ? routedCategories.join(", ") : "No dynamic category selected.", { phase: "choose_scope", count: routedCategories.length, tone: "info" }) });
+    const routed = allEntries.filter((item) => routedCategories.includes(item.category));
+    const batches = [];
+    let batch = [];
+    let chars = 0;
+    for (const item of routed) {
+      const cost = Math.min(700, item.entry.summary.length + item.entry.previewText.length + 180);
+      if (batch.length && (chars + cost > 18000 || batch.length >= 60)) {
+        batches.push(batch);
+        batch = [];
+        chars = 0;
+      }
+      batch.push(item);
+      chars += cost;
+    }
+    if (batch.length)
+      batches.push(batch);
+    const batchResults = await mapSelectionBatches(batches, async (candidates, batchIndex) => {
+      const byId = new Map(candidates.map(({ entry }) => [entry.entryId, entry]));
+      const result = await model.run([
+        'Select ALL lore entries relevant to the next reply. Return only JSON: {"entryIds":["id"]}.',
+        "Use only IDs from this batch. An empty array is valid. Do not impose a count limit.",
+        buildPromptContext(recentConversation),
+        `Batch ${batchIndex + 1} of ${batches.length}:`,
+        ...candidates.map(({ entry, category }) => `- id=${JSON.stringify(entry.entryId)}; category=${category}; book=${entry.worldBookName}; label=${entry.label}; aliases=${entry.aliases.join(", ")}; keys=${entry.key.join(", ")}; summary=${truncateText(entry.summary, 240)}; preview=${truncateText(entry.previewText, 300)}`)
+      ].join(`
+`), (parsed) => {
+        if (!Array.isArray(parsed?.entryIds) || !parsed.entryIds.every((id) => typeof id === "string"))
+          return "Model returned no usable entryIds array.";
+        const invalid = parsed.entryIds.filter((id) => !byId.has(id));
+        return invalid.length ? `Model returned ${invalid.length} unknown ID(s).` : null;
+      });
+      const requested = result.status === "completed" ? [...new Set(result.parsed.entryIds)] : [];
+      const diagnostic = {
+        batch: batchIndex + 1,
+        candidateCount: candidates.length,
+        status: result.status,
+        candidateEntryIds: candidates.map((item) => item.entry.entryId),
+        selectedEntryIds: requested,
+        durationMs: result.durationMs,
+        error: result.error,
+        attempts: result.attempts
+      };
+      const summary = result.status === "completed" ? `Reviewed ${candidates.length} entries; picked ${requested.length} (${result.attempts.length} attempt(s)).` : `${result.status}: ${result.error ?? "No result."}`;
+      pushTrace(trace, result.status === "completed" ? "manifest_select" : "fallback", `Selection batch ${batchIndex + 1}`, summary, { durationMs: result.durationMs, entryCount: candidates.length });
+      emitProgress(report, { type: "item", item: createFeedItem(result.status === "completed" ? "manifest" : "issue", `Selection batch ${batchIndex + 1} of ${batches.length}`, summary, {
+        phase: "manifest_select",
+        durationMs: result.durationMs,
+        count: requested.length,
+        tone: result.status === "completed" ? "info" : "warn",
+        details: result.attempts.map((attempt, index) => `Attempt ${index + 1}: ${attempt.error ?? "completed"}; finish=${attempt.finishReason ?? "unknown"}; response=${attempt.responseLength}; reasoningTokens=${attempt.reasoningTokens ?? "unknown"}`)
+      }) });
+      return { diagnostic, selected: requested.map((id) => ({ entry: byId.get(id), score: 0, reasons: ["model_selected"] })) };
+    });
+    const selectionBatches = batchResults.map((result) => result.diagnostic);
+    const selectedEntries = batchResults.flatMap((result) => result.selected);
+    for (const result of selectionBatches) {
+      if (result.status !== "completed") {
+        retrievalComplete = false;
+        issues.push(`Selection batch ${result.batch} ${result.status}: ${result.error ?? "No result."}`);
+      }
+    }
+    if (model.stopReason) {
+      retrievalComplete = false;
+      issues.push(model.stopReason === "timed_out" ? "Model selection ran out of time; unfinished batches were cancelled and queued batches were skipped." : "Model selection was cancelled; native activation continues.");
+    }
+    const booksById = new Map(readableBooks.map((book) => [book.summary.id, book]));
+    const modelSelectedEntries = buildPreviewNodes(selectedEntries, booksById);
+    emitProgress(report, { type: "item", item: createFeedItem("manifest", "Model picks", `Selected ${selectedEntries.length} from ${selectionBatches.filter((batch) => batch.status === "completed").reduce((count, batch) => count + batch.candidateCount, 0)} reviewed entries; ${selectionBatches.filter((batch) => batch.status !== "completed").length} incomplete batch(es).`, { phase: "manifest_select", count: selectedEntries.length, entries: modelSelectedEntries, tone: "info" }) });
+    const jev = await filterWithJev(retrievalComplete ? selectedEntries.map((item) => item.entry) : [], recentConversation, settings, userId, { deadlineAt: deadlineAt - 2000, signal: options.signal });
+    if (jev.error)
+      issues.push(jev.error);
+    if (options.signal?.aborted || Date.now() >= deadlineAt) {
+      retrievalComplete = false;
+      issues.push(options.signal?.aborted ? "Retrieval was cancelled before activation." : "Retrieval exceeded the turn deadline before activation.");
+    }
+    const verdictById = new Map(jev.verdicts.map((verdict) => [verdict.entryId, verdict]));
+    const approved = (retrievalComplete ? selectedEntries : []).filter((item) => verdictById.get(item.entry.entryId)?.approved !== false).sort((a, b) => (verdictById.get(b.entry.entryId)?.confidence ?? -1) - (verdictById.get(a.entry.entryId)?.confidence ?? -1));
+    const rejected = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved === false);
+    const jevApprovedEntries = buildPreviewNodes(approved, booksById);
+    const jevRejectedEntries = buildPreviewNodes(rejected, booksById);
+    emitProgress(report, { type: "item", item: createFeedItem("trace", "JEV filter", retrievalComplete ? `Approved ${approved.length}; rejected ${rejected.length}; unanswered ${jev.verdicts.filter((v) => !v.answered).length}.` : "Skipped because model retrieval did not complete; native activation continues.", { phase: "manifest_select", count: approved.length, entries: jevApprovedEntries, tone: jev.error ? "warn" : "info" }) });
+    if (rejected.length)
+      emitProgress(report, { type: "item", item: createFeedItem("manifest", "JEV rejected", `JEV rejected ${rejected.length} model-selected entr${rejected.length === 1 ? "y" : "ies"}.`, { phase: "manifest_select", count: rejected.length, entries: jevRejectedEntries, tone: "info" }) });
+    const dynamicLimit = Math.max(0, config.tokenBudget);
+    const selected = approved.slice(0, dynamicLimit);
+    const injection = retrievalComplete ? buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12) : null;
+    const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
+    emitProgress(report, { type: "item", item: createFeedItem("manifest", "Cap result", retrievalComplete ? `Prepared ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic) for activation.` : `Recall prepared no activation. ${selectedEntries.length} partial model picks remain in diagnostics; Lumiverse will activate lore natively.`, { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: retrievalComplete ? "success" : "warn" }) });
+    pushTrace(trace, "manifest_select", "JEV filter", retrievalComplete ? `${approved.length} approved; ${rejected.length} rejected.` : "Skipped after incomplete model retrieval.");
+    pushTrace(trace, retrievalComplete ? "inject" : "fallback", "Cap result", retrievalComplete ? `Prepared ${selected.length} dynamic and ${constants.length} constant entries.` : "Native fallback; Recall activated no entries.");
+    const fallbackPath = issues.map(formatFallbackMessage);
+    for (const issue of fallbackPath.filter((issue) => !issue.startsWith("Selection batch ")))
+      emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue, { phase: "fallback", tone: "warn" }) });
+    const fallbackReason = !retrievalComplete ? buildFallbackReason(issues) : null;
+    const controllerUsed = model.controllerUsed;
+    const selectedScopes = readableBooks.flatMap((book) => routedCategories.flatMap((category) => {
+      const count = routed.filter((item) => item.entry.worldBookId === book.summary.id && item.category === category).length;
+      if (!count)
+        return [];
+      const node = Object.values(book.tree.nodes).find((node) => node.parentId === book.tree.rootId && node.label === category);
+      return [{
+        nodeId: node?.id ?? book.tree.rootId,
+        label: category,
+        worldBookId: book.summary.id,
+        worldBookName: book.summary.name,
+        breadcrumb: `${book.summary.name} > ${category}`,
+        summary: node?.summary ?? "",
+        descendantEntryCount: count,
+        manifestEntryCount: count,
+        selectionReason: "Model routed this top-level category."
+      }];
+    }));
+    const reviewedIds = new Set(selectionBatches.filter((batch) => batch.status === "completed").flatMap((batch) => batch.candidateEntryIds));
+    const reviewedInScope = (scope) => routed.filter((item) => reviewedIds.has(item.entry.entryId) && item.entry.worldBookId === scope.worldBookId && item.category === scope.label).length;
+    emitProgress(report, {
+      type: "finish",
+      timestamp: Date.now(),
+      status: retrievalComplete ? "completed" : "fallback",
+      controllerUsed,
+      resolvedConnectionId: controllerUsed ? connectionId : null,
+      fallbackReason
+    });
+    return {
+      mode: "collapsed",
+      queryText,
+      recentConversation,
+      estimatedTokens: injection?.estimatedTokens ?? 0,
+      injectedText: injection?.text ?? "",
+      selectionSummary: retrievalComplete ? `Prepared ${selected.length} dynamic, ${constants.length} constant entries.` : `Native fallback; Recall activated no entries (${selectedEntries.length} partial model picks).`,
+      reservedConstantCount: constants.length,
+      remainingDynamicSlots: dynamicLimit,
+      selectedScopes,
+      retrievedScopes: selectedScopes.filter((scope) => reviewedInScope(scope) > 0),
+      scopeManifestCounts: selectedScopes.map((scope) => ({
+        ...scope,
+        manifestEntryCount: scope.manifestEntryCount ?? 0,
+        reviewedEntryCount: reviewedInScope(scope),
+        selectedEntryIds: modelSelectedEntries.filter((entry) => entry.worldBookId === scope.worldBookId && routed.find((item) => item.entry.entryId === entry.entryId)?.category === scope.label).map((entry) => entry.entryId)
+      })),
+      searchEvents: [],
+      selectedNodes: selectedScopes,
+      reservedConstantNodes,
+      pulledNodes: buildPreviewNodes(routed.map(({ entry }) => ({ entry, score: 0, reasons: ["routed"] })), booksById),
+      injectedNodes,
+      manifestSelectedEntries: modelSelectedEntries,
+      routedCategories,
+      modelSelectedEntries,
+      jevApprovedEntries,
+      jevRejectedEntries,
+      fallbackReason,
+      fallbackPath,
+      retrievalComplete,
+      preparedNodes: injectedNodes,
+      selectionBatches,
+      activationSource: retrievalComplete ? "preview" : "native",
+      selectedBookIds: readableBooks.map((book) => book.summary.id),
+      steps: trace.map((step) => `${step.label}: ${step.summary}`),
+      trace,
+      capturedAt: startedAt,
+      isActual: options.isActual === true,
+      controllerUsed,
+      resolvedConnectionId: controllerUsed ? connectionId : null
+    };
+  } finally {
+    model.dispose();
   }
-  const booksById = new Map(readableBooks.map((book) => [book.summary.id, book]));
-  const modelSelectedEntries = buildPreviewNodes(selectedEntries, booksById);
-  emitProgress(report, { type: "item", item: createFeedItem("manifest", "Model picks", `Selected ${selectedEntries.length} of ${routed.length} reviewed entries across ${batches.length} batch(es).`, { phase: "manifest_select", count: selectedEntries.length, entries: modelSelectedEntries, tone: "info" }) });
-  const jev = await filterWithJev(selectedEntries.map((item) => item.entry), recentConversation, settings, userId);
-  if (jev.error)
-    issues.push(jev.error);
-  const verdictById = new Map(jev.verdicts.map((verdict) => [verdict.entryId, verdict]));
-  const approved = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved !== false).sort((a, b) => (verdictById.get(b.entry.entryId)?.confidence ?? -1) - (verdictById.get(a.entry.entryId)?.confidence ?? -1));
-  const rejected = selectedEntries.filter((item) => verdictById.get(item.entry.entryId)?.approved === false);
-  const jevApprovedEntries = buildPreviewNodes(approved, booksById);
-  const jevRejectedEntries = buildPreviewNodes(rejected, booksById);
-  emitProgress(report, { type: "item", item: createFeedItem("trace", "JEV filter", `Approved ${approved.length}; rejected ${rejected.length}; unanswered ${jev.verdicts.filter((v) => !v.answered).length}.`, { phase: "manifest_select", count: approved.length, entries: jevApprovedEntries, tone: jev.error ? "warn" : "info" }) });
-  if (rejected.length)
-    emitProgress(report, { type: "item", item: createFeedItem("manifest", "JEV rejected", `JEV rejected ${rejected.length} model-selected entr${rejected.length === 1 ? "y" : "ies"}.`, { phase: "manifest_select", count: rejected.length, entries: jevRejectedEntries, tone: "info" }) });
-  const dynamicLimit = Math.max(0, config.tokenBudget);
-  const selected = approved.slice(0, dynamicLimit);
-  const injection = buildInjectionText([...constants, ...selected], booksById, constants.length + dynamicLimit, 12);
-  const injectedNodes = buildPreviewNodes(injection?.included ?? [], booksById);
-  emitProgress(report, { type: "item", item: createFeedItem("injected", "Cap result", `Prepared ${injectedNodes.length} entries (${constants.length} constant, ${selected.length} dynamic) for activation.`, { phase: "inject", count: injectedNodes.length, entries: injectedNodes, tone: "success" }) });
-  for (const issue of issues)
-    emitProgress(report, { type: "item", item: createFeedItem("issue", "Retrieval issue", issue, { phase: "fallback", tone: "warn" }) });
-  const fallbackReason = !retrievalComplete && issues.length ? issues.join(" ") : null;
-  emitProgress(report, {
-    type: "finish",
-    timestamp: Date.now(),
-    status: retrievalComplete ? "completed" : "fallback",
-    controllerUsed,
-    resolvedConnectionId: controllerUsed ? connectionId : null,
-    fallbackReason
-  });
-  return {
-    mode: "collapsed",
-    queryText,
-    recentConversation,
-    estimatedTokens: injection?.estimatedTokens ?? 0,
-    injectedText: injection?.text ?? "",
-    selectionSummary: `${selected.length} dynamic, ${constants.length} constant`,
-    reservedConstantCount: constants.length,
-    remainingDynamicSlots: dynamicLimit,
-    selectedScopes: [],
-    retrievedScopes: [],
-    scopeManifestCounts: [],
-    searchEvents: [],
-    selectedNodes: [],
-    reservedConstantNodes,
-    pulledNodes: buildPreviewNodes(routed.map(({ entry }) => ({ entry, score: 0, reasons: ["routed"] })), booksById),
-    injectedNodes,
-    manifestSelectedEntries: modelSelectedEntries,
-    routedCategories,
-    modelSelectedEntries,
-    jevApprovedEntries,
-    jevRejectedEntries,
-    fallbackReason,
-    fallbackPath: issues,
-    retrievalComplete,
-    selectedBookIds: readableBooks.map((book) => book.summary.id),
-    steps: [],
-    trace: [],
-    capturedAt: startedAt,
-    isActual: options.isActual === true,
-    controllerUsed,
-    resolvedConnectionId: controllerUsed ? connectionId : null
-  };
 }
 
 // src/backend/activation.ts
 var RUN_TTL_MS = 5 * 60000;
+function markRecallNativeFallback(preview, reason) {
+  preview.preparedNodes ??= preview.injectedNodes;
+  preview.activationSource = "native";
+  preview.injectedNodes = [];
+  preview.injectedText = "";
+  preview.estimatedTokens = 0;
+  preview.selectionSummary = "Native fallback; Recall activated no entries.";
+  preview.trace.push({ step: preview.trace.length + 1, phase: "fallback", label: "Native activation", summary: reason });
+  preview.steps.push(`Native activation: ${reason}`);
+}
+function finalizeRecallActivation(preview, entries) {
+  preview.preparedNodes ??= preview.injectedNodes;
+  const ids = new Set(entries.map((entry) => entry.id));
+  preview.injectedNodes = preview.injectedNodes.filter((node) => ids.has(node.entryId));
+  const constantIds = new Set(preview.reservedConstantNodes.map((node) => node.entryId));
+  const constants = entries.filter((entry) => constantIds.has(entry.id)).length;
+  const dynamic = entries.length - constants;
+  preview.activationSource = "recall";
+  preview.injectedText = entries.map((entry) => entry.content).join(`
+
+`);
+  preview.estimatedTokens = Math.ceil(preview.injectedText.length / 4);
+  preview.selectionSummary = `Activated ${dynamic} dynamic, ${constants} constant entries.`;
+  preview.trace.push({ step: preview.trace.length + 1, phase: "inject", label: "Recall activation", summary: preview.selectionSummary });
+  preview.steps.push(`Recall activation: ${preview.selectionSummary}`);
+}
 
 class RecallRunStore {
   runs = new Map;
@@ -4544,9 +4752,7 @@ function recordNativeFallback(userId, chatId, reason, existingSessionId) {
   const sessionId = existingSessionId ?? "fallback:" + Date.now() + ":" + Math.random().toString(36).slice(2, 8);
   const cached = previewCache.get(getPreviewCacheKey(userId, chatId));
   if (cached) {
-    cached.activationSource = "native";
-    cached.injectedNodes = [];
-    cached.injectedText = "";
+    markRecallNativeFallback(cached, reason);
   }
   const existing = retrievalFeedCache.get(getPreviewCacheKey(userId, chatId))?.sessions.find((session) => session.id === sessionId);
   if (!existing)
@@ -4748,13 +4954,7 @@ function registerRecallHooks() {
       return messages;
     }
     const injected = injectRecallEntries(messages, run.entries);
-    const injectedIds = new Set(run.entries.map((entry) => entry.id));
-    run.preview.injectedNodes = run.preview.injectedNodes.filter((node) => injectedIds.has(node.entryId));
-    run.preview.activationSource = "recall";
-    run.preview.injectedText = run.entries.map((entry) => entry.content).join(`
-
-`);
-    run.preview.estimatedTokens = Math.ceil(run.preview.injectedText.length / 4);
+    finalizeRecallActivation(run.preview, run.entries);
     previewCache.set(getPreviewCacheKey(run.userId, run.chatId), run.preview);
     if (!context.dryRun)
       recordDynamicInjection(getPreviewCacheKey(run.userId, run.chatId), run.preview, run.runtimeBooks);
