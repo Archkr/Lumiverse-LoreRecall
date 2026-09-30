@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FrontendState } from "../types";
-import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getRecallBookIds, getRecallStatus, getSourceListPresentation, isRecallActive } from "./helpers";
+import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getBookActivationLabel, getBookRecallChoice, getRecallBookIds, getRecallStatus, getSourceListPresentation, isRecallActive } from "./helpers";
 
 test("Sources keeps three attached books visible while only one is selected for Recall", () => {
   const state = makeState({
@@ -18,6 +18,26 @@ test("Sources keeps three attached books visible while only one is selected for 
   expect(getRecallBookIds(state)).toEqual([]);
   state.bookConfigs["date-b"].enabled = true;
   expect(getRecallBookIds(state)).toEqual(["date-b"]);
+});
+
+test("Sources labels LumiBooks summaries and disables their Recall switch while Codex remains selectable", () => {
+  const state = makeState({
+    attachedBookSources: { "date-a": "chat", "date-b": "chat" },
+    bookConfigs: {
+      "date-a": { enabled: true, description: "", permission: "read_write" },
+      "date-b": { enabled: true, description: "", permission: "read_write" },
+    }, bookStatuses: { "date-a": {}, "date-b": {} } as any,
+  });
+  state.allWorldBooks[0].activationOwner = "lumibooks";
+  state.allWorldBooks[1].name = "LumiBooks Codex";
+  expect(getRecallBookIds(state)).toEqual(["date-b"]);
+  expect(getSourceListPresentation(state, "").bookIds).toEqual(["date-a", "date-b"]);
+  expect(getBookActivationLabel(state, "date-a")).toBe("Managed by LumiBooks");
+  expect(getBookRecallChoice(state, "date-a")).toMatchObject({ selected: false, disabled: true });
+  expect(getBookRecallChoice(state, "date-a").detail).toContain("in place of older chat messages");
+  expect(getBookActivationLabel(state, "date-b")).toBe("Selected for Recall");
+  expect(getBookRecallChoice(state, "date-b")).toMatchObject({ selected: true, disabled: false });
+  expect(state.bookConfigs["date-a"].enabled).toBe(true);
 });
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {

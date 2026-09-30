@@ -2,6 +2,7 @@ import type { RuntimeBook, IndexedEntry } from "./contracts";
 import type { AttachmentScope, BookSummary, ManagedBookEntryView } from "../types";
 import { EXTENSION_KEY, normalizeEntryRecallMeta, truncateText } from "../shared";
 import { getRuntimeBooks, isReadableBook } from "./storage";
+import { isLumiBooksSummaryEntry } from "../ownership";
 
 /** The host has already resolved the active character, persona, chat, and global books. */
 export interface ActiveLoreEntry {
@@ -69,6 +70,7 @@ export function attachedCharacterIds(activeCharacterId: string | null, metadata:
 export function toWorkspaceEntry(entry: IndexedEntry): ManagedBookEntryView {
   return {
     entryId: entry.entryId,
+    ...(entry.activationOwner ? { activationOwner: entry.activationOwner } : {}),
     worldBookId: entry.worldBookId,
     worldBookName: entry.worldBookName,
     comment: entry.comment,
@@ -121,9 +123,11 @@ function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: Ind
     comment: entry.comment,
     key: [...entry.key],
   });
+  const activationOwner = isLumiBooksSummaryEntry(entry) ? "lumibooks" as const : undefined;
   if (cached) {
     return {
       ...cached,
+      activationOwner,
       ...meta,
       disabled: entry.disabled,
       constant: entry.constant,
@@ -136,6 +140,7 @@ function indexedFromHost(entry: ActiveLoreEntry, book: RuntimeBook, cached?: Ind
   }
   return {
     entryId: entry.id,
+    activationOwner,
     worldBookId: book.summary.id,
     worldBookName: book.summary.name,
     comment: entry.comment,
@@ -178,7 +183,10 @@ export function overlayActiveEntries(
 }
 
 export function recallEligibleBooks(books: RuntimeBook[]): RuntimeBook[] {
-  return books.filter((book) => book.config.enabled && isReadableBook(book.config));
+  return books.filter((book) => isReadableBook(book.config) && book.summary.activationOwner !== "lumibooks")
+    .map((book) => ({ ...book, cache: { ...book.cache,
+      entries: book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks"),
+    } }));
 }
 
 export async function loadAttachedRuntimeBooks(
@@ -192,7 +200,7 @@ export async function loadAttachedRuntimeBooks(
   }
   const { runtimeBooks } = await getRuntimeBooks(bookIds, bookIds, userId);
   return {
-    books: overlayActiveEntries(recallEligibleBooks(runtimeBooks), entries),
+    books: recallEligibleBooks(overlayActiveEntries(runtimeBooks, entries)),
     sources,
   };
 }

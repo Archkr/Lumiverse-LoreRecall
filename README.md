@@ -32,6 +32,12 @@ Copied retrieval reports include each batch's candidates, attempts, duration, ou
 
 Prompt breakdowns label Recall entries with their entry name and placement. Lumiverse groups prompt-interceptor output under **Extensions / Author's Note**; that group includes extension output regardless of an entry's configured position.
 
+### LumiBooks compatibility
+
+LumiBooks' chapter, arc, and higher-tier summaries replace older chat messages through LumiBooks' own injector. Recall recognizes the `lumibooks_chat_id` book tag and `lumibooks` entry tag and leaves those summaries to LumiBooks. Sources keeps summary books visible as **Managed by LumiBooks**, with Recall selection unavailable and tree editing still available. Saved selections and trees are preserved. Tagged summaries inside mixed books are excluded from Recall's routing, constants, and native suppression too.
+
+LumiBooks' separate Codex book uses normal lorebook activation (`lumibooks_codex` entries). You can opt it into Recall with **Use in Recall**. Its records retain their stored position, role, disabled flags, and constant behavior. LumiBooks' own enable switches still apply.
+
 ## Settings and data
 
 - **Dynamic entry cap** limits entries after JEV filtering. Constants do not count against it.

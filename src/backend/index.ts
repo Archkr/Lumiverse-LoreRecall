@@ -15,7 +15,8 @@ import type {
 } from "../types";
 import type { RuntimeBook } from "./contracts";
 import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
-import { attachedCharacterIds, buildAttachedWorkspaceState, mapAttachedBookScopes, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
+import { attachedCharacterIds, buildAttachedWorkspaceState, mapAttachedBookScopes, recallEligibleBooks, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
+import { isLumiBooksSummaryEntry, LUMIBOOKS_TIMELINE_NOTE } from "../ownership";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
 import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, recallPlacementLabel, RecallRunStore, suppressedNativeEntryIds } from "./activation";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
@@ -48,7 +49,6 @@ import {
 import {
   buildConnectionOption,
   getRuntimeBooks,
-  isReadableBook,
   invalidateWorldBookListCache,
   loadCharacterConfig,
   loadGlobalSettings,
@@ -847,7 +847,7 @@ function registerRecallHooks(): void {
       const attachedIds = Object.keys(scopes);
       if (!attachedIds.length) return preparedContext;
       const { runtimeBooks } = await getRuntimeBooks(attachedIds, attachedIds, userId, 15_000);
-      const readableBooks = runtimeBooks.filter((book) => book.config.enabled && isReadableBook(book.config));
+      const readableBooks = recallEligibleBooks(runtimeBooks);
       if (!readableBooks.length) return preparedContext;
       const character = chat.character_id ? await spindle.characters.get(chat.character_id, userId) : null;
       const config = character
@@ -864,6 +864,14 @@ function registerRecallHooks(): void {
         switch (event.type) {
           case "start":
             beginRetrievalSession(userId, chatId, activeSessionId, event);
+            for (const book of runtimeBooks.filter((book) => book.summary.activationOwner === "lumibooks"
+              || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))) {
+              appendRetrievalSessionItem(userId, chatId, activeSessionId, {
+                id: "lumibooks:" + book.summary.id, kind: "trace", label: "LumiBooks timeline summaries",
+                summary: book.summary.name + ": timeline summaries left to LumiBooks.",
+                timestamp: Date.now(), phase: "session", tone: "info", details: [LUMIBOOKS_TIMELINE_NOTE],
+              });
+            }
             break;
           case "item":
             appendRetrievalSessionItem(userId, chatId, activeSessionId, event.item);
@@ -902,7 +910,7 @@ function registerRecallHooks(): void {
       const selectedRows = await Promise.all(selectedIds.map((id) => spindle.world_books.entries.get(id, userId)));
       signal?.throwIfAborted();
       if (selectedRows.some((entry) =>
-        !entry || entry.disabled || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
+        !entry || entry.disabled || isLumiBooksSummaryEntry(entry) || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
         recordNativeFallback(userId, chatId, "A selected entry changed or became unavailable.", sessionId);
         return preparedContext;
       }

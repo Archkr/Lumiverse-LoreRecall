@@ -74,11 +74,13 @@ export interface BookSummary {
   name: string;
   description: string;
   updatedAt: number;
+  activationOwner?: "lumibooks";
 }
 
 export type AttachmentScope = "character" | "persona" | "chat" | "global";
 
 export interface ManagedBookEntryView extends EntryRecallMeta {
+  activationOwner?: "lumibooks";
   entryId: string;
   worldBookId: string;
   worldBookName: string;

@@ -24,6 +24,7 @@ import {
   uniqueStrings,
 } from "../shared";
 import { ensureRootCategories } from "../categories";
+import { isLumiBooksSummaryBook, isLumiBooksSummaryEntry } from "../ownership";
 import type {
   BookRetrievalConfig,
   BookStatus,
@@ -243,6 +244,7 @@ export function toBookSummary(book: WorldBookDTO): BookSummary {
     name: book.name,
     description: book.description,
     updatedAt: book.updated_at,
+    ...(isLumiBooksSummaryBook(book.metadata) ? { activationOwner: "lumibooks" as const } : {}),
   };
 }
 
@@ -272,6 +274,7 @@ function toIndexedEntry(book: WorldBookDTO, entry: WorldBookEntryDTO): IndexedEn
 
   return {
     entryId: entry.id,
+    ...(isLumiBooksSummaryEntry(entry) ? { activationOwner: "lumibooks" as const } : {}),
     worldBookId: book.id,
     worldBookName: book.name,
     comment: entry.comment || "",
@@ -308,21 +311,31 @@ export async function loadBookCache(bookId: string, userId: string): Promise<Cac
   if (
     cached &&
     cached.version === CACHE_VERSION &&
+    cached.ownershipVersion === 1 &&
     cached.bookId === book.id &&
     cached.bookUpdatedAt === book.updated_at
   ) {
-    return cached;
+    // Read book ownership from current metadata even if its timestamp was unchanged.
+    const { activationOwner: _previousOwner, ...current } = cached;
+    return { ...current, ...(isLumiBooksSummaryBook(book.metadata)
+      || (cached.entries.length > 0 && cached.entries.every((entry) => entry.activationOwner === "lumibooks"))
+      ? { activationOwner: "lumibooks" as const } : {}) };
   }
 
   const entries = await listAllEntries(bookId, userId);
   const rebuilt: CachedBook = {
     version: CACHE_VERSION,
+    ownershipVersion: 1,
     bookId: book.id,
     bookUpdatedAt: book.updated_at,
     name: book.name,
     description: book.description,
     entries: entries.map((entry) => toIndexedEntry(book, entry)),
   };
+  if (isLumiBooksSummaryBook(book.metadata)
+    || (rebuilt.entries.length > 0 && rebuilt.entries.every((entry) => entry.activationOwner === "lumibooks"))) {
+    rebuilt.activationOwner = "lumibooks";
+  }
 
   await spindle.userStorage.setJson(getBookCachePath(bookId), rebuilt, { indent: 2, userId });
   return rebuilt;
@@ -477,6 +490,7 @@ export async function getRuntimeBooks(
                   name: cache.name,
                   description: cache.description,
                   updatedAt: cache.bookUpdatedAt,
+                  ...(cache.activationOwner ? { activationOwner: cache.activationOwner } : {}),
                 },
                 cache,
                 config,

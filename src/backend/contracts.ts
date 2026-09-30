@@ -26,6 +26,8 @@ export interface IndexedEntry extends ManagedBookEntryView {
 
 export interface CachedBook {
   version: 2;
+  ownershipVersion?: 1;
+  activationOwner?: "lumibooks";
   bookId: string;
   bookUpdatedAt: number;
   name: string;

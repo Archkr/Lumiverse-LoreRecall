@@ -482,6 +482,19 @@ function rootCategoryForEntry(tree, entryId) {
   return "Other";
 }
 
+// src/ownership.ts
+var LUMIBOOKS_TIMELINE_NOTE = "LumiBooks inserts these summaries in place of older chat messages. Recall leaves that replacement to LumiBooks; its Codex book can be selected for Recall.";
+function isLumiBooksSummaryEntry(entry) {
+  const extensions = entry.extensions;
+  return !!extensions && typeof extensions === "object" && !!extensions.lumibooks;
+}
+function isLumiBooksSummaryBook(metadata) {
+  if (!metadata || typeof metadata !== "object")
+    return false;
+  const chatId = metadata.lumibooks_chat_id;
+  return typeof chatId === "string" && !!chatId.trim();
+}
+
 // src/backend/runtime.ts
 var GLOBAL_SETTINGS_PATH = "global/settings.json";
 var CHARACTER_CONFIG_DIR = "characters";
@@ -707,6 +720,7 @@ function toIndexedEntry(book, entry) {
   });
   return {
     entryId: entry.id,
+    ...isLumiBooksSummaryEntry(entry) ? { activationOwner: "lumibooks" } : {},
     worldBookId: book.id,
     worldBookName: book.name,
     comment: entry.comment || "",
@@ -736,18 +750,23 @@ async function loadBookCache(bookId, userId) {
     fallback: null,
     userId
   });
-  if (cached && cached.version === CACHE_VERSION && cached.bookId === book.id && cached.bookUpdatedAt === book.updated_at) {
-    return cached;
+  if (cached && cached.version === CACHE_VERSION && cached.ownershipVersion === 1 && cached.bookId === book.id && cached.bookUpdatedAt === book.updated_at) {
+    const { activationOwner: _previousOwner, ...current } = cached;
+    return { ...current, ...isLumiBooksSummaryBook(book.metadata) || cached.entries.length > 0 && cached.entries.every((entry) => entry.activationOwner === "lumibooks") ? { activationOwner: "lumibooks" } : {} };
   }
   const entries = await listAllEntries(bookId, userId);
   const rebuilt = {
     version: CACHE_VERSION,
+    ownershipVersion: 1,
     bookId: book.id,
     bookUpdatedAt: book.updated_at,
     name: book.name,
     description: book.description,
     entries: entries.map((entry) => toIndexedEntry(book, entry))
   };
+  if (isLumiBooksSummaryBook(book.metadata) || rebuilt.entries.length > 0 && rebuilt.entries.every((entry) => entry.activationOwner === "lumibooks")) {
+    rebuilt.activationOwner = "lumibooks";
+  }
   await spindle.userStorage.setJson(getBookCachePath(bookId), rebuilt, { indent: 2, userId });
   return rebuilt;
 }
@@ -869,7 +888,8 @@ async function getRuntimeBooks(selectedBookIds, attachedBookIds, userId, maxWait
               id: cache.bookId,
               name: cache.name,
               description: cache.description,
-              updatedAt: cache.bookUpdatedAt
+              updatedAt: cache.bookUpdatedAt,
+              ...cache.activationOwner ? { activationOwner: cache.activationOwner } : {}
             },
             cache,
             config,
@@ -952,6 +972,7 @@ function attachedCharacterIds(activeCharacterId, metadata) {
 function toWorkspaceEntry(entry) {
   return {
     entryId: entry.entryId,
+    ...entry.activationOwner ? { activationOwner: entry.activationOwner } : {},
     worldBookId: entry.worldBookId,
     worldBookName: entry.worldBookName,
     comment: entry.comment,
@@ -984,6 +1005,12 @@ function buildAttachedWorkspaceState(scopes, loadedBooks, missingBookIds = []) {
     attachedBookSources: Object.fromEntries(bookIds.map((id) => [id, scopes[id][0]])),
     attachedBookScopes: existingScopes
   };
+}
+function recallEligibleBooks(books) {
+  return books.filter((book) => isReadableBook(book.config) && book.summary.activationOwner !== "lumibooks").map((book) => ({ ...book, cache: {
+    ...book.cache,
+    entries: book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks")
+  } }));
 }
 
 // src/backend/controller-json.ts
@@ -1866,7 +1893,7 @@ async function buildCategoryRetrievalPreview(messages, settings, config, books, 
   const recentConversation = buildRecentConversation(messages, config.contextMessages) || queryText;
   if (!queryText.trim())
     return null;
-  const readableBooks = books.filter((book) => book.config.enabled && isReadableBook(book.config));
+  const readableBooks = recallEligibleBooks(books);
   if (!readableBooks.length)
     return null;
   const report = options.reportProgress;
@@ -2189,7 +2216,7 @@ class RecallRunStore {
 }
 function suppressedNativeEntryIds(run, entries) {
   const handled = new Set(run.handledBookIds);
-  return entries.filter((entry) => handled.has(entry.world_book_id)).map((entry) => entry.id);
+  return entries.filter((entry) => handled.has(entry.world_book_id) && !isLumiBooksSummaryEntry(entry)).map((entry) => entry.id);
 }
 function entryRole(role) {
   return role === "user" || role === "assistant" ? role : "system";
@@ -3873,14 +3900,14 @@ async function regenerateSummaries(bookId, entryIds, nodeIds, userId, operation)
 function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, availableConnections = []) {
   const diagnostics = [];
   const multiBookMode = !!characterConfig && runtimeBooks.length > 1;
-  const readableBooks = runtimeBooks.filter((book) => book.config.enabled && book.config.permission !== "write_only");
+  const readableBooks = recallEligibleBooks(runtimeBooks);
   if (!readableBooks.length && runtimeBooks.length) {
     diagnostics.push({
       id: "no-readable-books",
       severity: "info",
       bookId: null,
       title: "No readable books selected for Recall",
-      detail: "Turn on Use in Recall under Sources for a book you want Recall to retrieve. Other attached books keep native activation."
+      detail: "Turn on Use in Recall under Sources for an ordinary lorebook or LumiBooks Codex book. Timeline summary books stay managed by LumiBooks; other attached books keep native activation."
     });
   }
   if (settings?.controllerConnectionId?.trim()) {
@@ -3904,6 +3931,16 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
     });
   }
   for (const book of runtimeBooks) {
+    if (book.summary.activationOwner === "lumibooks") {
+      diagnostics.push({
+        id: `lumibooks:${book.summary.id}`,
+        severity: "info",
+        bookId: book.summary.id,
+        title: "Timeline summaries are managed by LumiBooks",
+        detail: LUMIBOOKS_TIMELINE_NOTE
+      });
+      continue;
+    }
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
@@ -3943,7 +3980,7 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`
       });
     }
-    const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
+    const missingSummaryCount = book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks" && !entry.summary.trim()).length;
     if (book.config.enabled && missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,
@@ -4842,7 +4879,7 @@ function registerRecallHooks() {
       if (!attachedIds.length)
         return preparedContext;
       const { runtimeBooks } = await getRuntimeBooks(attachedIds, attachedIds, userId, 15000);
-      const readableBooks = runtimeBooks.filter((book) => book.config.enabled && isReadableBook(book.config));
+      const readableBooks = recallEligibleBooks(runtimeBooks);
       if (!readableBooks.length)
         return preparedContext;
       const character = chat.character_id ? await spindle.characters.get(chat.character_id, userId) : null;
@@ -4859,6 +4896,18 @@ function registerRecallHooks() {
         switch (event.type) {
           case "start":
             beginRetrievalSession(userId, chatId, activeSessionId, event);
+            for (const book of runtimeBooks.filter((book) => book.summary.activationOwner === "lumibooks" || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))) {
+              appendRetrievalSessionItem(userId, chatId, activeSessionId, {
+                id: "lumibooks:" + book.summary.id,
+                kind: "trace",
+                label: "LumiBooks timeline summaries",
+                summary: book.summary.name + ": timeline summaries left to LumiBooks.",
+                timestamp: Date.now(),
+                phase: "session",
+                tone: "info",
+                details: [LUMIBOOKS_TIMELINE_NOTE]
+              });
+            }
             break;
           case "item":
             appendRetrievalSessionItem(userId, chatId, activeSessionId, event.item);
@@ -4892,7 +4941,7 @@ function registerRecallHooks() {
       const selectedIds = [...new Set(preview.injectedNodes.map((node) => node.entryId))];
       const selectedRows = await Promise.all(selectedIds.map((id) => spindle.world_books.entries.get(id, userId)));
       signal?.throwIfAborted();
-      if (selectedRows.some((entry) => !entry || entry.disabled || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
+      if (selectedRows.some((entry) => !entry || entry.disabled || isLumiBooksSummaryEntry(entry) || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
         recordNativeFallback(userId, chatId, "A selected entry changed or became unavailable.", sessionId);
         return preparedContext;
       }

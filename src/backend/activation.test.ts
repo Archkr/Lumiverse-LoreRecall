@@ -22,6 +22,14 @@ function run(id: string, entries: WorldBookEntryDTO[] = [entry("chosen")]): Prep
 }
 
 describe("extension-managed activation", () => {
+  test("suppression leaves LumiBooks tagged summaries alone even inside a handled mixed book", () => {
+    expect(suppressedNativeEntryIds(run("mixed"), [
+      { id: "chosen", world_book_id: "managed" },
+      { id: "chapter", world_book_id: "managed", extensions: { lumibooks: { chatId: "chat", tier: 1 } } },
+      { id: "codex", world_book_id: "managed", extensions: { lumibooks_codex: { record: "character:alice" } } },
+      { id: "other", world_book_id: "unselected" },
+    ])).toEqual(["chosen", "codex"]);
+  });
   test("activation counts and text agree with surviving entries, and native fallback clears only activation", () => {
     const dynamic = { entryId: "dynamic", reasons: ["model_selected"] };
     const constant = { entryId: "constant", reasons: ["constant"] };

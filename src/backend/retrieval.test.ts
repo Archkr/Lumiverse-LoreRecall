@@ -63,6 +63,25 @@ async function preview(entries: IndexedEntry[], patch: Partial<typeof DEFAULT_CH
 }
 
 describe("category retrieval", () => {
+  test("previews exclude timeline summaries from routing, constants, and model selection", async () => {
+    const prompts = host();
+    const summary = book([entry("whole-book-chapter", { constant: true })], "timeline");
+    summary.summary.activationOwner = "lumibooks";
+    const mixed = book([
+      entry("chapter", { activationOwner: "lumibooks" }),
+      entry("arc", { activationOwner: "lumibooks", constant: true }),
+      entry("ordinary"), entry("codex", { constant: true }),
+    ]);
+    const result = (await buildRetrievalPreview([{ role: "user", content: "Talk about the cast" }],
+      DEFAULT_GLOBAL_SETTINGS, { ...DEFAULT_CHARACTER_CONFIG, tokenBudget: 1 }, [summary, mixed], "user"))!;
+    expect(result.retrievalComplete).toBe(true);
+    expect(result.modelSelectedEntries?.map((entry) => entry.entryId)).toEqual(["ordinary"]);
+    expect(result.reservedConstantNodes.map((entry) => entry.entryId)).toEqual(["codex"]);
+    expect(result.injectedNodes.map((entry) => entry.entryId)).toEqual(["codex", "ordinary"]);
+    expect(prompts.join("\n")).not.toContain('id="chapter"');
+    expect(prompts.join("\n")).not.toContain("whole-book-chapter");
+    expect(mixed.cache.entries).toHaveLength(4);
+  });
   function largeBooks() {
     const dynamics = Array.from({ length: 174 }, (_, index) => entry(`cast-${index}`, {
       worldBookId: `book-${index % 4}`, summary: "s".repeat(200), previewText: "p".repeat(200),

@@ -180,6 +180,9 @@ function normalizeBookConfig(value) {
   };
 }
 
+// src/ownership.ts
+var LUMIBOOKS_TIMELINE_NOTE = "LumiBooks inserts these summaries in place of older chat messages. Recall leaves that replacement to LumiBooks; its Codex book can be selected for Recall.";
+
 // src/ui/helpers.ts
 function isRecallActive(state) {
   return !!state?.globalSettings.enabled && !!state.hostSelectionAvailable;
@@ -192,7 +195,19 @@ function getRecallStatus(state) {
 function getRecallBookIds(state) {
   if (!state)
     return [];
-  return state.allWorldBooks.filter((book) => !!state.attachedBookSources[book.id] && state.bookConfigs[book.id]?.enabled === true && state.bookConfigs[book.id]?.permission !== "write_only" && !!state.bookStatuses[book.id]).map((book) => book.id);
+  return state.allWorldBooks.filter((book) => !!state.attachedBookSources[book.id] && book.activationOwner !== "lumibooks" && state.bookConfigs[book.id]?.enabled === true && state.bookConfigs[book.id]?.permission !== "write_only" && !!state.bookStatuses[book.id]).map((book) => book.id);
+}
+function getBookRecallChoice(state, bookId) {
+  const owned = state.allWorldBooks.find((book) => book.id === bookId)?.activationOwner === "lumibooks";
+  const config = state.bookConfigs[bookId];
+  return {
+    selected: !owned && config?.enabled === true,
+    disabled: owned || !state.bookStatuses[bookId] || config?.permission === "write_only",
+    detail: owned ? LUMIBOOKS_TIMELINE_NOTE : config?.permission === "write_only" ? "Change this book's permission to Read + write or Read only first." : !state.bookStatuses[bookId] ? "Book details must load before changing its Recall selection." : "Saved automatically. This choice applies to this book wherever it is attached."
+  };
+}
+function getBookActivationLabel(state, bookId) {
+  return state.allWorldBooks.find((book) => book.id === bookId)?.activationOwner === "lumibooks" ? "Managed by LumiBooks" : getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation";
 }
 function createElement(tagName, className, textContent) {
   const element = document.createElement(tagName);
@@ -3500,14 +3515,14 @@ function setup(ctx) {
     sendToBackend(ctx, { type: "save_book_config", bookId, chatId: getLiveChatId(), patch: { enabled } });
   }
   function createBookRecallToggle(state, bookId) {
-    const config = normalizeBookConfig(state.bookConfigs[bookId]);
-    const toggle = createSwitch("Use in Recall", config.enabled, (enabled) => saveBookRecallChoice(bookId, enabled));
+    const choice = getBookRecallChoice(state, bookId);
+    const toggle = createSwitch("Use in Recall", choice.selected, (enabled) => saveBookRecallChoice(bookId, enabled));
     toggle.addEventListener("click", (event) => event.stopPropagation());
     const input = toggle.querySelector("input");
-    input.disabled = !state.bookStatuses[bookId] || config.permission === "write_only";
+    input.disabled = choice.disabled;
     toggle.classList.toggle("disabled", input.disabled);
     input.setAttribute("aria-label", `Use ${state.allWorldBooks.find((book) => book.id === bookId)?.name ?? "this book"} in Lore Recall`);
-    toggle.title = config.permission === "write_only" ? "Change this book's permission to Read + write or Read only first." : !state.bookStatuses[bookId] ? "Book details must load before changing its Recall selection." : "Saved automatically. This choice applies to this book wherever it is attached.";
+    toggle.title = choice.detail;
     return toggle;
   }
   function getSelectedTree(bookId) {
@@ -5028,7 +5043,7 @@ function setup(ctx) {
         pillBody.appendChild(createElement("div", "lore-source-pill-meta", metaBits.join(" · ")));
         pill.appendChild(pillBody);
         const tags = createElement("div", "lore-source-pill-tags");
-        tags.appendChild(createTag(getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
+        tags.appendChild(createTag(getBookActivationLabel(state, bookId), getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
         if (status?.treeMissing)
           tags.appendChild(createTag("No tree", "warn"));
         if (isWriteOnly)
@@ -5137,7 +5152,7 @@ function setup(ctx) {
       const tags = createElement("div", "lore-row-tags");
       for (const scope of getBookAttachmentScopes(state, bookId))
         tags.appendChild(createTag(`Attached: ${scope}`, "good"));
-      tags.appendChild(createTag(getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
+      tags.appendChild(createTag(getBookActivationLabel(state, bookId), getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
       if (!status)
         tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing)
@@ -5226,7 +5241,7 @@ function setup(ctx) {
       const tags = createElement("div", "lore-row-tags");
       for (const scope of getBookAttachmentScopes(state, bookId))
         tags.appendChild(createTag(`Attached: ${scope}`, "good"));
-      tags.appendChild(createTag(getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
+      tags.appendChild(createTag(getBookActivationLabel(state, bookId), getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
       if (!status)
         tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing)
@@ -5668,10 +5683,8 @@ function setup(ctx) {
     }
     const book = state.allWorldBooks.find((item) => item.id === selectedBookId);
     const draft = getBookDraft(selectedBookId);
-    section.appendChild(createSwitch("Use this book in Lore Recall when attached", draft.enabled, (next) => {
-      saveBookRecallChoice(selectedBookId, next);
-    }));
-    section.appendChild(createFieldNote("The Recall choice saves automatically and applies wherever this book is attached. Unselected books use native activation."));
+    section.appendChild(createBookRecallToggle(state, selectedBookId));
+    section.appendChild(createFieldNote(book?.activationOwner === "lumibooks" ? getBookRecallChoice(state, selectedBookId).detail : "The Recall choice saves automatically and applies wherever this book is attached. Unselected books use native activation."));
     const form = createElement("div", "lore-form");
     form.appendChild(createField("Permission", createSelect(draft.permission, [
       ["read_write", "Read + write"],

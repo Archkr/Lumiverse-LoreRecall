@@ -1,5 +1,8 @@
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
+import { LUMIBOOKS_TIMELINE_NOTE } from "../ownership";
+import { recallEligibleBooks } from "./attached";
+
 import {
   EXTENSION_KEY,
   ROOT_NODE_ID,
@@ -1879,7 +1882,7 @@ export function buildDiagnostics(
 ): DiagnosticFinding[] {
   const diagnostics: DiagnosticFinding[] = [];
   const multiBookMode = !!characterConfig && runtimeBooks.length > 1;
-  const readableBooks = runtimeBooks.filter((book) => book.config.enabled && book.config.permission !== "write_only");
+  const readableBooks = recallEligibleBooks(runtimeBooks);
 
   if (!readableBooks.length && runtimeBooks.length) {
     diagnostics.push({
@@ -1887,7 +1890,7 @@ export function buildDiagnostics(
       severity: "info",
       bookId: null,
       title: "No readable books selected for Recall",
-      detail: "Turn on Use in Recall under Sources for a book you want Recall to retrieve. Other attached books keep native activation.",
+      detail: "Turn on Use in Recall under Sources for an ordinary lorebook or LumiBooks Codex book. Timeline summary books stay managed by LumiBooks; other attached books keep native activation.",
     });
   }
 
@@ -1913,6 +1916,13 @@ export function buildDiagnostics(
   }
 
   for (const book of runtimeBooks) {
+    if (book.summary.activationOwner === "lumibooks") {
+      diagnostics.push({
+        id: `lumibooks:${book.summary.id}`, severity: "info", bookId: book.summary.id,
+        title: "Timeline summaries are managed by LumiBooks", detail: LUMIBOOKS_TIMELINE_NOTE,
+      });
+      continue;
+    }
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
@@ -1953,7 +1963,7 @@ export function buildDiagnostics(
         detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`,
       });
     }
-    const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
+    const missingSummaryCount = book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks" && !entry.summary.trim()).length;
     if (book.config.enabled && missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,

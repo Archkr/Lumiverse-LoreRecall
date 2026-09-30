@@ -21,7 +21,7 @@ import {
   resolveControllerConnectionId,
   runControllerJson as runSharedControllerJson,
 } from "./controller-json";
-import { isReadableBook } from "./storage";
+import { recallEligibleBooks } from "./attached";
 import { ROOT_CATEGORIES, rootCategoryForEntry, type RootCategory } from "../categories";
 import { filterWithJev } from "./jev";
 import { ModelSelectionSession, mapSelectionBatches } from "./model-selection";
@@ -4707,7 +4707,7 @@ async function buildCategoryRetrievalPreview(
   const queryText = buildQueryText(messages, config.contextMessages);
   const recentConversation = buildRecentConversation(messages, config.contextMessages) || queryText;
   if (!queryText.trim()) return null;
-  const readableBooks = books.filter((book) => book.config.enabled && isReadableBook(book.config));
+  const readableBooks = recallEligibleBooks(books);
   if (!readableBooks.length) return null;
   const report = options.reportProgress;
   const startedAt = options.capturedAt ?? Date.now();

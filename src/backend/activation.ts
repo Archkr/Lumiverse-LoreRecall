@@ -1,6 +1,7 @@
 import type { LlmMessageDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
 import type { RetrievalPreview } from "../types";
 import type { RuntimeBook } from "./contracts";
+import { isLumiBooksSummaryEntry } from "../ownership";
 
 export interface PreparedRecallRun {
   id: string;
@@ -134,10 +135,10 @@ export class RecallRunStore {
 
 export function suppressedNativeEntryIds(
   run: PreparedRecallRun,
-  entries: readonly { id: string; world_book_id: string }[],
+  entries: readonly { id: string; world_book_id: string; extensions?: unknown }[],
 ): string[] {
   const handled = new Set(run.handledBookIds);
-  return entries.filter((entry) => handled.has(entry.world_book_id)).map((entry) => entry.id);
+  return entries.filter((entry) => handled.has(entry.world_book_id) && !isLumiBooksSummaryEntry(entry)).map((entry) => entry.id);
 }
 
 function entryRole(role: string | null): LlmMessageDTO["role"] {

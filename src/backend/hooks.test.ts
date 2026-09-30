@@ -8,6 +8,8 @@ test("public hooks register after permission grant and retrieve without exact-se
   let permissionChanged: (() => void) | undefined;
   let malformedSelection = false;
   let emptySelection = false;
+  const modelPrompts: string[] = [];
+  const bookMetadata: Record<string, Record<string, unknown>> = {};
   const selectedBooks = new Set(["character", "persona", "chat", "global"]);
   const rows = ["character", "persona", "chat", "global"].map((scope) => ({
     id: scope + "-entry", world_book_id: scope, uid: scope, comment: scope,
@@ -50,7 +52,7 @@ test("public hooks register after permission grant and retrieve without exact-se
     personas: { getActive: async () => ({ attached_world_book_id: "persona" }), getDefault: async () => null },
     world_books: {
       getGlobal: async () => ["global"],
-      get: async (id: string) => ({ id, name: id, description: "", updated_at: 1 }),
+      get: async (id: string) => ({ id, name: id, description: "", updated_at: 1, metadata: bookMetadata[id] ?? {} }),
       entries: {
         list: async (id: string) => ({ data: rows.filter((entry) => entry.world_book_id === id), total: 1 }),
         get: async (id: string) => rows.find((entry) => entry.id === id),
@@ -62,6 +64,7 @@ test("public hooks register after permission grant and retrieve without exact-se
     generate: { quiet: async ({ messages, connection_id }: any) => {
       expect(connection_id).toBe("connection");
       const prompt = messages.at(-1).content;
+      modelPrompts.push(prompt);
       if (prompt.startsWith("Choose every top-level")) return { content: '{"categories":["Other"]}' };
       if (malformedSelection) return { content: "{}" };
       const ids = [...prompt.matchAll(/id="([^"]+)";/g)].map((match: any) => match[1]);
@@ -117,6 +120,53 @@ test("public hooks register after permission grant and retrieve without exact-se
     expect(oneInjected.messages[1].role).toBe("assistant");
     expect(oneInjected.breakdown[0].name).toContain("AN after");
     expect(oneInjected.messages.map((message: any) => message.content)).not.toContain("Lore for Alice from global");
+
+    // LumiBooks' summary handler runs at priority 90 before Recall at 95.
+    // It disables tagged summaries for native activation, then inserts assistant
+    // summary messages itself. Its Codex entries use normal lorebook activation.
+    const summaryMeta = { lumibooks: { chatId: "turn", tier: 1, msgIds: ["old-message"] } };
+    const codexMeta = { lumibooks_codex: { chatId: "turn", record: "character:alice", file: "characters" } };
+    bookMetadata.timeline = { lumibooks_chat_id: "turn" };
+    bookMetadata.codex = { lumibooks_codex_chat_id: "turn" };
+    chat.metadata.chat_world_book_ids.push("timeline", "codex", "mixed");
+    rows.push(
+      { ...rows[0], id: "chapter", world_book_id: "timeline", content: "LumiBooks chapter", extensions: summaryMeta, constant: true },
+      { ...rows[0], id: "codex-record", world_book_id: "codex", content: "Codex Alice", extensions: codexMeta,
+        constant: true, position: 4, depth: 0, role: "system" },
+      { ...rows[0], id: "disabled-codex", world_book_id: "codex", content: "Disabled Codex", extensions: codexMeta, disabled: true },
+      { ...rows[0], id: "mixed-chapter", world_book_id: "mixed", content: "Mixed chapter", extensions: summaryMeta, constant: true },
+      { ...rows[0], id: "mixed-lore", world_book_id: "mixed", content: "Mixed ordinary lore", extensions: {}, constant: true, position: 0 },
+    );
+    selectedBooks.add("timeline"); // Previously saved summary-book opt-in must be ignored safely.
+    selectedBooks.add("codex");
+    selectedBooks.add("mixed");
+    modelPrompts.length = 0;
+    const withLumiBooks = await hooks.prepare(context);
+    const afterLumiBooksVote = rows.map((row) => ({ ...row,
+      disabled: row.disabled || !!(row.extensions as any).lumibooks,
+    }));
+    expect((await hooks.activate({ ...context, entries: afterLumiBooksVote })).disabled)
+      .toEqual(["character-entry", "codex-record", "disabled-codex", "mixed-lore"]);
+    const lumiBooksMessage = { role: "assistant", content: "LumiBooks chapter" };
+    const compatible = await hooks.inject([lumiBooksMessage, ...nativeMessages], withLumiBooks);
+    expect(compatible.breakdown).toHaveLength(3);
+    expect(compatible.messages.filter((message: any) => message.content === "LumiBooks chapter")).toEqual([lumiBooksMessage]);
+    expect(compatible.messages).toContain(lumiBooksMessage);
+    expect(compatible.messages.map((message: any) => message.content)).toContain("Lore for Alice from character");
+    expect(compatible.messages.map((message: any) => message.content)).toContain("Codex Alice");
+    expect(compatible.messages.find((message: any) => message.content === "Codex Alice")).toMatchObject({ role: "system" });
+    expect(compatible.messages.findIndex((message: any) => message.content === "Codex Alice"))
+      .toBe(compatible.messages.findIndex((message: any) => message.__isChatHistory) + 1);
+    expect(compatible.messages.map((message: any) => message.content)).toContain("Mixed ordinary lore");
+    expect(compatible.messages.map((message: any) => message.content)).not.toContain("Mixed chapter");
+    expect(compatible.messages.map((message: any) => message.content)).not.toContain("Disabled Codex");
+    expect(modelPrompts.join("\n")).not.toContain("LumiBooks chapter");
+    expect(modelPrompts.join("\n")).not.toContain("Mixed chapter");
+    selectedBooks.clear();
+    selectedBooks.add("timeline");
+    const summariesOnly = await hooks.prepare(context);
+    expect(await hooks.activate({ ...context, entries: afterLumiBooksVote })).toBeUndefined();
+    expect(await hooks.inject([lumiBooksMessage, ...nativeMessages], summariesOnly)).toEqual([lumiBooksMessage, ...nativeMessages]);
     selectedBooks.clear();
     const none = await hooks.prepare(context);
     expect(await hooks.activate({ ...context, entries: rows })).toBeUndefined();
