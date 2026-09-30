@@ -2195,15 +2195,39 @@ function entryRole(role) {
   return role === "user" || role === "assistant" ? role : "system";
 }
 function insertionIndex(entry, messages) {
-  const history = messages.flatMap((message, index) => message.__isChatHistory ? [index] : []);
+  const history = messages.flatMap((message, index) => message.__isChatHistory || message.__chatHistorySource ? [index] : []);
   const firstHistory = history[0] ?? messages.length;
   if (entry.position === 0)
-    return 0;
+    return history.length ? firstHistory : 0;
+  if (entry.position === 1)
+    return history.length ? history[history.length - 1] + 1 : messages.length;
+  if ((entry.position === 3 || entry.position === 6) && history.length)
+    return firstHistory + 1;
   if (entry.position === 4 && history.length) {
     const depth = Math.max(0, Math.floor(entry.depth || 0));
     return depth === 0 ? history[history.length - 1] + 1 : history[Math.max(0, history.length - depth)];
   }
   return firstHistory;
+}
+function recallPlacementLabel(entry) {
+  switch (entry.position) {
+    case 0:
+      return "Before chat history";
+    case 1:
+      return "After chat history";
+    case 2:
+      return "AN before (first chat turn)";
+    case 3:
+      return "AN after (first chat turn)";
+    case 4:
+      return `Chat depth ${Math.max(0, Math.floor(entry.depth || 0))}`;
+    case 5:
+      return "EM before (first chat turn)";
+    case 6:
+      return "EM after (first chat turn)";
+    default:
+      return "Before chat history (marker/outlet fallback)";
+  }
 }
 function injectRecallEntries(messages, entries) {
   const inserted = [...messages];
@@ -2213,7 +2237,10 @@ function injectRecallEntries(messages, entries) {
     const { entry, index } = planned[offset];
     const messageIndex = index + offset;
     inserted.splice(messageIndex, 0, { role: entryRole(entry.role), content: entry.content });
-    breakdown.push({ messageIndex, name: entry.comment?.trim() || "Lore Recall entry" });
+    breakdown.push({
+      messageIndex,
+      name: `Lore Recall: ${entry.comment?.trim() || "Lore entry"} [${recallPlacementLabel(entry)}]`
+    });
   }
   return { messages: inserted, breakdown };
 }
@@ -4968,7 +4995,10 @@ function registerRecallHooks() {
       count: run.entries.length,
       entries: run.preview.injectedNodes,
       tone: "success",
-      details: run.entries.some((entry) => ![0, 1, 4].includes(entry.position)) ? ["Author-note, example, marker, and outlet positions are placed before chat history by Lore Recall."] : []
+      details: [
+        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry)}; role ${entry.role || "system"}.`),
+        ...run.entries.some((entry) => ![0, 1, 2, 3, 4, 5, 6].includes(entry.position)) ? ["Exact marker and outlet slots are unavailable; those entries are placed before chat history."] : []
+      ]
     });
     preparedRecallRuns.remove(runId);
     scheduleLiveStatePush(run.userId, run.chatId);

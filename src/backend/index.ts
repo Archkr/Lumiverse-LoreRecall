@@ -17,7 +17,7 @@ import type { RuntimeBook } from "./contracts";
 import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
 import { attachedCharacterIds, buildAttachedWorkspaceState, mapAttachedBookScopes, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
-import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, RecallRunStore, suppressedNativeEntryIds } from "./activation";
+import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, recallPlacementLabel, RecallRunStore, suppressedNativeEntryIds } from "./activation";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
   type OperationContext,
@@ -987,9 +987,11 @@ function registerRecallHooks(): void {
         + run.handledBookIds.length + " attached books.",
       timestamp: Date.now(), phase: "inject", count: run.entries.length,
       entries: run.preview.injectedNodes, tone: "success",
-      details: run.entries.some((entry) => ![0, 1, 4].includes(entry.position))
-        ? ["Author-note, example, marker, and outlet positions are placed before chat history by Lore Recall."]
-        : [],
+      details: [
+        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry)}; role ${entry.role || "system"}.`),
+        ...(run.entries.some((entry) => ![0, 1, 2, 3, 4, 5, 6].includes(entry.position))
+          ? ["Exact marker and outlet slots are unavailable; those entries are placed before chat history."] : []),
+      ],
     });
     preparedRecallRuns.remove(runId);
     scheduleLiveStatePush(run.userId, run.chatId);

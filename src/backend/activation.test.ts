@@ -113,17 +113,52 @@ describe("extension-managed activation", () => {
       { role: "user", content: "Latest", __isChatHistory: true },
     ] as LlmMessageDTO[];
     const result = injectRecallEntries(messages, [
-      entry("before", 0),
-      entry("prehistory", 1, "user"),
+      entry("before", 0, "user"),
+      entry("after", 1, "user"),
       entry("depth-one", 4, "assistant", 1),
       entry("depth-zero", 4, "system", 0),
     ]);
     expect(result.messages.map((message) => message.content)).toEqual([
-      "Content before", "Preset", "Content prehistory", "Earlier", "Reply",
-      "Content depth-one", "Latest", "Content depth-zero",
+      "Preset", "Content before", "Earlier", "Reply",
+      "Content depth-one", "Latest", "Content after", "Content depth-zero",
     ]);
-    expect(result.messages[2].role).toBe("user");
-    expect(result.messages[5].role).toBe("assistant");
-    expect(result.breakdown.map((item) => item.messageIndex)).toEqual([0, 2, 5, 7]);
+    expect(result.messages[1].role).toBe("user");
+    expect(result.messages[4].role).toBe("assistant");
+    expect(result.breakdown.map((item) => item.messageIndex)).toEqual([1, 4, 6, 7]);
+  });
+
+  test("AN and EM entries keep their role and native before/after-first-turn placement", () => {
+    const messages = [
+      { role: "system", content: "Preset" },
+      { role: "user", content: "First", __chatHistorySource: true },
+      { role: "system", content: "Existing depth note" },
+      { role: "assistant", content: "Second", __chatHistorySource: true },
+      { role: "system", content: "Suffix" },
+    ] as LlmMessageDTO[];
+    const result = injectRecallEntries(messages, [
+      entry("an-before", 2, "assistant"), entry("an-after", 3, "assistant"),
+      entry("em-before", 5, "user"), entry("em-after", 6, "system"),
+      entry("after", 1, "assistant"),
+    ]);
+    expect(result.messages.map((message) => message.content)).toEqual([
+      "Preset", "Content an-before", "Content em-before", "First", "Content an-after", "Content em-after",
+      "Existing depth note", "Second", "Content after", "Suffix",
+    ]);
+    expect(result.messages[1].role).toBe("assistant");
+    expect(result.messages[4].role).toBe("assistant");
+    expect(result.breakdown[0].name).toContain("Lore Recall:");
+    expect(result.breakdown[1].name).toContain("EM before");
+    expect(result.breakdown[2].name).toContain("AN after");
+    for (const item of result.breakdown) expect(result.messages[item.messageIndex].content).toStartWith("Content ");
+    expect(messages.map((message) => message.content)).toEqual(["Preset", "First", "Existing depth note", "Second", "Suffix"]);
+  });
+
+  test("placement without chat history keeps before at the start and other entries at the end", () => {
+    const result = injectRecallEntries([{ role: "system", content: "Preset" }], [
+      entry("before", 0), entry("after", 1), entry("an-after", 3), entry("marker", 7),
+    ]);
+    expect(result.messages.map((message) => message.content)).toEqual([
+      "Content before", "Preset", "Content after", "Content an-after", "Content marker",
+    ]);
   });
 });

@@ -146,16 +146,33 @@ function entryRole(role: string | null): LlmMessageDTO["role"] {
 
 function insertionIndex(entry: WorldBookEntryDTO, messages: readonly LlmMessageDTO[]): number {
   const history = messages.flatMap((message, index) =>
-    (message as LlmMessageDTO & { __isChatHistory?: boolean }).__isChatHistory ? [index] : []);
+    ((message as LlmMessageDTO & { __isChatHistory?: boolean; __chatHistorySource?: boolean }).__isChatHistory
+      || (message as LlmMessageDTO & { __chatHistorySource?: boolean }).__chatHistorySource) ? [index] : []);
   const firstHistory = history[0] ?? messages.length;
-  if (entry.position === 0) return 0;
+  if (entry.position === 0) return history.length ? firstHistory : 0;
+  if (entry.position === 1) return history.length ? history[history.length - 1] + 1 : messages.length;
+  // Native auto-injection puts AN/EM before and after the first chat turn.
+  if ((entry.position === 3 || entry.position === 6) && history.length) return firstHistory + 1;
   if (entry.position === 4 && history.length) {
     const depth = Math.max(0, Math.floor(entry.depth || 0));
     return depth === 0 ? history[history.length - 1] + 1 : history[Math.max(0, history.length - depth)];
   }
-  // The final prompt does not expose native author-note, marker, or outlet
-  // slots. Place those entries beside the other pre-history lore instead.
+  // AN/EM-before belongs at the first chat turn too. Exact marker and outlet
+  // slots are unavailable in the assembled prompt; those fall back here.
   return firstHistory;
+}
+
+export function recallPlacementLabel(entry: Pick<WorldBookEntryDTO, "position" | "depth">): string {
+  switch (entry.position) {
+    case 0: return "Before chat history";
+    case 1: return "After chat history";
+    case 2: return "AN before (first chat turn)";
+    case 3: return "AN after (first chat turn)";
+    case 4: return `Chat depth ${Math.max(0, Math.floor(entry.depth || 0))}`;
+    case 5: return "EM before (first chat turn)";
+    case 6: return "EM after (first chat turn)";
+    default: return "Before chat history (marker/outlet fallback)";
+  }
 }
 
 export function injectRecallEntries(
@@ -170,7 +187,8 @@ export function injectRecallEntries(
     const { entry, index } = planned[offset];
     const messageIndex = index + offset;
     inserted.splice(messageIndex, 0, { role: entryRole(entry.role), content: entry.content });
-    breakdown.push({ messageIndex, name: entry.comment?.trim() || "Lore Recall entry" });
+    breakdown.push({ messageIndex,
+      name: `Lore Recall: ${entry.comment?.trim() || "Lore entry"} [${recallPlacementLabel(entry)}]` });
   }
   return { messages: inserted, breakdown };
 }

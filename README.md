@@ -20,7 +20,7 @@ For each generation, the model picks all relevant top-level categories. Lore Rec
 
 Lore Recall sets no output-token limits on controller requests, including tree assignments and summaries. Legacy `controllerMaxTokens` settings are ignored. The selected Lumiverse connection and provider determine the available output budget. Input batch sizes, retrieval timeouts, and the dynamic injection cap still apply.
 
-JEV receives one yes/no relevance question for each selected entry. An explicit answer below the configured threshold rejects it. Missing answers and JEV failures let affected model picks pass through. If more entries survive than the character's dynamic cap, the strongest JEV approvals win; ties retain model order. Enabled constant entries activate separately, regardless of category routing and the dynamic cap. Lore Recall inserts selected entries with their stored role, and honors before-prompt and chat-depth positions. Other native placement slots are placed beside the pre-history lore because those slots are unavailable after prompt assembly. If model retrieval cannot finish within the 120-second pre-generation window, native lorebook activation runs for that turn.
+JEV receives one yes/no relevance question for each selected entry. An explicit answer below the configured threshold rejects it. Missing answers and JEV failures let affected model picks pass through. If more entries survive than the character's dynamic cap, the strongest JEV approvals win; ties retain model order. Enabled constant entries activate separately, regardless of category routing and the dynamic cap. Lore Recall inserts selected entries with their stored role. Before/after-history entries go beside the first/last chat turn. AN and EM before/after positions go beside the first chat turn, matching Lumiverse's automatic placement. Depth entries count backward through chat history. Exact marker, outlet, and placement inside preset macro blocks are unavailable after assembly; these use the before-history fallback. If model retrieval cannot finish within the 120-second pre-generation window, native lorebook activation runs for that turn.
 
 On hosts that support required prompt interceptors, a failure after native activation is suppressed stops generation. Older hosts do not offer that last-resort guarantee; a late interceptor failure can leave that turn without the selected lore. The insertion step itself performs no model or network calls.
 
@@ -29,6 +29,8 @@ Selected lore resolves character, user, and other placeholders before insertion.
 The workspace and live retrieval feed show attached sources, routed categories, model picks, JEV decisions, final activation, and failure reasons. The tree is an organizer and provides category context; only the top-level categories are used for routing.
 
 Copied retrieval reports include each batch's candidates, attempts, duration, outcome, selected IDs, finish reason, and available token usage. Prepared picks and actual activation are reported separately. Native fallback clears Recall's activation count and text while retaining the model decisions that explain the failure.
+
+Prompt breakdowns label Recall entries with their entry name and placement. Lumiverse groups prompt-interceptor output under **Extensions / Author's Note**; that group includes extension output regardless of an entry's configured position.
 
 ## Settings and data
 

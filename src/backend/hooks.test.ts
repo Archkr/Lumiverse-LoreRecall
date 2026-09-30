@@ -13,7 +13,7 @@ test("public hooks register after permission grant and retrieve without exact-se
     id: scope + "-entry", world_book_id: scope, uid: scope, comment: scope,
     key: [scope], keysecondary: [], content: "Lore for {{char}} from " + scope,
     disabled: scope === "chat", constant: scope === "global", extensions: {},
-    position: 0, depth: 0, role: "system", order_value: 0, updated_at: 1,
+    position: scope === "character" ? 3 : 0, depth: 0, role: scope === "character" ? "assistant" : "system", order_value: 0, updated_at: 1,
   }));
   const character = { id: "card", name: "Alice", world_book_ids: ["character"], extensions: {
     [EXTENSION_KEY]: { characterConfig: { ...DEFAULT_CHARACTER_CONFIG, tokenBudget: 1 } },
@@ -112,7 +112,10 @@ test("public hooks register after permission grant and retrieve without exact-se
     expect((await hooks.activate({ ...context, entries: rows })).disabled).toEqual(["character-entry"]);
     const oneInjected = await hooks.inject(nativeMessages, oneBook);
     expect(oneInjected.breakdown).toHaveLength(1);
-    expect(oneInjected.messages[0].content).toBe("Lore for Alice from character");
+    expect(oneInjected.messages[0]).toEqual(nativeMessages[0]);
+    expect(oneInjected.messages[1].content).toBe("Lore for Alice from character");
+    expect(oneInjected.messages[1].role).toBe("assistant");
+    expect(oneInjected.breakdown[0].name).toContain("AN after");
     expect(oneInjected.messages.map((message: any) => message.content)).not.toContain("Lore for Alice from global");
     selectedBooks.clear();
     const none = await hooks.prepare(context);
