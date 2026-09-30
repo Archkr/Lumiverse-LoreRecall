@@ -63,7 +63,7 @@ async function preview(entries: IndexedEntry[], patch: Partial<typeof DEFAULT_CH
 }
 
 describe("category retrieval", () => {
-  test("previews exclude timeline summaries from routing, constants, and model selection", async () => {
+  test("previews route opted-in timeline summaries and keep their constants outside the cap", async () => {
     const prompts = host();
     const summary = book([entry("whole-book-chapter", { constant: true })], "timeline");
     summary.summary.activationOwner = "lumibooks";
@@ -75,10 +75,10 @@ describe("category retrieval", () => {
     const result = (await buildRetrievalPreview([{ role: "user", content: "Talk about the cast" }],
       DEFAULT_GLOBAL_SETTINGS, { ...DEFAULT_CHARACTER_CONFIG, tokenBudget: 1 }, [summary, mixed], "user"))!;
     expect(result.retrievalComplete).toBe(true);
-    expect(result.modelSelectedEntries?.map((entry) => entry.entryId)).toEqual(["ordinary"]);
-    expect(result.reservedConstantNodes.map((entry) => entry.entryId)).toEqual(["codex"]);
-    expect(result.injectedNodes.map((entry) => entry.entryId)).toEqual(["codex", "ordinary"]);
-    expect(prompts.join("\n")).not.toContain('id="chapter"');
+    expect(result.modelSelectedEntries?.map((entry) => entry.entryId)).toEqual(["chapter", "ordinary"]);
+    expect(result.reservedConstantNodes.map((entry) => entry.entryId).sort()).toEqual(["arc", "codex", "whole-book-chapter"]);
+    expect(result.injectedNodes.map((entry) => entry.entryId).sort()).toEqual(["arc", "chapter", "codex", "whole-book-chapter"]);
+    expect(prompts.join("\n")).toContain('id="chapter"');
     expect(prompts.join("\n")).not.toContain("whole-book-chapter");
     expect(mixed.cache.entries).toHaveLength(4);
   });

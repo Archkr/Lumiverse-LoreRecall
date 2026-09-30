@@ -20,7 +20,7 @@ test("Sources keeps three attached books visible while only one is selected for 
   expect(getRecallBookIds(state)).toEqual(["date-b"]);
 });
 
-test("Sources labels LumiBooks summaries and disables their Recall switch while Codex remains selectable", () => {
+test("Sources enables Recall selection for LumiBooks summaries and Codex and respects opt-out", () => {
   const state = makeState({
     attachedBookSources: { "date-a": "chat", "date-b": "chat" },
     bookConfigs: {
@@ -30,14 +30,18 @@ test("Sources labels LumiBooks summaries and disables their Recall switch while 
   });
   state.allWorldBooks[0].activationOwner = "lumibooks";
   state.allWorldBooks[1].name = "LumiBooks Codex";
-  expect(getRecallBookIds(state)).toEqual(["date-b"]);
+  expect(getRecallBookIds(state)).toEqual(["date-a", "date-b"]);
   expect(getSourceListPresentation(state, "").bookIds).toEqual(["date-a", "date-b"]);
-  expect(getBookActivationLabel(state, "date-a")).toBe("Managed by LumiBooks");
-  expect(getBookRecallChoice(state, "date-a")).toMatchObject({ selected: false, disabled: true });
-  expect(getBookRecallChoice(state, "date-a").detail).toContain("in place of older chat messages");
+  expect(getBookActivationLabel(state, "date-a")).toBe("Selected for Recall");
+  expect(getBookRecallChoice(state, "date-a")).toMatchObject({ selected: true, disabled: false });
+  expect(getBookRecallChoice(state, "date-a").detail).toContain("control their final injection");
   expect(getBookActivationLabel(state, "date-b")).toBe("Selected for Recall");
   expect(getBookRecallChoice(state, "date-b")).toMatchObject({ selected: true, disabled: false });
   expect(state.bookConfigs["date-a"].enabled).toBe(true);
+  state.bookConfigs["date-a"].enabled = false;
+  expect(getBookActivationLabel(state, "date-a")).toBe("Managed by LumiBooks");
+  expect(getRecallBookIds(state)).toEqual(["date-b"]);
+  expect(getBookRecallChoice(state, "date-a")).toMatchObject({ selected: false, disabled: false });
 });
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {

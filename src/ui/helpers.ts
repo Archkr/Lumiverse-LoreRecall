@@ -17,7 +17,6 @@ export function getRecallStatus(state: FrontendState | null): { label: string; t
 export function getRecallBookIds(state: FrontendState | null): string[] {
   if (!state) return [];
   return state.allWorldBooks.filter((book) => !!state.attachedBookSources[book.id]
-    && book.activationOwner !== "lumibooks"
     && state.bookConfigs[book.id]?.enabled === true
     && state.bookConfigs[book.id]?.permission !== "write_only"
     && !!state.bookStatuses[book.id]).map((book) => book.id);
@@ -27,19 +26,19 @@ export function getBookRecallChoice(state: FrontendState, bookId: string): { sel
   const owned = state.allWorldBooks.find((book) => book.id === bookId)?.activationOwner === "lumibooks";
   const config = state.bookConfigs[bookId];
   return {
-    selected: !owned && config?.enabled === true,
-    disabled: owned || !state.bookStatuses[bookId] || config?.permission === "write_only",
-    detail: owned ? LUMIBOOKS_TIMELINE_NOTE
-      : config?.permission === "write_only" ? "Change this book's permission to Read + write or Read only first."
+    selected: config?.enabled === true,
+    disabled: !state.bookStatuses[bookId] || config?.permission === "write_only",
+    detail: config?.permission === "write_only" ? "Change this book's permission to Read + write or Read only first."
       : !state.bookStatuses[bookId] ? "Book details must load before changing its Recall selection."
+      : owned ? LUMIBOOKS_TIMELINE_NOTE
       : "Saved automatically. This choice applies to this book wherever it is attached.",
   };
 }
 
 export function getBookActivationLabel(state: FrontendState, bookId: string): string {
-  return state.allWorldBooks.find((book) => book.id === bookId)?.activationOwner === "lumibooks"
-    ? "Managed by LumiBooks"
-    : getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation";
+  return getRecallBookIds(state).includes(bookId) ? "Selected for Recall"
+    : state.allWorldBooks.find((book) => book.id === bookId)?.activationOwner === "lumibooks"
+      ? "Managed by LumiBooks" : "Native activation";
 }
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }

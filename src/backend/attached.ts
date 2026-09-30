@@ -183,10 +183,7 @@ export function overlayActiveEntries(
 }
 
 export function recallEligibleBooks(books: RuntimeBook[]): RuntimeBook[] {
-  return books.filter((book) => isReadableBook(book.config) && book.summary.activationOwner !== "lumibooks")
-    .map((book) => ({ ...book, cache: { ...book.cache,
-      entries: book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks"),
-    } }));
+  return books.filter((book) => isReadableBook(book.config));
 }
 
 export async function loadAttachedRuntimeBooks(

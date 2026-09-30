@@ -20,15 +20,15 @@ function book(): RuntimeBook {
 }
 
 describe("attached lorebooks", () => {
-  test("excludes summary books and mixed-book summary entries without changing trees or saved choices", () => {
+  test("allows opted-in summary books and mixed-book summaries without changing trees or saved choices", () => {
     const summary = { ...book(), summary: { ...book().summary, id: "summary", activationOwner: "lumibooks" as const } };
     const codex = { ...book(), summary: { ...book().summary, id: "codex", name: "LumiBooks Codex" } };
     const mixed = book();
     mixed.cache.entries.push({ ...mixed.cache.entries[0], entryId: "chapter", activationOwner: "lumibooks", constant: true });
     const originalTree = JSON.stringify(mixed.tree);
     const eligible = recallEligibleBooks([summary, codex, mixed]);
-    expect(eligible.map((book) => book.summary.id)).toEqual(["codex", "book"]);
-    expect(eligible[1].cache.entries.map((entry) => entry.entryId)).toEqual(["old"]);
+    expect(eligible.map((book) => book.summary.id)).toEqual(["summary", "codex", "book"]);
+    expect(eligible[2].cache.entries.map((entry) => entry.entryId)).toEqual(["old", "chapter"]);
     expect(mixed.cache.entries).toHaveLength(2);
     expect(JSON.stringify(mixed.tree)).toBe(originalTree);
     expect(summary.config.enabled).toBe(true);

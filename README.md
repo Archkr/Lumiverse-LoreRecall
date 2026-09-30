@@ -34,7 +34,11 @@ Prompt breakdowns label Recall entries with their entry name and placement. Lumi
 
 ### LumiBooks compatibility
 
-LumiBooks' chapter, arc, and higher-tier summaries replace older chat messages through LumiBooks' own injector. Recall recognizes the `lumibooks_chat_id` book tag and `lumibooks` entry tag and leaves those summaries to LumiBooks. Sources keeps summary books visible as **Managed by LumiBooks**, with Recall selection unavailable and tree editing still available. Saved selections and trees are preserved. Tagged summaries inside mixed books are excluded from Recall's routing, constants, and native suppression too.
+You can turn on **Use in Recall** for LumiBooks' chapter, arc, and higher-tier summary books, including previously saved selections. Recall routes and selects their enabled dynamic entries, applies JEV and the cap, and keeps enabled constants separate. Constants still bypass model selection and JEV; change an entry's constant flag if you want it filtered.
+
+LumiBooks temporarily suppresses native activation and emits its summaries as assistant messages. Recall checks saved entry flags under a bounded timeout to distinguish that temporary suppression from actually disabled entries. After LumiBooks' injector runs, Recall removes the known automatic summary messages from opted-in books and injects its final selection once, preserving timeline placement and the assistant role. Selected summaries missing from native activation replace their covered source messages too. Incomplete retrieval or failed validation leaves the normal LumiBooks path intact. Unselected summary books stay **Managed by LumiBooks**; their injection, stored flags, and trees are preserved. Tagged summaries inside opted-in mixed books use the same handoff.
+
+Lumiverse's Prompt Breakdown can retain snapshots reported by LumiBooks before Recall filtered them. Recall cannot remove another extension's breakdown rows through the existing API. The final outbound prompt and Recall's activation feed show the filtered result; use the raw prompt to verify actual content rather than adding the earlier LumiBooks rows to Recall's rows.
 
 LumiBooks' separate Codex book uses normal lorebook activation (`lumibooks_codex` entries). You can opt it into Recall with **Use in Recall**. Its records retain their stored position, role, disabled flags, and constant behavior. LumiBooks' own enable switches still apply.
 
@@ -49,5 +53,7 @@ LumiBooks' separate Codex book uses normal lorebook activation (`lumibooks_codex
 ## Development
 
 Run `bun run typecheck`, `bun test`, and `bun run build`. The source entry points are `src/backend.ts` and `src/frontend.ts`; compiled bundles are in `dist/`.
+
+With a sibling `LumiBooks` checkout, `bun run test:lumibooks` exercises its actual injector followed by Recall's handoff. You can also pass the path to its `src/backend/injection.ts` file.
 
 Lore Recall is inspired by [TunnelVision](https://github.com/Coneja-Chibi/TunnelVision). It is a separate Lumiverse-native implementation. See [LICENSE](./LICENSE).

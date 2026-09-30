@@ -18,7 +18,7 @@ import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS } from "../shared";
 import { attachedCharacterIds, buildAttachedWorkspaceState, mapAttachedBookScopes, recallEligibleBooks, toWorkspaceEntry, type ActiveLoreEntry } from "./attached";
 import { isLumiBooksSummaryEntry, LUMIBOOKS_TIMELINE_NOTE } from "../ownership";
 import { buildRetrievalPreview, type DynamicRetrievalFeedbackSnapshot } from "./retrieval";
-import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, recallPlacementLabel, RecallRunStore, suppressedNativeEntryIds } from "./activation";
+import { finalizeRecallActivation, injectPreparedRecall, markRecallNativeFallback, recallPlacementLabel, RecallRunStore, restoreLumiBooksStoredFlags, suppressedNativeEntryIds } from "./activation";
 import { clearJevKey, hasJevKey, saveJevKey } from "./jev";
 import {
   type OperationContext,
@@ -49,6 +49,7 @@ import {
 import {
   buildConnectionOption,
   getRuntimeBooks,
+  listAllEntries,
   invalidateWorldBookListCache,
   loadCharacterConfig,
   loadGlobalSettings,
@@ -771,7 +772,7 @@ type RecallHostApi = {
   ) => void;
   registerInterceptor?: (
     handler: (messages: LlmMessageDTO[], context: PreGenerationContext) =>
-      Promise<LlmMessageDTO[] | ReturnType<typeof injectRecallEntries>>,
+      Promise<LlmMessageDTO[] | Pick<ReturnType<typeof injectPreparedRecall>, "messages" | "breakdown">>,
     priority?: number,
     options?: { required?: boolean },
   ) => unknown;
@@ -864,11 +865,11 @@ function registerRecallHooks(): void {
         switch (event.type) {
           case "start":
             beginRetrievalSession(userId, chatId, activeSessionId, event);
-            for (const book of runtimeBooks.filter((book) => book.summary.activationOwner === "lumibooks"
+            for (const book of readableBooks.filter((book) => book.summary.activationOwner === "lumibooks"
               || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))) {
               appendRetrievalSessionItem(userId, chatId, activeSessionId, {
                 id: "lumibooks:" + book.summary.id, kind: "trace", label: "LumiBooks timeline summaries",
-                summary: book.summary.name + ": timeline summaries left to LumiBooks.",
+                summary: book.summary.name + ": summaries selected by Recall; final injection follows LumiBooks' timeline pass.",
                 timestamp: Date.now(), phase: "session", tone: "info", details: [LUMIBOOKS_TIMELINE_NOTE],
               });
             }
@@ -910,14 +911,42 @@ function registerRecallHooks(): void {
       const selectedRows = await Promise.all(selectedIds.map((id) => spindle.world_books.entries.get(id, userId)));
       signal?.throwIfAborted();
       if (selectedRows.some((entry) =>
-        !entry || entry.disabled || isLumiBooksSummaryEntry(entry) || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
+        !entry || entry.disabled || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
         recordNativeFallback(userId, chatId, "A selected entry changed or became unavailable.", sessionId);
         return preparedContext;
       }
       const sourceEntries = selectedRows as WorldBookEntryDTO[];
+      const summaryBookIds = readableBooks.filter((book) => book.summary.activationOwner === "lumibooks"
+        || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))
+        .map((book) => book.summary.id);
+      let summaryLoadTimer: ReturnType<typeof setTimeout> | undefined;
+      let lumiBooksEntries: WorldBookEntryDTO[];
+      try {
+        lumiBooksEntries = (await Promise.race([
+          Promise.all(summaryBookIds.map((id) => listAllEntries(id, userId))),
+          new Promise<never>((_, reject) => {
+            summaryLoadTimer = setTimeout(() => reject(new Error("LumiBooks summary validation timed out.")),
+              Math.max(1, Math.min(10_000, deadlineAt - Date.now())));
+          }),
+        ])).flat().filter(isLumiBooksSummaryEntry).map((entry) => structuredClone(entry));
+      } finally {
+        if (summaryLoadTimer) clearTimeout(summaryLoadTimer);
+      }
+      const expectedSummaries = readableBooks.flatMap((book) => book.cache.entries.filter((entry) => entry.activationOwner === "lumibooks"));
+      const freshSummaries = new Map(lumiBooksEntries.map((entry) => [entry.id, entry]));
+      if (expectedSummaries.length !== lumiBooksEntries.length || expectedSummaries.some((entry) => {
+        const current = freshSummaries.get(entry.entryId);
+        return !current || current.content !== entry.content || !!current.disabled !== entry.disabled || !!current.constant !== entry.constant;
+      })) {
+        recordNativeFallback(userId, chatId, "A LumiBooks summary changed during retrieval; normal activation continues.", sessionId);
+        return preparedContext;
+      }
       const sourceContents = Object.fromEntries(sourceEntries.map((entry) => [entry.id, entry.content]));
       const entries = (await Promise.all(sourceEntries.map(async (entry) => ({
         ...entry,
+        role: isLumiBooksSummaryEntry(entry)
+          && (entry.extensions?.lumibooks as { chatId?: unknown } | undefined)?.chatId === chatId
+          ? "assistant" : entry.role,
         content: (await spindle.macros.resolve(entry.content, {
           chatId, characterId: chat.character_id, userId, commit: false,
         })).text,
@@ -930,7 +959,9 @@ function registerRecallHooks(): void {
       preview.activationSource = "preview";
       staged = preparedRecallRuns.put({
         id: runId, userId, chatId, createdAt: Date.now(),
-        handledBookIds, entries, sourceContents, preview, runtimeBooks: readableBooks,
+        handledBookIds, entries, sourceContents, lumiBooksEntries,
+        sourceMessageIndexes: Object.fromEntries(chatMessages.map((message, index) => [message.id, index])),
+        preview, runtimeBooks: readableBooks,
         sessionId, status: "prepared",
       });
       if (!staged) {
@@ -953,7 +984,32 @@ function registerRecallHooks(): void {
     if (!extensionTakeoverAvailable) return;
     const userId = context.userId ?? resolveUserId(context.chatId);
     if (!userId) return;
-    const claim = preparedRecallRuns.claim(userId, context.chatId, context.entries);
+    let entries = context.entries;
+    const prepared = preparedRecallRuns.findPrepared(userId, context.chatId);
+    if (prepared?.lumiBooksEntries?.length) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const bookIds = [...new Set(prepared.lumiBooksEntries.map((entry) => entry.world_book_id))];
+        const persisted = (await Promise.race([
+          Promise.all(bookIds.map((id) => listAllEntries(id, userId))),
+          new Promise<never>((_, reject) => {
+            // The host's WI hook budget is 10 seconds; leave time to return a native fallback.
+            timer = setTimeout(() => reject(new Error("Checking saved LumiBooks entry flags timed out; normal activation continues.")), 8_000);
+          }),
+        ])).flat();
+        entries = restoreLumiBooksStoredFlags(prepared, entries, persisted);
+      } catch (error: unknown) {
+        if (preparedRecallRuns.get(prepared.id) !== prepared || prepared.status !== "prepared") return;
+        prepared.status = "native";
+        preparedRecallRuns.stayNative(prepared.id);
+        recordNativeFallback(userId, context.chatId, error instanceof Error ? error.message : String(error), prepared.sessionId);
+        return;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (prepared && (preparedRecallRuns.get(prepared.id) !== prepared || prepared.status !== "prepared")) return;
+    const claim = preparedRecallRuns.claim(userId, context.chatId, entries);
     if (!claim.run) {
       if (claim.reason) {
         for (const run of claim.rejected) recordNativeFallback(userId, context.chatId, claim.reason, run.sessionId);
@@ -984,7 +1040,7 @@ function registerRecallHooks(): void {
       preparedRecallRuns.remove(runId);
       return messages;
     }
-    const injected = injectRecallEntries(messages, run.entries);
+    const injected = injectPreparedRecall(messages, run);
     finalizeRecallActivation(run.preview, run.entries);
     previewCache.set(getPreviewCacheKey(run.userId, run.chatId), run.preview);
     if (!context.dryRun) recordDynamicInjection(
@@ -996,14 +1052,17 @@ function registerRecallHooks(): void {
       timestamp: Date.now(), phase: "inject", count: run.entries.length,
       entries: run.preview.injectedNodes, tone: "success",
       details: [
-        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry)}; role ${entry.role || "system"}.`),
+        ...(run.lumiBooksEntries?.length ? ["Recall controls the selected LumiBooks book(s). Removed "
+          + injected.removedLumiBooksCount + " automatic summary message(s), then inserted the final approved entries."] : []),
+        ...(injected.removedLumiBooksCount ? ["Prompt Breakdown may retain LumiBooks' earlier snapshots. The raw prompt and this activation result show the final content."] : []),
+        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry, run.chatId)}; role ${entry.role || "system"}.`),
         ...(run.entries.some((entry) => ![0, 1, 2, 3, 4, 5, 6].includes(entry.position))
           ? ["Exact marker and outlet slots are unavailable; those entries are placed before chat history."] : []),
       ],
     });
     preparedRecallRuns.remove(runId);
     scheduleLiveStatePush(run.userId, run.chatId);
-    return injected;
+    return { messages: injected.messages, breakdown: injected.breakdown };
   }, 95, requiredPromptInterceptorAvailable ? { required: true } : undefined);
 }
 

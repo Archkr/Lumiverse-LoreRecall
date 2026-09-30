@@ -1890,7 +1890,7 @@ export function buildDiagnostics(
       severity: "info",
       bookId: null,
       title: "No readable books selected for Recall",
-      detail: "Turn on Use in Recall under Sources for an ordinary lorebook or LumiBooks Codex book. Timeline summary books stay managed by LumiBooks; other attached books keep native activation.",
+      detail: "Turn on Use in Recall under Sources for the books you want Recall to retrieve, including LumiBooks summaries and Codex records. Other attached books keep their normal activation.",
     });
   }
 
@@ -1919,9 +1919,8 @@ export function buildDiagnostics(
     if (book.summary.activationOwner === "lumibooks") {
       diagnostics.push({
         id: `lumibooks:${book.summary.id}`, severity: "info", bookId: book.summary.id,
-        title: "Timeline summaries are managed by LumiBooks", detail: LUMIBOOKS_TIMELINE_NOTE,
+        title: book.config.enabled ? "LumiBooks summaries selected for Recall" : "Timeline summaries are managed by LumiBooks", detail: LUMIBOOKS_TIMELINE_NOTE,
       });
-      continue;
     }
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
@@ -1963,7 +1962,7 @@ export function buildDiagnostics(
         detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`,
       });
     }
-    const missingSummaryCount = book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks" && !entry.summary.trim()).length;
+    const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
     if (book.config.enabled && missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,

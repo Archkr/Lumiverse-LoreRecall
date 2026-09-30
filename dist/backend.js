@@ -483,7 +483,7 @@ function rootCategoryForEntry(tree, entryId) {
 }
 
 // src/ownership.ts
-var LUMIBOOKS_TIMELINE_NOTE = "LumiBooks inserts these summaries in place of older chat messages. Recall leaves that replacement to LumiBooks; its Codex book can be selected for Recall.";
+var LUMIBOOKS_TIMELINE_NOTE = "Use in Recall lets Recall select this book's summaries and control their final injection. Unselected books stay with LumiBooks. Enabled constant entries still bypass model selection and JEV.";
 function isLumiBooksSummaryEntry(entry) {
   const extensions = entry.extensions;
   return !!extensions && typeof extensions === "object" && !!extensions.lumibooks;
@@ -1007,10 +1007,7 @@ function buildAttachedWorkspaceState(scopes, loadedBooks, missingBookIds = []) {
   };
 }
 function recallEligibleBooks(books) {
-  return books.filter((book) => isReadableBook(book.config) && book.summary.activationOwner !== "lumibooks").map((book) => ({ ...book, cache: {
-    ...book.cache,
-    entries: book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks")
-  } }));
+  return books.filter((book) => isReadableBook(book.config));
 }
 
 // src/backend/controller-json.ts
@@ -2168,6 +2165,11 @@ class RecallRunStore {
     this.prune();
     return this.runs.get(id);
   }
+  findPrepared(userId, chatId) {
+    this.prune();
+    const runs = [...this.runs.values()].filter((run) => run.userId === userId && run.chatId === chatId && run.status === "prepared");
+    return runs.length === 1 ? runs[0] : undefined;
+  }
   claim(userId, chatId, availableEntries) {
     this.prune();
     const candidates = [...this.turns.entries()].filter(([, turn]) => turn.userId === userId && turn.chatId === chatId && turn.status !== "claimed" && turn.status !== "consumed");
@@ -2190,6 +2192,16 @@ class RecallRunStore {
       return { run: null, rejected: [], reason: null };
     }
     const available = new Map(availableEntries.map((entry) => [entry.id, entry]));
+    const summaryIds = new Set(run.lumiBooksEntries?.map((entry) => entry.id));
+    const summariesChanged = run.lumiBooksEntries?.some((entry) => {
+      const current = available.get(entry.id);
+      return !current || current.content !== entry.content || !!current.disabled !== !!entry.disabled || JSON.stringify(current.extensions?.lumibooks) !== JSON.stringify(entry.extensions?.lumibooks);
+    }) || availableEntries.some((entry) => entry.world_book_id && run.handledBookIds.includes(entry.world_book_id) && isLumiBooksSummaryEntry(entry) && !summaryIds.has(entry.id));
+    if (summariesChanged) {
+      run.status = "native";
+      turn.status = "consumed";
+      return { run: null, rejected: [run], reason: "A LumiBooks summary changed before Recall could take over." };
+    }
     if (Object.entries(run.sourceContents).some(([id, content]) => {
       const current = available.get(id);
       return !current || current.disabled || current.content !== content;
@@ -2216,7 +2228,18 @@ class RecallRunStore {
 }
 function suppressedNativeEntryIds(run, entries) {
   const handled = new Set(run.handledBookIds);
-  return entries.filter((entry) => handled.has(entry.world_book_id) && !isLumiBooksSummaryEntry(entry)).map((entry) => entry.id);
+  return entries.filter((entry) => handled.has(entry.world_book_id)).map((entry) => entry.id);
+}
+function restoreLumiBooksStoredFlags(run, incoming, persisted) {
+  const expected = run.lumiBooksEntries ?? [];
+  const fresh = persisted.filter((entry) => isLumiBooksSummaryEntry(entry) && run.handledBookIds.includes(entry.world_book_id));
+  const byId = new Map(fresh.map((entry) => [entry.id, entry]));
+  if (fresh.length !== expected.length || expected.some((entry) => {
+    const current = byId.get(entry.id);
+    return !current || current.content !== entry.content || current.disabled !== entry.disabled || current.constant !== entry.constant || JSON.stringify(current.extensions?.lumibooks) !== JSON.stringify(entry.extensions?.lumibooks);
+  }))
+    throw new Error("A LumiBooks summary changed before Recall could take over.");
+  return incoming.map((entry) => byId.has(entry.id) ? { ...entry, disabled: byId.get(entry.id).disabled } : entry);
 }
 function entryRole(role) {
   return role === "user" || role === "assistant" ? role : "system";
@@ -2236,7 +2259,10 @@ function insertionIndex(entry, messages) {
   }
   return firstHistory;
 }
-function recallPlacementLabel(entry) {
+function recallPlacementLabel(entry, chatId) {
+  const meta = entry.extensions?.lumibooks;
+  if (chatId && meta?.chatId === chatId)
+    return "LumiBooks timeline";
   switch (entry.position) {
     case 0:
       return "Before chat history";
@@ -2256,20 +2282,100 @@ function recallPlacementLabel(entry) {
       return "Before chat history (marker/outlet fallback)";
   }
 }
-function injectRecallEntries(messages, entries) {
+function injectRecallEntries(messages, entries, timelineIndexes = new Map, timelineOrder = new Map) {
   const inserted = [...messages];
-  const planned = entries.map((entry, order) => ({ entry, order, index: insertionIndex(entry, messages) })).sort((left, right) => left.index - right.index || left.order - right.order);
+  const planned = entries.map((entry, order) => ({
+    entry,
+    order,
+    index: timelineIndexes.get(entry.id) ?? insertionIndex(entry, messages)
+  })).sort((left, right) => left.index - right.index || (timelineOrder.has(left.entry.id) && timelineOrder.has(right.entry.id) ? timelineOrder.get(left.entry.id) - timelineOrder.get(right.entry.id) : 0) || left.order - right.order);
   const breakdown = [];
   for (let offset = 0;offset < planned.length; offset++) {
     const { entry, index } = planned[offset];
     const messageIndex = index + offset;
-    inserted.splice(messageIndex, 0, { role: entryRole(entry.role), content: entry.content });
+    inserted.splice(messageIndex, 0, { role: timelineIndexes.has(entry.id) ? "assistant" : entryRole(entry.role), content: entry.content });
     breakdown.push({
       messageIndex,
-      name: `Lore Recall: ${entry.comment?.trim() || "Lore entry"} [${recallPlacementLabel(entry)}]`
+      name: `Lore Recall: ${entry.comment?.trim() || "Lore entry"} [${timelineIndexes.has(entry.id) ? "LumiBooks timeline" : recallPlacementLabel(entry)}]`
     });
   }
   return { messages: inserted, breakdown };
+}
+function summaryMetadata(entry) {
+  const meta = entry.extensions?.lumibooks;
+  return meta && typeof meta === "object" ? meta : null;
+}
+function isHistory(message) {
+  const flags = message;
+  return flags.__isChatHistory === true || flags.__chatHistorySource === true || typeof flags.sourceMessageId === "string";
+}
+function injectPreparedRecall(messages, run) {
+  const summaries = (run.lumiBooksEntries ?? []).filter((entry) => run.handledBookIds.includes(entry.world_book_id) && summaryMetadata(entry)?.chatId === run.chatId);
+  const byId = new Map(summaries.map((entry) => [entry.id, entry]));
+  const byContent = new Map;
+  for (const entry of summaries) {
+    if (!entry.content)
+      continue;
+    byContent.set(entry.content, [...byContent.get(entry.content) ?? [], entry]);
+  }
+  const sourceIds = (id, visited = new Set) => {
+    if (visited.has(id))
+      return [];
+    visited.add(id);
+    const entry = byId.get(id);
+    const meta = entry && summaryMetadata(entry);
+    if (!meta)
+      return [];
+    const ids = Array.isArray(meta.msgIds) ? meta.msgIds.filter((id) => typeof id === "string") : [];
+    if (Array.isArray(meta.sourceChapterEntryIds)) {
+      for (const id of meta.sourceChapterEntryIds)
+        if (typeof id === "string")
+          ids.push(...sourceIds(id, visited));
+    }
+    return ids;
+  };
+  const covered = new Set(run.entries.flatMap((entry) => sourceIds(entry.id)));
+  const filtered = [];
+  const timelineIndexes = new Map;
+  const timelineOrder = new Map;
+  let removedLumiBooksCount = 0;
+  for (const message of messages) {
+    const flags = message;
+    const matching = !isHistory(message) && !flags.__isWorldInfoEntry && !flags.__worldInfoSource && message.role === "assistant" ? byContent.get(message.content) : undefined;
+    if (matching) {
+      for (const entry of matching)
+        if (!timelineIndexes.has(entry.id))
+          timelineIndexes.set(entry.id, filtered.length);
+      removedLumiBooksCount++;
+      continue;
+    }
+    const metadata = flags.sourceMessageMetadata;
+    if (isHistory(message) && typeof flags.sourceMessageId === "string" && covered.has(flags.sourceMessageId) && metadata?.lmb_excluded !== true)
+      continue;
+    filtered.push(message);
+  }
+  for (const entry of run.entries) {
+    if (!byId.has(entry.id))
+      continue;
+    const meta = summaryMetadata(entry);
+    const indexes = sourceIds(entry.id).flatMap((id) => {
+      const index = run.sourceMessageIndexes?.[id];
+      return typeof index === "number" ? [index] : [];
+    });
+    const last = indexes.length ? indexes.reduce((last, index) => Math.max(last, index), -1) : typeof meta.lastMsgIdx === "number" ? meta.lastMsgIdx : -1;
+    timelineOrder.set(entry.id, last);
+    if (timelineIndexes.has(entry.id))
+      continue;
+    const following = filtered.findIndex((message) => {
+      const flags = message;
+      const index = typeof flags.sourceMessageId === "string" ? run.sourceMessageIndexes?.[flags.sourceMessageId] : undefined;
+      const sourceIndex = typeof flags.sourceIndexInChat === "number" ? flags.sourceIndexInChat : index;
+      return isHistory(message) && typeof sourceIndex === "number" && sourceIndex > last;
+    });
+    const historyIndexes = filtered.flatMap((message, index) => isHistory(message) ? [index] : []);
+    timelineIndexes.set(entry.id, following >= 0 ? following : historyIndexes.length ? historyIndexes[historyIndexes.length - 1] + 1 : filtered.length);
+  }
+  return { ...injectRecallEntries(filtered, run.entries, timelineIndexes, timelineOrder), removedLumiBooksCount };
 }
 
 // src/backend/granularity.ts
@@ -3907,7 +4013,7 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
       severity: "info",
       bookId: null,
       title: "No readable books selected for Recall",
-      detail: "Turn on Use in Recall under Sources for an ordinary lorebook or LumiBooks Codex book. Timeline summary books stay managed by LumiBooks; other attached books keep native activation."
+      detail: "Turn on Use in Recall under Sources for the books you want Recall to retrieve, including LumiBooks summaries and Codex records. Other attached books keep their normal activation."
     });
   }
   if (settings?.controllerConnectionId?.trim()) {
@@ -3936,10 +4042,9 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         id: `lumibooks:${book.summary.id}`,
         severity: "info",
         bookId: book.summary.id,
-        title: "Timeline summaries are managed by LumiBooks",
+        title: book.config.enabled ? "LumiBooks summaries selected for Recall" : "Timeline summaries are managed by LumiBooks",
         detail: LUMIBOOKS_TIMELINE_NOTE
       });
-      continue;
     }
     const issues = staleIssues[book.summary.id];
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
@@ -3980,7 +4085,7 @@ function buildDiagnostics(runtimeBooks, staleIssues, settings, characterConfig, 
         detail: `${book.summary.name} is write-only in Lore Recall. Lumiverse will use native activation for this attached book.`
       });
     }
-    const missingSummaryCount = book.cache.entries.filter((entry) => entry.activationOwner !== "lumibooks" && !entry.summary.trim()).length;
+    const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
     if (book.config.enabled && missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,
@@ -4896,12 +5001,12 @@ function registerRecallHooks() {
         switch (event.type) {
           case "start":
             beginRetrievalSession(userId, chatId, activeSessionId, event);
-            for (const book of runtimeBooks.filter((book) => book.summary.activationOwner === "lumibooks" || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))) {
+            for (const book of readableBooks.filter((book) => book.summary.activationOwner === "lumibooks" || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks"))) {
               appendRetrievalSessionItem(userId, chatId, activeSessionId, {
                 id: "lumibooks:" + book.summary.id,
                 kind: "trace",
                 label: "LumiBooks timeline summaries",
-                summary: book.summary.name + ": timeline summaries left to LumiBooks.",
+                summary: book.summary.name + ": summaries selected by Recall; final injection follows LumiBooks' timeline pass.",
                 timestamp: Date.now(),
                 phase: "session",
                 tone: "info",
@@ -4941,14 +5046,38 @@ function registerRecallHooks() {
       const selectedIds = [...new Set(preview.injectedNodes.map((node) => node.entryId))];
       const selectedRows = await Promise.all(selectedIds.map((id) => spindle.world_books.entries.get(id, userId)));
       signal?.throwIfAborted();
-      if (selectedRows.some((entry) => !entry || entry.disabled || isLumiBooksSummaryEntry(entry) || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
+      if (selectedRows.some((entry) => !entry || entry.disabled || !entry.content.trim() || !handledSet.has(entry.world_book_id))) {
         recordNativeFallback(userId, chatId, "A selected entry changed or became unavailable.", sessionId);
         return preparedContext;
       }
       const sourceEntries = selectedRows;
+      const summaryBookIds = readableBooks.filter((book) => book.summary.activationOwner === "lumibooks" || book.cache.entries.some((entry) => entry.activationOwner === "lumibooks")).map((book) => book.summary.id);
+      let summaryLoadTimer;
+      let lumiBooksEntries;
+      try {
+        lumiBooksEntries = (await Promise.race([
+          Promise.all(summaryBookIds.map((id) => listAllEntries(id, userId))),
+          new Promise((_, reject) => {
+            summaryLoadTimer = setTimeout(() => reject(new Error("LumiBooks summary validation timed out.")), Math.max(1, Math.min(1e4, deadlineAt - Date.now())));
+          })
+        ])).flat().filter(isLumiBooksSummaryEntry).map((entry) => structuredClone(entry));
+      } finally {
+        if (summaryLoadTimer)
+          clearTimeout(summaryLoadTimer);
+      }
+      const expectedSummaries = readableBooks.flatMap((book) => book.cache.entries.filter((entry) => entry.activationOwner === "lumibooks"));
+      const freshSummaries = new Map(lumiBooksEntries.map((entry) => [entry.id, entry]));
+      if (expectedSummaries.length !== lumiBooksEntries.length || expectedSummaries.some((entry) => {
+        const current = freshSummaries.get(entry.entryId);
+        return !current || current.content !== entry.content || !!current.disabled !== entry.disabled || !!current.constant !== entry.constant;
+      })) {
+        recordNativeFallback(userId, chatId, "A LumiBooks summary changed during retrieval; normal activation continues.", sessionId);
+        return preparedContext;
+      }
       const sourceContents = Object.fromEntries(sourceEntries.map((entry) => [entry.id, entry.content]));
       const entries = (await Promise.all(sourceEntries.map(async (entry) => ({
         ...entry,
+        role: isLumiBooksSummaryEntry(entry) && entry.extensions?.lumibooks?.chatId === chatId ? "assistant" : entry.role,
         content: (await spindle.macros.resolve(entry.content, {
           chatId,
           characterId: chat.character_id,
@@ -4970,6 +5099,8 @@ function registerRecallHooks() {
         handledBookIds,
         entries,
         sourceContents,
+        lumiBooksEntries,
+        sourceMessageIndexes: Object.fromEntries(chatMessages.map((message, index) => [message.id, index])),
         preview,
         runtimeBooks: readableBooks,
         sessionId,
@@ -4998,7 +5129,34 @@ function registerRecallHooks() {
     const userId = context.userId ?? resolveUserId(context.chatId);
     if (!userId)
       return;
-    const claim = preparedRecallRuns.claim(userId, context.chatId, context.entries);
+    let entries = context.entries;
+    const prepared = preparedRecallRuns.findPrepared(userId, context.chatId);
+    if (prepared?.lumiBooksEntries?.length) {
+      let timer;
+      try {
+        const bookIds = [...new Set(prepared.lumiBooksEntries.map((entry) => entry.world_book_id))];
+        const persisted = (await Promise.race([
+          Promise.all(bookIds.map((id) => listAllEntries(id, userId))),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Checking saved LumiBooks entry flags timed out; normal activation continues.")), 8000);
+          })
+        ])).flat();
+        entries = restoreLumiBooksStoredFlags(prepared, entries, persisted);
+      } catch (error) {
+        if (preparedRecallRuns.get(prepared.id) !== prepared || prepared.status !== "prepared")
+          return;
+        prepared.status = "native";
+        preparedRecallRuns.stayNative(prepared.id);
+        recordNativeFallback(userId, context.chatId, error instanceof Error ? error.message : String(error), prepared.sessionId);
+        return;
+      } finally {
+        if (timer)
+          clearTimeout(timer);
+      }
+    }
+    if (prepared && (preparedRecallRuns.get(prepared.id) !== prepared || prepared.status !== "prepared"))
+      return;
+    const claim = preparedRecallRuns.claim(userId, context.chatId, entries);
     if (!claim.run) {
       if (claim.reason) {
         for (const run of claim.rejected)
@@ -5029,7 +5187,7 @@ function registerRecallHooks() {
       preparedRecallRuns.remove(runId);
       return messages;
     }
-    const injected = injectRecallEntries(messages, run.entries);
+    const injected = injectPreparedRecall(messages, run);
     finalizeRecallActivation(run.preview, run.entries);
     previewCache.set(getPreviewCacheKey(run.userId, run.chatId), run.preview);
     if (!context.dryRun)
@@ -5045,13 +5203,15 @@ function registerRecallHooks() {
       entries: run.preview.injectedNodes,
       tone: "success",
       details: [
-        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry)}; role ${entry.role || "system"}.`),
+        ...run.lumiBooksEntries?.length ? ["Recall controls the selected LumiBooks book(s). Removed " + injected.removedLumiBooksCount + " automatic summary message(s), then inserted the final approved entries."] : [],
+        ...injected.removedLumiBooksCount ? ["Prompt Breakdown may retain LumiBooks' earlier snapshots. The raw prompt and this activation result show the final content."] : [],
+        ...run.entries.map((entry) => `${entry.comment?.trim() || "Lore entry"}: ${recallPlacementLabel(entry, run.chatId)}; role ${entry.role || "system"}.`),
         ...run.entries.some((entry) => ![0, 1, 2, 3, 4, 5, 6].includes(entry.position)) ? ["Exact marker and outlet slots are unavailable; those entries are placed before chat history."] : []
       ]
     });
     preparedRecallRuns.remove(runId);
     scheduleLiveStatePush(run.userId, run.chatId);
-    return injected;
+    return { messages: injected.messages, breakdown: injected.breakdown };
   }, 95, requiredPromptInterceptorAvailable ? { required: true } : undefined);
 }
 registerRecallHooks();

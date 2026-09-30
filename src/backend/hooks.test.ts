@@ -33,7 +33,7 @@ test("public hooks register after permission grant and retrieve without exact-se
     registerContextHandler: (handler: unknown, _priority: number, options: unknown) => {
       hooks.prepare = handler; hooks.prepareOptions = options;
     },
-    registerWorldInfoInterceptor: (handler: unknown) => { hooks.activate = handler; },
+    registerWorldInfoInterceptor: (handler: unknown, priority: number) => { hooks.activate = handler; hooks.activatePriority = priority; },
     registerInterceptor: (handler: unknown, _priority: number, options: unknown) => {
       hooks.inject = handler; hooks.injectOptions = options;
     },
@@ -79,6 +79,7 @@ test("public hooks register after permission grant and retrieve without exact-se
     permissionChanged!();
     expect(hooks.prepareOptions).toEqual({ timeoutMs: 120_000 });
     expect(hooks.injectOptions).toBeUndefined();
+    expect(hooks.activatePriority).toBe(95);
     const context = { chatId: "turn", userId: "user", connectionId: "connection" };
     const prepared = await hooks.prepare(context);
     expect(prepared.loreRecallRunId).toBeString();
@@ -137,7 +138,7 @@ test("public hooks register after permission grant and retrieve without exact-se
       { ...rows[0], id: "mixed-chapter", world_book_id: "mixed", content: "Mixed chapter", extensions: summaryMeta, constant: true },
       { ...rows[0], id: "mixed-lore", world_book_id: "mixed", content: "Mixed ordinary lore", extensions: {}, constant: true, position: 0 },
     );
-    selectedBooks.add("timeline"); // Previously saved summary-book opt-in must be ignored safely.
+    selectedBooks.add("timeline"); // Existing summary-book opt-in must be honored.
     selectedBooks.add("codex");
     selectedBooks.add("mixed");
     modelPrompts.length = 0;
@@ -146,27 +147,59 @@ test("public hooks register after permission grant and retrieve without exact-se
       disabled: row.disabled || !!(row.extensions as any).lumibooks,
     }));
     expect((await hooks.activate({ ...context, entries: afterLumiBooksVote })).disabled)
-      .toEqual(["character-entry", "codex-record", "disabled-codex", "mixed-lore"]);
+      .toEqual(["character-entry", "chapter", "codex-record", "disabled-codex", "mixed-chapter", "mixed-lore"]);
     const lumiBooksMessage = { role: "assistant", content: "LumiBooks chapter" };
     const compatible = await hooks.inject([lumiBooksMessage, ...nativeMessages], withLumiBooks);
-    expect(compatible.breakdown).toHaveLength(3);
+    expect(compatible.breakdown).toHaveLength(5);
     expect(compatible.messages.filter((message: any) => message.content === "LumiBooks chapter")).toEqual([lumiBooksMessage]);
-    expect(compatible.messages).toContain(lumiBooksMessage);
+    expect(compatible.messages.filter((message: any) => message.content === "LumiBooks chapter")).toHaveLength(1);
+    expect(compatible.breakdown.find((item: any) => item.name.includes("LumiBooks timeline"))).toBeDefined();
     expect(compatible.messages.map((message: any) => message.content)).toContain("Lore for Alice from character");
     expect(compatible.messages.map((message: any) => message.content)).toContain("Codex Alice");
     expect(compatible.messages.find((message: any) => message.content === "Codex Alice")).toMatchObject({ role: "system" });
     expect(compatible.messages.findIndex((message: any) => message.content === "Codex Alice"))
-      .toBe(compatible.messages.findIndex((message: any) => message.__isChatHistory) + 1);
+      .toBeGreaterThan(compatible.messages.findIndex((message: any) => message.__isChatHistory));
     expect(compatible.messages.map((message: any) => message.content)).toContain("Mixed ordinary lore");
-    expect(compatible.messages.map((message: any) => message.content)).not.toContain("Mixed chapter");
+    expect(compatible.messages.map((message: any) => message.content)).toContain("Mixed chapter");
     expect(compatible.messages.map((message: any) => message.content)).not.toContain("Disabled Codex");
     expect(modelPrompts.join("\n")).not.toContain("LumiBooks chapter");
     expect(modelPrompts.join("\n")).not.toContain("Mixed chapter");
     selectedBooks.clear();
     selectedBooks.add("timeline");
     const summariesOnly = await hooks.prepare(context);
+    expect((await hooks.activate({ ...context, entries: afterLumiBooksVote })).disabled).toEqual(["chapter"]);
+    const unselectedSummary = { role: "assistant", content: "Mixed chapter" };
+    const onlyTimeline = await hooks.inject([lumiBooksMessage, unselectedSummary, ...nativeMessages], summariesOnly);
+    expect(onlyTimeline.breakdown).toHaveLength(1);
+    expect(onlyTimeline.messages).toContain(unselectedSummary);
+
+    const changedSummary = await hooks.prepare(context);
+    rows.find((row) => row.id === "chapter")!.disabled = true;
     expect(await hooks.activate({ ...context, entries: afterLumiBooksVote })).toBeUndefined();
-    expect(await hooks.inject([lumiBooksMessage, ...nativeMessages], summariesOnly)).toEqual([lumiBooksMessage, ...nativeMessages]);
+    expect(await hooks.inject([lumiBooksMessage, ...nativeMessages], changedSummary)).toEqual([lumiBooksMessage, ...nativeMessages]);
+    rows.find((row) => row.id === "chapter")!.disabled = false;
+
+    const timeoutSummary = await hooks.prepare(context);
+    const previousList = host.world_books.entries.list;
+    const previousTimeout = globalThis.setTimeout;
+    try {
+      host.world_books.entries.list = async () => new Promise(() => {});
+      globalThis.setTimeout = ((handler: any, delay: number, ...args: any[]) =>
+        previousTimeout(handler, delay === 8_000 ? 5 : delay, ...args)) as typeof setTimeout;
+      expect(await hooks.activate({ ...context, entries: afterLumiBooksVote })).toBeUndefined();
+      expect(await hooks.inject([lumiBooksMessage, ...nativeMessages], timeoutSummary)).toEqual([lumiBooksMessage, ...nativeMessages]);
+    } finally {
+      host.world_books.entries.list = previousList;
+      globalThis.setTimeout = previousTimeout;
+    }
+
+    malformedSelection = true;
+    // Constants alone do not call the selector; use a dynamic summary to test retrieval fallback.
+    rows.find((row) => row.id === "chapter")!.constant = false;
+    const failedSummary = await hooks.prepare(context);
+    expect(await hooks.activate({ ...context, entries: afterLumiBooksVote })).toBeUndefined();
+    expect(await hooks.inject([lumiBooksMessage, ...nativeMessages], failedSummary)).toEqual([lumiBooksMessage, ...nativeMessages]);
+    malformedSelection = false;
     selectedBooks.clear();
     const none = await hooks.prepare(context);
     expect(await hooks.activate({ ...context, entries: rows })).toBeUndefined();

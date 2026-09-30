@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { LlmMessageDTO, WorldBookEntryDTO } from "lumiverse-spindle-types";
 import type { RetrievalPreview } from "../types";
 import type { RuntimeBook } from "./contracts";
-import { finalizeRecallActivation, injectRecallEntries, markRecallNativeFallback, RecallRunStore, suppressedNativeEntryIds, type PreparedRecallRun } from "./activation";
+import { finalizeRecallActivation, injectPreparedRecall, injectRecallEntries, markRecallNativeFallback, RecallRunStore, restoreLumiBooksStoredFlags, suppressedNativeEntryIds, type PreparedRecallRun } from "./activation";
 
 function entry(id: string, position = 0, role: string | null = null, depth = 0): WorldBookEntryDTO {
   return {
@@ -22,13 +22,118 @@ function run(id: string, entries: WorldBookEntryDTO[] = [entry("chosen")]): Prep
 }
 
 describe("extension-managed activation", () => {
-  test("suppression leaves LumiBooks tagged summaries alone even inside a handled mixed book", () => {
+  function summary(id: string, patch: Partial<WorldBookEntryDTO> = {}): WorldBookEntryDTO {
+    return { ...entry(id), disabled: false, extensions: { lumibooks: { chatId: "chat", tier: 1, msgIds: [id + "-source"] } }, ...patch };
+  }
+
+  test("LumiBooks handoff removes unselected automatic summaries, replaces selected ones once, and protects unrelated messages", () => {
+    const picked = summary("picked");
+    const rejected = summary("rejected");
+    const nativeBook = { ...summary("native"), world_book_id: "unselected" };
+    const prepared = { ...run("summaries", [picked]), lumiBooksEntries: [picked, rejected],
+      sourceMessageIndexes: { "picked-source": 0, "rejected-source": 1, "latest": 2 } };
+    const protectedHistory = { role: "assistant" as const, content: rejected.content, __isChatHistory: true, sourceMessageId: "history" };
+    const protectedWorldInfo = { role: "assistant" as const, content: rejected.content, __isWorldInfoEntry: true };
+    const protectedNote = { role: "system" as const, content: rejected.content };
+    const result = injectPreparedRecall([
+      { role: "system", content: "Preset" },
+      { role: "assistant", content: picked.content },
+      { role: "assistant", content: rejected.content },
+      { role: "assistant", content: nativeBook.content },
+      protectedHistory, protectedWorldInfo, protectedNote,
+      { role: "user", content: "Latest", __isChatHistory: true, sourceMessageId: "latest", sourceIndexInChat: 2 },
+    ] as LlmMessageDTO[], prepared);
+    expect(result.removedLumiBooksCount).toBe(2);
+    expect(result.messages.filter((message) => message.content === picked.content)).toEqual([{ role: "assistant", content: picked.content }]);
+    expect(result.messages).toContain(protectedHistory);
+    expect(result.messages).toContain(protectedWorldInfo);
+    expect(result.messages).toContain(protectedNote);
+    expect(result.messages.map((message) => message.content)).toContain(nativeBook.content);
+    expect(result.breakdown).toEqual([{ messageIndex: 1, name: "Lore Recall: Entry picked [LumiBooks timeline]" }]);
+  });
+
+  test("a valid empty selection removes automatic summaries from handled books and leaves other books alone", () => {
+    const picked = summary("picked");
+    const prepared = { ...run("empty", []), lumiBooksEntries: [picked] };
+    const history = { role: "user" as const, content: "Latest", __isChatHistory: true };
+    const result = injectPreparedRecall([
+      { role: "assistant", content: picked.content }, { role: "assistant", content: "Unselected book summary" }, history,
+    ] as LlmMessageDTO[], prepared);
+    expect(result.messages).toEqual([{ role: "assistant", content: "Unselected book summary" }, history]);
+    expect(result.breakdown).toEqual([]);
+    expect(result.removedLumiBooksCount).toBe(1);
+  });
+
+  test("selected summaries absent from native activation replace their covered turns at the timeline position", () => {
+    const child = summary("child", { disabled: true });
+    const arc = summary("arc", { extensions: { lumibooks: { chatId: "chat", tier: 2,
+      msgIds: [], sourceChapterEntryIds: ["child", "arc"] } } });
+    const prepared = { ...run("arc", [arc]), lumiBooksEntries: [child, arc],
+      sourceMessageIndexes: { "child-source": 0, "latest": 1 } };
+    const result = injectPreparedRecall([
+      { role: "system", content: "Preset" },
+      { role: "user", content: "Covered old turn", __isChatHistory: true, sourceMessageId: "child-source", sourceIndexInChat: 0 },
+      { role: "user", content: "Latest", __isChatHistory: true, sourceMessageId: "latest", sourceIndexInChat: 1 },
+      { role: "system", content: "Suffix" },
+    ] as LlmMessageDTO[], prepared);
+    expect(result.messages.map((message) => message.content)).toEqual(["Preset", arc.content, "Latest", "Suffix"]);
+    expect(result.messages[1].role).toBe("assistant");
+    expect(result.removedLumiBooksCount).toBe(0);
+  });
+
+  test("summary snapshots reject persisted disables, content changes, new summaries, and stale metadata before native suppression", () => {
+    for (const change of ["disabled", "content", "metadata", "new"]) {
+      const picked = summary("picked");
+      const store = new RecallRunStore();
+      store.put({ ...run(change, [picked]), lumiBooksEntries: [structuredClone(picked)] });
+      const current = structuredClone(picked);
+      if (change === "disabled") current.disabled = true;
+      if (change === "content") current.content = "Changed summary";
+      if (change === "metadata") (current.extensions!.lumibooks as any).msgIds = ["changed-source"];
+      const claim = store.claim("user", "chat", [current, ...(change === "new" ? [summary("new")] : [])]);
+      expect(claim.run).toBeNull();
+      expect(claim.reason).toBe("A LumiBooks summary changed before Recall could take over.");
+    }
+    const picked = summary("picked");
+    const store = new RecallRunStore();
+    store.put({ ...run("valid", [picked]), lumiBooksEntries: [picked] });
+    expect(store.claim("user", "chat", [picked]).run?.status).toBe("claimed");
+  });
+
+  test("saved flags restore only LumiBooks' temporary suppression, preserving Codex and other interceptor disables", () => {
+    const picked = summary("picked");
+    const ghost = summary("ghost", { disabled: true });
+    const prepared = { ...run("flags", [picked]), lumiBooksEntries: [picked, ghost] };
+    const incoming = [
+      { ...picked, disabled: true }, ghost,
+      { ...entry("codex"), disabled: true, extensions: { lumibooks_codex: { record: "character:alice" } } },
+      { ...entry("other"), disabled: true },
+    ];
+    const restored = restoreLumiBooksStoredFlags(prepared, incoming, [picked, ghost]);
+    expect(restored.map((entry) => entry.disabled)).toEqual([false, true, true, true]);
+    expect(incoming[0].disabled).toBe(true);
+    expect(() => restoreLumiBooksStoredFlags(prepared, incoming, [{ ...picked, disabled: true }, ghost])).toThrow("changed");
+    expect(() => restoreLumiBooksStoredFlags(prepared, incoming, [{ ...picked, constant: true }, ghost])).toThrow("changed");
+  });
+
+  test("adjacent summaries retain timeline order even when the model selects them in reverse", () => {
+    const early = summary("early");
+    const late = summary("late");
+    const prepared = { ...run("order", [late, early]), lumiBooksEntries: [early, late],
+      sourceMessageIndexes: { "early-source": 0, "late-source": 1, "latest": 2 } };
+    const result = injectPreparedRecall([
+      { role: "assistant", content: early.content }, { role: "assistant", content: late.content },
+      { role: "user", content: "Latest", __isChatHistory: true, sourceMessageId: "latest", sourceIndexInChat: 2 },
+    ] as LlmMessageDTO[], prepared);
+    expect(result.messages.map((message) => message.content)).toEqual([early.content, late.content, "Latest"]);
+  });
+  test("suppression includes LumiBooks summaries only in handled books", () => {
     expect(suppressedNativeEntryIds(run("mixed"), [
       { id: "chosen", world_book_id: "managed" },
       { id: "chapter", world_book_id: "managed", extensions: { lumibooks: { chatId: "chat", tier: 1 } } },
       { id: "codex", world_book_id: "managed", extensions: { lumibooks_codex: { record: "character:alice" } } },
       { id: "other", world_book_id: "unselected" },
-    ])).toEqual(["chosen", "codex"]);
+    ])).toEqual(["chosen", "chapter", "codex"]);
   });
   test("activation counts and text agree with surviving entries, and native fallback clears only activation", () => {
     const dynamic = { entryId: "dynamic", reasons: ["model_selected"] };

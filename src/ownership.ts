@@ -1,5 +1,5 @@
-/** LumiBooks owns timeline replacement; its Codex entries use ordinary lore activation. */
-export const LUMIBOOKS_TIMELINE_NOTE = "LumiBooks inserts these summaries in place of older chat messages. Recall leaves that replacement to LumiBooks; its Codex book can be selected for Recall.";
+/** LumiBooks summaries need a handoff after its timeline injector has run. */
+export const LUMIBOOKS_TIMELINE_NOTE = "Use in Recall lets Recall select this book's summaries and control their final injection. Unselected books stay with LumiBooks. Enabled constant entries still bypass model selection and JEV.";
 
 export function isLumiBooksSummaryEntry(entry: { extensions?: unknown }): boolean {
   const extensions = entry.extensions;
