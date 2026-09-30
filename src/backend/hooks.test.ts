@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS, EXTENSION_KEY } from "../shared";
+import { DEFAULT_BOOK_CONFIG, DEFAULT_CHARACTER_CONFIG, DEFAULT_GLOBAL_SETTINGS, EXTENSION_KEY } from "../shared";
 
 test("public hooks register after permission grant and retrieve without exact-selection support", async () => {
   const previous = (globalThis as any).spindle;
@@ -8,6 +8,7 @@ test("public hooks register after permission grant and retrieve without exact-se
   let permissionChanged: (() => void) | undefined;
   let malformedSelection = false;
   let emptySelection = false;
+  const selectedBooks = new Set(["character", "persona", "chat", "global"]);
   const rows = ["character", "persona", "chat", "global"].map((scope) => ({
     id: scope + "-entry", world_book_id: scope, uid: scope, comment: scope,
     key: [scope], keysecondary: [], content: "Lore for {{char}} from " + scope,
@@ -40,7 +41,8 @@ test("public hooks register after permission grant and retrieve without exact-se
     userStorage: {
       mkdir: async () => {}, setJson: async () => {},
       getJson: async (path: string, options: any) => path === "global/settings.json"
-        ? { ...DEFAULT_GLOBAL_SETTINGS, enabled: true } : options.fallback,
+        ? { ...DEFAULT_GLOBAL_SETTINGS, enabled: true }
+        : path.startsWith("books/") ? { ...DEFAULT_BOOK_CONFIG, enabled: selectedBooks.has(path.slice(6, -5)) } : options.fallback,
     },
     characters: { get: async () => character },
     chats: { get: async () => chat, getActive: async () => null },
@@ -101,6 +103,21 @@ test("public hooks register after permission grant and retrieve without exact-se
     expect(empty.loreRecallRunId).toBeString();
     expect((await hooks.activate({ ...context, entries: rows })).disabled).toHaveLength(4);
     expect((await hooks.inject(nativeMessages, empty)).messages).toEqual(nativeMessages);
+
+    emptySelection = false;
+    rows.find((row) => row.id === "global-entry")!.constant = true;
+    selectedBooks.clear();
+    selectedBooks.add("character");
+    const oneBook = await hooks.prepare(context);
+    expect((await hooks.activate({ ...context, entries: rows })).disabled).toEqual(["character-entry"]);
+    const oneInjected = await hooks.inject(nativeMessages, oneBook);
+    expect(oneInjected.breakdown).toHaveLength(1);
+    expect(oneInjected.messages[0].content).toBe("Lore for Alice from character");
+    expect(oneInjected.messages.map((message: any) => message.content)).not.toContain("Lore for Alice from global");
+    selectedBooks.clear();
+    const none = await hooks.prepare(context);
+    expect(await hooks.activate({ ...context, entries: rows })).toBeUndefined();
+    expect(await hooks.inject(nativeMessages, none)).toEqual(nativeMessages);
     // Let the feed's debounced pushes complete while the mock host is active.
     await Bun.sleep(220);
   } finally {

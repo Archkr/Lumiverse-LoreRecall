@@ -8,8 +8,8 @@ Install `https://github.com/archkr/Lumiverse-LoreRecall` through Lumiverse Exten
 
 ## Set up
 
-1. Enable Lore Recall globally in its settings and attach lorebooks to a character, chat, persona, or the global book list in Lumiverse. Newly attached and updated books are picked up automatically.
-2. Under Sources, select any lorebook to edit its tree. Read-only books can be retrieved; write-only and disabled books continue through Lumiverse's native activation.
+1. Enable Lore Recall globally in its settings and attach lorebooks to a character, chat, persona, or the global book list in Lumiverse. Attachments and book content refresh automatically.
+2. Under Sources, turn on **Use in Recall** only for the books you want Recall to retrieve. The switch saves automatically per user and per book, wherever that book is attached. Books without a saved choice start unselected; existing explicit choices are preserved. Other attached books continue through Lumiverse's native activation. Selecting a row still opens its tree for editing. Read-only books can be retrieved; write-only books stay on the native path.
 3. Organize entries with **Build from metadata** or **Build with LLM**, then edit the tree if needed. The seven fixed roots are **Characters, Locations, Items, Factions, Events, Worldbuilding, Other**. Nested branches are editable. Entries without an assignment go to Other.
 4. Choose a controller connection under Maintenance → Advanced. Lore Recall uses the active connection if no override is set.
 5. Optionally choose a JEV provider and save its API key under Maintenance → Advanced. The key is stored in encrypted per-user storage, separately from LumiWorld. Saving a key enables JEV filtering; without one, model picks pass through under the dynamic entry cap.

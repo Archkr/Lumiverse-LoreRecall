@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { DEFAULT_BOOK_CONFIG } from "../shared";
 import { mapAttachedBookSources } from "./attached";
-import { getRuntimeBooks } from "./storage";
+import { getRuntimeBooks, loadBookConfig, saveBookConfig } from "./storage";
 
 const previousSpindle = (globalThis as { spindle?: unknown }).spindle;
 
@@ -10,6 +10,24 @@ afterEach(() => {
 });
 
 describe("attached workspace book loading", () => {
+  test("Recall choices persist per book without changing tree data or other settings", async () => {
+    const saved = new Map<string, unknown>([
+      ["books/ready.json", { enabled: false, description: "Notes", permission: "read_only" }],
+      ["trees/ready.json", { nodes: { existing: {} } }],
+    ]);
+    const written: string[] = [];
+    (globalThis as any).spindle = { userStorage: {
+      getJson: async (path: string, options: any) => saved.get(path) ?? options.fallback,
+      setJson: async (path: string, value: unknown) => { written.push(path); saved.set(path, value); },
+    } };
+    expect((await loadBookConfig("new", "user")).enabled).toBe(false);
+    await saveBookConfig("ready", { enabled: true }, "user");
+    expect(await loadBookConfig("ready", "user")).toEqual({ enabled: true, description: "Notes", permission: "read_only" });
+    await saveBookConfig("ready", { enabled: false }, "user");
+    expect((await loadBookConfig("ready", "user")).enabled).toBe(false);
+    expect(written).toEqual(["books/ready.json", "books/ready.json"]);
+    expect(saved.get("trees/ready.json")).toEqual({ nodes: { existing: {} } });
+  });
   test("keeps a readable attached book when another attached book fails", async () => {
     const requested: string[] = [];
     (globalThis as { spindle?: unknown }).spindle = {

@@ -12,6 +12,14 @@ export function getRecallStatus(state: FrontendState | null): { label: string; t
     ? { label: "Retrieval on", tone: "on" }
     : { label: "Retrieval off", tone: "off" };
 }
+
+export function getRecallBookIds(state: FrontendState | null): string[] {
+  if (!state) return [];
+  return state.allWorldBooks.filter((book) => !!state.attachedBookSources[book.id]
+    && state.bookConfigs[book.id]?.enabled === true
+    && state.bookConfigs[book.id]?.permission !== "write_only"
+    && !!state.bookStatuses[book.id]).map((book) => book.id);
+}
 export type TreeSelection =
   | { kind: "category"; bookId: string; nodeId: string }
   | { kind: "entry"; bookId: string; entryId: string }

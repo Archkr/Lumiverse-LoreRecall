@@ -425,7 +425,7 @@ export function buildBookStatus(
   selectedForCharacter: boolean,
 ): BookStatus {
   const warnings: string[] = [];
-  if (!config.enabled) warnings.push("Disabled for Lore Recall");
+  if (!config.enabled) warnings.push("Not selected for Lore Recall; native activation remains active");
   if (config.permission === "write_only") warnings.push("Excluded from retrieval");
   if (!treeHasContent(tree)) warnings.push("Missing tree");
 

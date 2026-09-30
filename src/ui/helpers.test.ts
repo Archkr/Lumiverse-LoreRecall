@@ -1,6 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import type { FrontendState } from "../types";
-import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getRecallStatus, getSourceListPresentation, isRecallActive } from "./helpers";
+import { attachmentScopeSummary, filterBooks, getBookAttachmentScopes, getRecallBookIds, getRecallStatus, getSourceListPresentation, isRecallActive } from "./helpers";
+
+test("Sources keeps three attached books visible while only one is selected for Recall", () => {
+  const state = makeState({
+    attachedBookSources: { "date-a": "global", "date-b": "global", "date-c": "global" },
+    bookConfigs: {
+      "date-a": { enabled: true, description: "", permission: "read_write" },
+      "date-b": { enabled: false, description: "", permission: "read_write" },
+      "date-c": { enabled: true, description: "", permission: "write_only" },
+    },
+    bookStatuses: { "date-a": {}, "date-b": {}, "date-c": {} } as any,
+  });
+  expect(getRecallBookIds(state)).toEqual(["date-a"]);
+  expect(getSourceListPresentation(state, "").bookIds).toHaveLength(3);
+  state.bookConfigs["date-a"].enabled = false;
+  expect(getRecallBookIds(state)).toEqual([]);
+  state.bookConfigs["date-b"].enabled = true;
+  expect(getRecallBookIds(state)).toEqual(["date-b"]);
+});
 
 function makeState(overrides: Partial<FrontendState> = {}): FrontendState {
   return {

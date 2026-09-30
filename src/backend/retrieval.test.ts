@@ -26,7 +26,7 @@ function book(entries: IndexedEntry[], id = "book"): RuntimeBook {
   return {
     summary: { id, name: "Test Book", description: "", updatedAt: 1 },
     cache: { version: 2, bookId: id, bookUpdatedAt: 1, name: "Test Book", description: "", entries },
-    tree, config: { ...DEFAULT_BOOK_CONFIG },
+    tree, config: { ...DEFAULT_BOOK_CONFIG, enabled: true },
     status: { bookId: id, attachedToCharacter: false, selectedForCharacter: true,
       entryCount: entries.length, categoryCount: 7, rootEntryCount: 0, unassignedCount: 0,
       treeMissing: false, warnings: [] },

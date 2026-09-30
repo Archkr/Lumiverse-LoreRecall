@@ -1884,10 +1884,10 @@ export function buildDiagnostics(
   if (!readableBooks.length && runtimeBooks.length) {
     diagnostics.push({
       id: "no-readable-books",
-      severity: "warn",
+      severity: "info",
       bookId: null,
-      title: "No attached books available to Recall",
-      detail: "Attached books are disabled or write-only in Lore Recall, so Lumiverse will activate them natively.",
+      title: "No readable books selected for Recall",
+      detail: "Turn on Use in Recall under Sources for a book you want Recall to retrieve. Other attached books keep native activation.",
     });
   }
 
@@ -1917,7 +1917,7 @@ export function buildDiagnostics(
     const categoryNodes = Object.values(book.tree.nodes).filter((node) => node.id !== book.tree.rootId);
     const categorySummaryCount = categoryNodes.filter((node) => node.summary.trim()).length;
 
-    if (book.status.treeMissing) {
+    if (book.config.enabled && book.status.treeMissing) {
       diagnostics.push({
         id: `tree:${book.summary.id}`,
         severity: "warn",
@@ -1941,7 +1941,7 @@ export function buildDiagnostics(
         severity: "info",
         bookId: book.summary.id,
         title: "Book excluded from Recall",
-        detail: `${book.summary.name} is disabled in Lore Recall. Lumiverse will use native activation for this attached book.`,
+        detail: `${book.summary.name} is not selected for Lore Recall. Lumiverse will use native activation for this attached book.`,
       });
     }
     if (book.config.permission === "write_only") {
@@ -1954,7 +1954,7 @@ export function buildDiagnostics(
       });
     }
     const missingSummaryCount = book.cache.entries.filter((entry) => !entry.summary.trim()).length;
-    if (missingSummaryCount) {
+    if (book.config.enabled && missingSummaryCount) {
       diagnostics.push({
         id: `coverage:${book.summary.id}`,
         severity: "info",
@@ -1963,7 +1963,7 @@ export function buildDiagnostics(
         detail: `${book.summary.name} has ${missingSummaryCount} entry summary gap(s). Entry previews still let the model review them.`,
       });
     }
-    if (categoryNodes.length && categorySummaryCount < categoryNodes.length) {
+    if (book.config.enabled && categoryNodes.length && categorySummaryCount < categoryNodes.length) {
       diagnostics.push({
         id: `category-summary:${book.summary.id}`,
         severity: categorySummaryCount === 0 ? "warn" : "info",

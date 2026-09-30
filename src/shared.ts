@@ -45,7 +45,7 @@ export const DEFAULT_CHARACTER_CONFIG: CharacterRetrievalConfig = {
 };
 
 export const DEFAULT_BOOK_CONFIG: BookRetrievalConfig = {
-  enabled: true,
+  enabled: false,
   description: "",
   permission: "read_write",
 };
@@ -278,7 +278,7 @@ export function normalizeCharacterConfig(value?: Partial<CharacterRetrievalConfi
 export function normalizeBookConfig(value?: Partial<BookRetrievalConfig> | null): BookRetrievalConfig {
   const next = value ?? {};
   return {
-    enabled: next.enabled !== false,
+    enabled: next.enabled === true,
     description: typeof next.description === "string" ? next.description.trim() : "",
     permission:
       next.permission === "read_only" || next.permission === "write_only" ? next.permission : "read_write",

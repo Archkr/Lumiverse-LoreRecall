@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_BOOK_CONFIG, createEmptyTreeIndex } from "../shared";
+import { DEFAULT_BOOK_CONFIG, createEmptyTreeIndex, normalizeBookConfig } from "../shared";
 import type { RuntimeBook, IndexedEntry } from "./contracts";
 import { attachedCharacterIds, attachedWorkspaceBooks, buildAttachedWorkspaceState, mapAttachedBookScopes, mapAttachedBookSources, overlayActiveEntries, recallEligibleBooks, toWorkspaceEntry } from "./attached";
 
@@ -13,21 +13,32 @@ function book(): RuntimeBook {
   return {
     summary: { id: "book", name: "Book", description: "", updatedAt: 1 },
     cache: { version: 2, bookId: "book", bookUpdatedAt: 1, name: "Book", description: "", entries: [cached] },
-    config: { ...DEFAULT_BOOK_CONFIG }, tree: createEmptyTreeIndex("book"),
+    config: { ...DEFAULT_BOOK_CONFIG, enabled: true }, tree: createEmptyTreeIndex("book"),
     status: { bookId: "book", attachedToCharacter: true, selectedForCharacter: true,
       entryCount: 1, categoryCount: 0, rootEntryCount: 0, unassignedCount: 0, treeMissing: true, warnings: [] },
   };
 }
 
 describe("attached lorebooks", () => {
+  test("books opt in explicitly while existing saved choices remain compatible", () => {
+    expect(DEFAULT_BOOK_CONFIG.enabled).toBe(false);
+    expect(normalizeBookConfig().enabled).toBe(false);
+    expect(normalizeBookConfig({ description: "Previously configured" }).enabled).toBe(false);
+    expect(normalizeBookConfig({ enabled: true }).enabled).toBe(true);
+    const selected = book();
+    const unselected = ["second", "third"].map((id) => ({ ...book(),
+      summary: { ...book().summary, id }, config: normalizeBookConfig() }));
+    expect(recallEligibleBooks([selected, ...unselected]).map((book) => book.summary.id)).toEqual(["book"]);
+    expect(attachedWorkspaceBooks(["book", "second", "third"], [selected, ...unselected])).toHaveLength(3);
+  });
   test("leaves disabled and write-only books on native activation", () => {
     const readable = book();
     const readOnly = { ...book(), summary: { ...book().summary, id: "read-only" },
-      config: { ...DEFAULT_BOOK_CONFIG, permission: "read_only" as const } };
+      config: { ...DEFAULT_BOOK_CONFIG, enabled: true, permission: "read_only" as const } };
     const disabled = { ...book(), summary: { ...book().summary, id: "disabled" },
       config: { ...DEFAULT_BOOK_CONFIG, enabled: false } };
     const writeOnly = { ...book(), summary: { ...book().summary, id: "write-only" },
-      config: { ...DEFAULT_BOOK_CONFIG, permission: "write_only" as const } };
+      config: { ...DEFAULT_BOOK_CONFIG, enabled: true, permission: "write_only" as const } };
     expect(recallEligibleBooks([readable, readOnly, disabled, writeOnly]).map((item) => item.summary.id))
       .toEqual(["book", "read-only"]);
   });

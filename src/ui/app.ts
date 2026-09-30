@@ -45,6 +45,7 @@ import {
   getCategoryOptions,
   getEntryBreadcrumb,
   getRecallStatus,
+  getRecallBookIds,
   getSourceListPresentation,
   openSettingsWorkspace,
   readChatIdFromSettingsUpdate,
@@ -241,6 +242,25 @@ export function setup(ctx: SpindleFrontendContext) {
     const next = { ...normalizeBookConfig(currentState?.bookConfigs[bookId]) };
     bookDrafts.set(bookId, next);
     return next;
+  }
+
+  function saveBookRecallChoice(bookId: string, enabled: boolean): void {
+    getBookDraft(bookId).enabled = enabled;
+    sendToBackend(ctx, { type: "save_book_config", bookId, chatId: getLiveChatId(), patch: { enabled } });
+  }
+
+  function createBookRecallToggle(state: FrontendState, bookId: string): HTMLLabelElement {
+    const config = normalizeBookConfig(state.bookConfigs[bookId]);
+    const toggle = createSwitch("Use in Recall", config.enabled, (enabled) => saveBookRecallChoice(bookId, enabled));
+    toggle.addEventListener("click", (event) => event.stopPropagation());
+    const input = toggle.querySelector("input")!;
+    input.disabled = !state.bookStatuses[bookId] || config.permission === "write_only";
+    toggle.classList.toggle("disabled", input.disabled);
+    input.setAttribute("aria-label", `Use ${state.allWorldBooks.find((book) => book.id === bookId)?.name ?? "this book"} in Lore Recall`);
+    toggle.title = config.permission === "write_only" ? "Change this book's permission to Read + write or Read only first."
+      : !state.bookStatuses[bookId] ? "Book details must load before changing its Recall selection."
+      : "Saved automatically. This choice applies to this book wherever it is attached.";
+    return toggle;
   }
 
   function getSelectedTree(bookId: string): TreeSelection | null {
@@ -1768,6 +1788,8 @@ export function setup(ctx: SpindleFrontendContext) {
         ? ["Lore Recall is unavailable", "Check the diagnostics and Lore Recall's extension permissions. Native lorebook activation remains active."]
         : !state.globalSettings.enabled
           ? ["Lore Recall is off", "Enable Lore Recall in Retrieval settings to start recording activity."]
+          : !getRecallBookIds(state).length
+            ? ["No books selected for Recall", "Turn on Use in Recall under Sources for the books you want to retrieve."]
           : ["No retrieval activity yet", "Send a message to watch a compact stream of retrieval activity for this chat."];
       feed.appendChild(
         createEmpty(
@@ -1995,7 +2017,7 @@ export function setup(ctx: SpindleFrontendContext) {
       createSectionHead(
         "Attached sources",
         managed.length
-          ? `${Object.keys(state?.attachedBookSources ?? {}).length} attached · Recall follows Lumiverse attachments`
+          ? `${Object.keys(state?.attachedBookSources ?? {}).length} attached · ${getRecallBookIds(state).length} selected for Recall`
           : "No lorebooks available.",
       ),
     );
@@ -2042,6 +2064,7 @@ export function setup(ctx: SpindleFrontendContext) {
         pill.appendChild(pillBody);
 
         const tags = createElement("div", "lore-source-pill-tags");
+        tags.appendChild(createTag(getRecallBookIds(state!).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state!).includes(bookId) ? "good" : "neutral"));
         if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
         if (isWriteOnly) tags.appendChild(createTag("Write only", "warn"));
         if (state) for (const scope of getBookAttachmentScopes(state, bookId)) tags.appendChild(createTag(scope, "neutral"));
@@ -2120,6 +2143,7 @@ export function setup(ctx: SpindleFrontendContext) {
     actions.append(
       createStatus(getRecallStatus(state).label, getRecallStatus(state).tone),
       createTag(`${managedCount} attached`, managedCount ? "good" : "accent"),
+      createTag(`${getRecallBookIds(state).length} selected for Recall`, "accent"),
     );
     if (selectedBook) actions.appendChild(createTag(`Book: ${clipText(selectedBook.name, 26)}`, "accent"));
     if (state?.preview) {
@@ -2192,13 +2216,13 @@ export function setup(ctx: SpindleFrontendContext) {
 
       const tags = createElement("div", "lore-row-tags");
       for (const scope of getBookAttachmentScopes(state, bookId)) tags.appendChild(createTag(`Attached: ${scope}`, "good"));
-      if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
-        tags.appendChild(createTag("Native activation", "warn"));
-      }
+      tags.appendChild(createTag(getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
       if (!status) tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
       row.appendChild(tags);
-
+      const actions = createElement("div", "lore-row-actions");
+      actions.appendChild(createBookRecallToggle(state, bookId));
+      row.appendChild(actions);
       list.appendChild(row);
     }
     section.appendChild(list);
@@ -2241,7 +2265,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function renderSourcesPanel(state: FrontendState): HTMLElement {
     const section = createElement("section", "lore-section");
-    section.appendChild(createSectionHead("Sources", "Lorebooks attached in Lumiverse appear here for retrieval and tree editing."));
+    section.appendChild(createSectionHead("Sources", "Choose which attached books Lore Recall uses. Other books keep native activation. Choices save automatically."));
 
     const tools = createElement("div", "lore-cluster");
     const searchWrap = createElement("div", "lore-search-wrap");
@@ -2307,15 +2331,14 @@ export function setup(ctx: SpindleFrontendContext) {
 
       const tags = createElement("div", "lore-row-tags");
       for (const scope of getBookAttachmentScopes(state, bookId)) tags.appendChild(createTag(`Attached: ${scope}`, "good"));
-      if (state.attachedBookSources[bookId] && (state.bookConfigs[bookId]?.enabled === false || state.bookConfigs[bookId]?.permission === "write_only")) {
-        tags.appendChild(createTag("Native activation", "warn"));
-      }
+      tags.appendChild(createTag(getRecallBookIds(state).includes(bookId) ? "Selected for Recall" : "Native activation", getRecallBookIds(state).includes(bookId) ? "good" : "neutral"));
       if (!status) tags.appendChild(createTag("Details unavailable", "warn"));
       if (status?.treeMissing) tags.appendChild(createTag("No tree", "warn"));
       if (hasTree) tags.appendChild(createTag("Built", "accent"));
       row.appendChild(tags);
 
       const actions = createElement("div", "lore-row-actions");
+      actions.appendChild(createBookRecallToggle(state, bookId));
       const rebuildMessage = getRebuildMessage(bookId);
       if (isManaged && rebuildMessage) {
         const rebuild = createButton("Rebuild", "lore-btn lore-btn-sm lore-row-action-fixed", (event) => {
@@ -2898,9 +2921,10 @@ export function setup(ctx: SpindleFrontendContext) {
 
     section.appendChild(
       createSwitch("Use this book in Lore Recall when attached", draft.enabled, (next) => {
-        draft.enabled = next;
+        saveBookRecallChoice(selectedBookId!, next);
       }),
     );
+    section.appendChild(createFieldNote("The Recall choice saves automatically and applies wherever this book is attached. Unselected books use native activation."));
 
     const form = createElement("div", "lore-form");
     form.appendChild(

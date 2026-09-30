@@ -2162,6 +2162,8 @@ export const LORE_RECALL_CSS = `
   pointer-events: none;
 }
 
+.lore-switch.disabled { opacity: 0.55; cursor: not-allowed; }
+
 .lore-switch-track {
   position: relative;
   flex-shrink: 0;
@@ -2984,4 +2986,3 @@ export const LORE_RECALL_CSS = `
   opacity: 0.45;
 }
 `;
-
